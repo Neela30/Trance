@@ -2,3 +2,4 @@ volatility3
 yara-python
 python-registry
 jinja2
+psutil
