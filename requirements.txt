@@ -1,4 +1,5 @@
 volatility3
 yara-python
-python-registry
+regipy
 jinja2
+click
