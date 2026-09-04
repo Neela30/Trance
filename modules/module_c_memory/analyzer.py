@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,13 +20,63 @@ CHUNK_SIZE = 8 * 1024 * 1024
 OVERLAP = 4096
 DEFAULT_MIN_LEN = 6
 SAMPLE_CAP = 20
+SUGGESTION_MIN_HITS = 3
 
 URL_RE = re.compile(r"https?://[^\s\"'<>\\]+")
 ONION_RE = re.compile(r"[a-z2-7]{16,56}\.onion(?::\d+)?[^\s\"'<>\\]*", re.IGNORECASE)
+ONION_DOMAIN_RE = re.compile(r"[a-z2-7]{16,56}\.onion", re.IGNORECASE)
 COOKIE_RE = re.compile(r"\b(session|trance_user|trance_pref)=([^\s;\"'<>]+)")
 SEARCH_QUERY_RE = re.compile(r"\?q=([^\s&\"'<>]+)")
-CREDENTIAL_RE = re.compile(r"\b(username|password)=([^\s&\"'<>]+)")
+# Lowercase-only and literal =/JSON-":" separators on purpose: keeps this from
+# matching uppercase Windows env-var dumps (USERNAME=<os user>) and C++/JS
+# identifiers (Pass::draw_indexed, LoginManager.sys.mjs) that share a substring
+# but not the separator shape. Broadened past just username/password because
+# real login forms commonly use user/uname/login/email/passwd/pwd instead.
+CREDENTIAL_FIELDS = r"(username|user|uname|login|email|password|passwd|pwd)"
+CREDENTIAL_RE = re.compile(r"\b" + CREDENTIAL_FIELDS + r"=([^\s&\"'<>]+)")
+CREDENTIAL_JSON_RE = re.compile(r'"' + CREDENTIAL_FIELDS + r'"\s*:\s*"([^"\\]{1,200})"')
 NOISY_COOKIE_RE = re.compile(r"\b(\w*(?:session|token|auth|cookie|csrf)\w*)=([^\s;\"'<>]{1,80})", re.IGNORECASE)
+# Local download evidence: Firefox's in-memory download manager / session
+# strings carry either a file:// URI or an absolute Windows path ending in a
+# common downloaded-file extension.
+FILE_URI_RE = re.compile(r"file:///[^\s\"'<>\\]+", re.IGNORECASE)
+DOWNLOAD_PATH_RE = re.compile(
+    r"[A-Za-z]:\\(?:Users|Downloads)[^\x00-\x1f\"'<>|]*?"
+    r"\.(?:pdf|zip|rar|7z|exe|msi|docx?|xlsx?|pptx?|csv|txt|jpg|jpeg|png|gif|mp4|mp3|iso|dat)\b",
+    re.IGNORECASE,
+)
+# Values that are Firefox's own printf-style format strings ("%p", "%lld.")
+# or single/near-empty leftovers ("a", "]") rather than real captured data —
+# these otherwise drown out genuine hits under the same exact-name regex.
+_NOISE_VALUE_RE = re.compile(r"^%|^.{1,2}$")
+
+
+def _is_noise_value(value: str) -> bool:
+    return bool(_NOISE_VALUE_RE.match(value))
+
+
+# A hit under \Downloads\ (Windows' actual save-to location, incl. the
+# browser's own portable installer if the user downloaded it) is real user
+# evidence. A hit anywhere else in a file:// URI or path (Tor Browser's own
+# install dir, its extensions/omni.ja, %AppData%\...\OneDrive, etc.) is the
+# browser/OS's own files, not something the user fetched.
+_DOWNLOADS_DIR_RE = re.compile(r"downloads[\\/]", re.IGNORECASE)
+
+
+def _is_confirmed_download(value: str) -> bool:
+    return bool(_DOWNLOADS_DIR_RE.search(value))
+
+
+# Search-query / urlbar noise: Firefox's own template placeholders and
+# origin-attribute-suffixed URLs (Firefox's internal principal serialization,
+# e.g. "<url>^privateBrowsingId=1&firstPartyDomain=..." — never something a
+# person typed or navigated to).
+_TEMPLATE_NOISE_RE = re.compile(r"[{}]|searchTerms|TERMS%|^%s$")
+_ORIGIN_ATTR_RE = re.compile(r"\^privateBrowsingId|\^partitionKey|\^firstPartyDomain")
+
+
+def _is_timeline_noise(value: str) -> bool:
+    return bool(_is_noise_value(value) or _TEMPLATE_NOISE_RE.search(value) or _ORIGIN_ATTR_RE.search(value))
 
 
 def _ascii_pattern(min_len: int) -> re.Pattern[bytes]:
@@ -76,6 +127,67 @@ def verify_integrity(dump_path: Path) -> bool | None:
     return True
 
 
+def _build_timeline(
+    urls: list[dict],
+    cookies: list[dict],
+    search_queries: list[dict],
+    credentials: list[dict],
+    downloads: list[dict],
+    username: str | None,
+) -> list[dict]:
+    """Merge already-extracted evidence into one offset-ordered candidate sequence.
+
+    Offset is the only ordering signal a single memory snapshot gives us — see the
+    'timeline.disclaimer' this feeds into. This only relabels/sorts evidence already
+    surfaced elsewhere in the report; it invents nothing new.
+    """
+    first_offset: dict[str, int] = {}
+
+    def earliest(value: str, offset_hex: str) -> None:
+        off = int(offset_hex, 16)
+        if value not in first_offset or off < first_offset[value]:
+            first_offset[value] = off
+
+    events: dict[str, dict] = {}
+
+    def add_event(kind: str, label: str, value: str, offset_hex: str) -> None:
+        earliest(f"{kind}:{value}", offset_hex)
+        off = first_offset[f"{kind}:{value}"]
+        key = f"{kind}:{value}"
+        if key not in events or off < int(events[key]["offset"], 16):
+            events[key] = {"offset": hex(off), "type": kind, "detail": label}
+
+    for u in urls:
+        if _ORIGIN_ATTR_RE.search(u["value"]):
+            continue
+        add_event("page_visit", f"Visited {u['value']}", u["value"], u["offset"])
+
+    for c in cookies:
+        if c["confidence"] != "high":
+            continue
+        add_event("session", f"Session value observed: {c['name']}={c['value']}", f"{c['name']}={c['value']}", c["offset"])
+
+    for q in search_queries:
+        if _is_timeline_noise(q["value"]):
+            continue
+        label = f"Searched/typed: {q['value']}"
+        if username and username.lower() in q["value"].lower():
+            label += "  <-- matches --username"
+        add_event("search", label, q["value"], q["offset"])
+
+    for cr in credentials:
+        if cr["confidence"] != "high":
+            continue
+        add_event("credential", f"Credential submitted: {cr['field']}={cr['value']}", f"{cr['field']}={cr['value']}", cr["offset"])
+
+    for d in downloads:
+        if d["confidence"] != "high":
+            continue
+        add_event("download", f"Downloaded: {d['value']}", d["value"], d["offset"])
+
+    return sorted(events.values(), key=lambda e: int(e["offset"], 16))
+
+
 def analyze(
     dump_path: Path,
     onion: str | None,
@@ -93,6 +205,7 @@ def analyze(
     cookies: list[dict] = []
     search_queries: list[dict] = []
     credentials: list[dict] = []
+    downloads: list[dict] = []
     artifacts: list[dict] = []
 
     total_strings = 0
@@ -100,6 +213,7 @@ def analyze(
     unfiltered_url_sample: list[str] = []
     unfiltered_cookie_count = 0
     unfiltered_cookie_sample: list[str] = []
+    onion_domain_hits: Counter[str] = Counter()
 
     def record_artifact(artifact_type: str, offset: int, description: str) -> None:
         artifacts.append(
@@ -125,11 +239,16 @@ def analyze(
             if targets and any(t in url.lower() for t in targets):
                 urls.append({"offset": hex(match_offset), "value": url})
                 record_artifact("url", match_offset, url)
+        for m in ONION_DOMAIN_RE.finditer(s):
+            onion_domain_hits[m.group().lower()] += 1
 
         for m in COOKIE_RE.finditer(s):
             name, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
-            cookies.append({"offset": hex(match_offset), "name": name, "value": value})
+            confidence = "low" if _is_noise_value(value) else "high"
+            cookies.append(
+                {"offset": hex(match_offset), "name": name, "value": value, "confidence": confidence}
+            )
             record_artifact("cookie", match_offset, f"{name}={value}")
         for m in NOISY_COOKIE_RE.finditer(s):
             unfiltered_cookie_count += 1
@@ -146,8 +265,55 @@ def analyze(
         for m in CREDENTIAL_RE.finditer(s):
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
-            credentials.append({"offset": hex(match_offset), "field": field, "value": value})
+            confidence = "low" if _is_noise_value(value) else "high"
+            credentials.append(
+                {"offset": hex(match_offset), "field": field, "value": value, "shape": "form", "confidence": confidence}
+            )
             record_artifact("credential", match_offset, f"{field}={value}")
+        for m in CREDENTIAL_JSON_RE.finditer(s):
+            field, value = m.group(1), m.group(2)
+            match_offset = offset + m.start()
+            confidence = "low" if _is_noise_value(value) else "high"
+            credentials.append(
+                {"offset": hex(match_offset), "field": field, "value": value, "shape": "json", "confidence": confidence}
+            )
+            record_artifact("credential", match_offset, f'"{field}":"{value}"')
+
+        for m in list(FILE_URI_RE.finditer(s)) + list(DOWNLOAD_PATH_RE.finditer(s)):
+            value = m.group()
+            match_offset = offset + m.start()
+            confidence = "high" if _is_confirmed_download(value) else "low"
+            downloads.append({"offset": hex(match_offset), "value": value, "confidence": confidence})
+            record_artifact("download", match_offset, value)
+
+    # Tor Browser itself talks to a handful of bundled default onion services
+    # (search engine, connectivity checks) whether or not the user does
+    # anything — those show up here too and are expected background noise,
+    # not evidence of user action. Capped and left unlabeled rather than
+    # guessing which specific v3 addresses are "default" (those can rotate).
+    targeting_suggestions = [
+        {"onion": domain, "hit_count": count}
+        for domain, count in onion_domain_hits.most_common(10)
+        if count >= SUGGESTION_MIN_HITS and not any(domain in t for t in targets)
+    ]
+
+    def _dedup_high_confidence(items: list[dict], value_key: str) -> list[dict]:
+        seen: dict[str, dict] = {}
+        for item in items:
+            if item.get("confidence") != "high":
+                continue
+            key = f"{item.get('name') or item.get('field', '')}={item[value_key]}"
+            if key not in seen:
+                seen[key] = {**item, "occurrences": 1}
+            else:
+                seen[key]["occurrences"] += 1
+        return sorted(seen.values(), key=lambda i: -i["occurrences"])
+
+    key_cookies = _dedup_high_confidence(cookies, "value")
+    key_credentials = _dedup_high_confidence(credentials, "value")
+    key_downloads = sorted({d["value"] for d in downloads if d["confidence"] == "high"})
+
+    timeline = _build_timeline(urls, cookies, search_queries, credentials, downloads, username)
 
     return {
         "dump": {
@@ -157,11 +323,29 @@ def analyze(
             "integrity_verified": integrity_verified,
         },
         "targeting": {"onion": onion, "host": host, "username": username},
+        "targeting_suggestions": targeting_suggestions,
+        "key_findings": {
+            "note": "Deduplicated, high-confidence hits only — start here. Full detail incl. low-confidence "
+            "noise is in 'targeted' below.",
+            "session_cookies": key_cookies,
+            "credentials": key_credentials,
+            "downloads": key_downloads,
+            "target_urls_seen": sorted({u["value"] for u in urls}),
+        },
         "targeted": {
             "urls": urls,
             "cookies": cookies,
             "search_queries": search_queries,
             "credentials": credentials,
+            "downloads": downloads,
+        },
+        "timeline": {
+            "disclaimer": "Ordered by memory offset ONLY — not a verified chronological timeline. Physical "
+            "memory layout has no guaranteed relationship to time (allocator reuse and region placement can "
+            "put older or newer data anywhere in the address space). Treat as a candidate sequence for "
+            "investigator review, not proven fact — cross-reference real timestamped sources (browser "
+            "history/places.sqlite, filesystem MACB times) before relying on the order.",
+            "events": timeline,
         },
         "unfiltered": {
             "note": "Unanchored context only — includes Firefox's own code/strings and default onion list. Not evidence on its own.",
@@ -176,6 +360,7 @@ def analyze(
 
 def format_summary(report: dict) -> str:
     d, t, tg, u = report["dump"], report["targeting"], report["targeted"], report["unfiltered"]
+    kf, sugg, tl = report["key_findings"], report["targeting_suggestions"], report["timeline"]
     lines = [
         "=== TRANCE Memory Analysis ===",
         f"Dump: {d['path']} ({d['size_bytes']:,} bytes)",
@@ -186,18 +371,54 @@ def format_summary(report: dict) -> str:
         }[d["integrity_verified"]],
         f"Targeting: onion={t['onion']!r} host={t['host']!r} username={t['username']!r}",
         "",
-        f"--- Targeted URLs ({len(tg['urls'])}) ---",
+        "=== KEY FINDINGS (deduplicated, high-confidence) ===",
     ]
+    if sugg:
+        lines.append(
+            "[!] Onion address(es) seen repeatedly in memory but NOT covered by --onion/--host "
+            "(note: Tor Browser's own bundled default services — search engine, connectivity checks — "
+            "also land here and aren't necessarily user activity; check before assuming a missed target):"
+        )
+        lines += [f"    {s['onion']}  (seen {s['hit_count']}x) — re-run with --onion {s['onion']}" for s in sugg]
+    lines.append(f"--- Session/cookie values ({len(kf['session_cookies'])} unique) ---")
+    lines += [
+        f"  [{i['offset']}] {i['name']}={i['value']}" + (f"  (x{i['occurrences']})" if i["occurrences"] > 1 else "")
+        for i in kf["session_cookies"]
+    ]
+    lines.append(f"--- Credentials ({len(kf['credentials'])} unique) ---")
+    lines += [
+        f"  [{i['offset']}] {i['field']}={i['value']} [{i['shape']}]"
+        + (f"  (x{i['occurrences']})" if i["occurrences"] > 1 else "")
+        for i in kf["credentials"]
+    ]
+    lines.append(f"--- Downloaded files ({len(kf['downloads'])} unique) ---")
+    lines += [f"  {v}" for v in kf["downloads"]]
+    lines.append(f"--- Target URLs seen ({len(kf['target_urls_seen'])} unique) ---")
+    lines += [f"  {v}" for v in kf["target_urls_seen"]]
+
+    lines += [
+        "",
+        "=== CANDIDATE ACTIVITY SEQUENCE (offset-order, NOT a verified timeline) ===",
+        f"  {tl['disclaimer']}",
+        "",
+    ]
+    lines += [f"  {i + 1:>3}. [{e['offset']}] {e['detail']}" for i, e in enumerate(tl["events"])]
+
+    lines += ["", "=== FULL DETAIL (includes low-confidence noise) ===", f"--- Targeted URLs ({len(tg['urls'])}) ---"]
     lines += [f"  [{i['offset']}] {i['value']}" for i in tg["urls"]]
     lines.append(f"--- Cookies ({len(tg['cookies'])}) ---")
-    lines += [f"  [{i['offset']}] {i['name']}={i['value']}" for i in tg["cookies"]]
+    lines += [f"  [{i['offset']}] {i['name']}={i['value']}  ({i['confidence']})" for i in tg["cookies"]]
     lines.append(f"--- Search queries ({len(tg['search_queries'])}) ---")
     lines += [
         f"  [{i['offset']}] q={i['value']}" + ("  <-- matches --username" if i["matches_username"] else "")
         for i in tg["search_queries"]
     ]
     lines.append(f"--- Credential submissions ({len(tg['credentials'])}) ---")
-    lines += [f"  [{i['offset']}] {i['field']}={i['value']}" for i in tg["credentials"]]
+    lines += [
+        f"  [{i['offset']}] {i['field']}={i['value']} [{i['shape']}]  ({i['confidence']})" for i in tg["credentials"]
+    ]
+    lines.append(f"--- Downloads ({len(tg['downloads'])}) ---")
+    lines += [f"  [{i['offset']}] {i['value']}  ({i['confidence']})" for i in tg["downloads"]]
     lines += [
         "",
         "--- Unfiltered context (NOISY, not evidence) ---",
