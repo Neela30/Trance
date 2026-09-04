@@ -20,6 +20,51 @@ scenarios.
 
 **Status:** In development · **Platform:** Windows 10/11 (target) · 
 
+## Running the pipeline
+
+`main.py` runs every module, merges their output into one `findings.json`, and
+renders the HTML case report from it:
+
+```
+python main.py --case demo --output-dir output \
+    --dump captures/firefox_<pid>_<ts>.bin \
+    --onion <address>.onion --host 127.0.0.1:5000 --username alice
+```
+
+Writes to `output/demo/`:
+
+- `findings.json` — every module's status plus a flattened, cross-module
+  `artifacts` list (each entry carries its `module`), and each module's
+  richer structured output under `modules.<name>.details`.
+- `report.html` — the case report, rendered deterministically from
+  `findings.json` (`report.py` + `report_template.html.j2`, Jinja2). No
+  external services, no network, no LLM: every interpretive note in the
+  report is a fixed, auditable rule.
+- `custody.json` — chain-of-custody entries for the evidence analyzed and
+  the outputs generated (`core.custody_log`).
+
+Modules are isolated: one that is not implemented yet, given no evidence
+this run, or that raises is recorded with that status and does not stop
+the others. Exit code is `2` if any module errored, else `0`.
+
+### Module contract
+
+Each `modules/<name>/__init__.py` exposes
+
+```python
+def run(config: core.config.TranceConfig, **kwargs) -> core.schema.ModuleResult
+```
+
+returning `ModuleResult(module, status, artifacts, details, message)` where
+`status` is one of `ok` / `skipped` / `not_implemented` / `error`,
+`artifacts` is a list of `core.schema.Artifact`, and `details` is any
+module-specific dict worth keeping verbatim in `findings.json`. Module-specific
+CLI flags are declared in `main.py` and passed through as `kwargs`. To
+contribute a custom section to the HTML report, register a presenter in
+`report.py`'s `PRESENTERS`; without one a module gets a generic artifact table.
+
+Modules A (registry) and B (disk) currently return `not_implemented`.
+
 ## Module C — Memory forensics
 
 Split into two tools because live process memory only exists while the
@@ -75,7 +120,8 @@ python -m modules.module_c_memory.analyzer captures/firefox_<pid>_<ts>.bin \
 - If a `.sha256` sidecar sits next to the `.bin`, integrity is verified
   before analysis and a mismatch aborts with an error.
 - Emits both a JSON report (`<dump>.report.json`) and a readable summary
-  on stdout.
+  on stdout. This standalone run is for quick re-targeting of one dump; the
+  HTML case report comes from `main.py` (see *Running the pipeline*).
 
 ### Building the dumper as a standalone `.exe`
 

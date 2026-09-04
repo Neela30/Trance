@@ -22,8 +22,17 @@ DEFAULT_MIN_LEN = 6
 SAMPLE_CAP = 20
 SUGGESTION_MIN_HITS = 3
 
-URL_RE = re.compile(r"https?://[^\s\"'<>\\]+")
-ONION_RE = re.compile(r"[a-z2-7]{16,56}\.onion(?::\d+)?[^\s\"'<>\\]*", re.IGNORECASE)
+# Trailing charset stops at , ^ | ] ) } as well as whitespace/quotes: Firefox's in-memory
+# cache and principal keys wrap URLs in exactly those ("<host>,p,:http://…",
+# "<url>^privateBrowsingId=1", "<host>:0|<hash>"), and letting them through turned one
+# cache key per page into a fake "URL" finding.
+URL_RE = re.compile(r"https?://[^\s\"'<>\\,^|\]\)\}]+")
+# A scheme-less onion only counts as a navigation when it carries a /path; a bare
+# domain is a mention (cache key, default list, search-engine query), not a visit.
+ONION_RE = re.compile(
+    r"(?P<host>[a-z2-7]{16,56}\.onion(?::\d{1,5})?)(?P<path>/[^\s\"'<>\\,^|\]\)\}]*)?",
+    re.IGNORECASE,
+)
 ONION_DOMAIN_RE = re.compile(r"[a-z2-7]{16,56}\.onion", re.IGNORECASE)
 COOKIE_RE = re.compile(r"\b(session|trance_user|trance_pref)=([^\s;\"'<>]+)")
 SEARCH_QUERY_RE = re.compile(r"\?q=([^\s&\"'<>]+)")
@@ -55,12 +64,13 @@ def _is_noise_value(value: str) -> bool:
     return bool(_NOISE_VALUE_RE.match(value))
 
 
-# A hit under \Downloads\ (Windows' actual save-to location, incl. the
-# browser's own portable installer if the user downloaded it) is real user
-# evidence. A hit anywhere else in a file:// URI or path (Tor Browser's own
-# install dir, its extensions/omni.ja, %AppData%\...\OneDrive, etc.) is the
-# browser/OS's own files, not something the user fetched.
-_DOWNLOADS_DIR_RE = re.compile(r"downloads[\\/]", re.IGNORECASE)
+# A hit under \Users\<name>\Downloads\ (Windows' actual save-to location,
+# incl. the browser's own portable installer if the user downloaded it) is
+# real user evidence. Anchored to the full Users/<name>/Downloads shape, not
+# a bare "downloads" substring — Firefox's own UI resources use "downloads"
+# as a path segment too (chrome/.../skin/.../downloads/downloads.svg is an
+# icon, not a saved file) and would otherwise false-positive as high confidence.
+_DOWNLOADS_DIR_RE = re.compile(r"users[\\/][^\\/]+[\\/]downloads[\\/]", re.IGNORECASE)
 
 
 def _is_confirmed_download(value: str) -> bool:
@@ -72,11 +82,57 @@ def _is_confirmed_download(value: str) -> bool:
 # e.g. "<url>^privateBrowsingId=1&firstPartyDomain=..." — never something a
 # person typed or navigated to).
 _TEMPLATE_NOISE_RE = re.compile(r"[{}]|searchTerms|TERMS%|^%s$")
-_ORIGIN_ATTR_RE = re.compile(r"\^privateBrowsingId|\^partitionKey|\^firstPartyDomain")
+ORIGIN_ATTR_RE = re.compile(r"\^privateBrowsingId|\^partitionKey|\^firstPartyDomain")
 
 
-def _is_timeline_noise(value: str) -> bool:
-    return bool(_is_noise_value(value) or _TEMPLATE_NOISE_RE.search(value) or _ORIGIN_ATTR_RE.search(value))
+# Anything with "mozilla" in it that surfaced via a ?q= is Firefox's own baked-in
+# telemetry/config, not a person typing.
+_BROWSER_INTERNAL_RE = re.compile(r"mozilla", re.IGNORECASE)
+
+
+# Public: report.py reuses this to dedupe search-term evidence for the same reason.
+def is_timeline_noise(value: str) -> bool:
+    if _is_noise_value(value) or _TEMPLATE_NOISE_RE.search(value) or ORIGIN_ATTR_RE.search(value):
+        return True
+    if _BROWSER_INTERNAL_RE.search(value):
+        return True
+    # "*?1", "\" and friends: nothing a person would type into a search box.
+    return sum(ch.isalnum() for ch in value) < 3
+
+
+# Automatic page-load requests. Real evidence that the page loaded, but not a user
+# action — kept in the JSON, kept out of the site map and the activity sequence.
+ASSET_EXTENSIONS = (
+    ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+    ".woff", ".woff2", ".ttf",
+)
+
+
+def _is_asset_path(path: str) -> bool:
+    return path.split("?", 1)[0].lower().endswith(ASSET_EXTENSIONS)
+
+
+def _split_url(url: str) -> tuple[str, str]:
+    """(host, path?query) for a schemed URL or a scheme-less onion match."""
+    m = re.match(r"(?:https?://)?([^/?#]+)(.*)", url)
+    if not m:
+        return url.lower(), "/"
+    host, rest = m.group(1).lower(), m.group(2)
+    if rest and not rest.startswith("/"):
+        rest = "/" + rest
+    return host, rest or "/"
+
+
+def _matches_target(host: str, targets: list[str]) -> bool:
+    """Host-anchored, not substring: a search-engine URL that merely mentions the target
+    in its query string is not a visit to the target."""
+    for t in targets:
+        if ":" in t:
+            if host == t:
+                return True
+        elif host.split(":", 1)[0] == t:
+            return True
+    return False
 
 
 def _ascii_pattern(min_len: int) -> re.Pattern[bytes]:
@@ -157,10 +213,15 @@ def _build_timeline(
         if key not in events or off < int(events[key]["offset"], 16):
             events[key] = {"offset": hex(off), "type": kind, "detail": label}
 
+    # Key on host+path so the schemed and scheme-less forms of one visit collapse to one
+    # event; show just the path when every hit is on the same host.
+    hosts = {u["host"] for u in urls}
     for u in urls:
-        if _ORIGIN_ATTR_RE.search(u["value"]):
+        if u["asset"]:
             continue
-        add_event("page_visit", f"Visited {u['value']}", u["value"], u["offset"])
+        canonical = u["host"] + u["path"]
+        shown = u["path"] if len(hosts) == 1 else canonical
+        add_event("page_visit", f"Visited {shown}", canonical, u["offset"])
 
     for c in cookies:
         if c["confidence"] != "high":
@@ -168,7 +229,7 @@ def _build_timeline(
         add_event("session", f"Session value observed: {c['name']}={c['value']}", f"{c['name']}={c['value']}", c["offset"])
 
     for q in search_queries:
-        if _is_timeline_noise(q["value"]):
+        if is_timeline_noise(q["value"]):
             continue
         label = f"Searched/typed: {q['value']}"
         if username and username.lower() in q["value"].lower():
@@ -230,14 +291,33 @@ def analyze(
     for offset, s in iter_strings(dump_path, min_len=min_len):
         total_strings += 1
 
-        for m in list(URL_RE.finditer(s)) + list(ONION_RE.finditer(s)):
-            url = m.group()
-            match_offset = offset + m.start()
+        url_spans: list[tuple[int, int]] = []
+        url_hits: list[tuple[int, str, str, str]] = []
+        for m in URL_RE.finditer(s):
+            url_spans.append((m.start(), m.end()))
+            host, path = _split_url(m.group())
+            url_hits.append((m.start(), m.group(), host, path))
+        for m in ONION_RE.finditer(s):
+            # Inside a full URL it's already covered by that URL (or is a search engine
+            # merely mentioning it); without a path it's a mention, not a visit.
+            if not m.group("path") or any(a <= m.start() < b for a, b in url_spans):
+                continue
+            url_hits.append((m.start(), m.group(), m.group("host").lower(), m.group("path")))
+        for start, url, host, path in url_hits:
+            match_offset = offset + start
             unfiltered_url_count += 1
             if len(unfiltered_url_sample) < SAMPLE_CAP:
                 unfiltered_url_sample.append(url)
-            if targets and any(t in url.lower() for t in targets):
-                urls.append({"offset": hex(match_offset), "value": url})
+            if targets and _matches_target(host, targets):
+                urls.append(
+                    {
+                        "offset": hex(match_offset),
+                        "value": url,
+                        "host": host,
+                        "path": path,
+                        "asset": _is_asset_path(path),
+                    }
+                )
                 record_artifact("url", match_offset, url)
         for m in ONION_DOMAIN_RE.finditer(s):
             onion_domain_hits[m.group().lower()] += 1
@@ -330,7 +410,7 @@ def analyze(
             "session_cookies": key_cookies,
             "credentials": key_credentials,
             "downloads": key_downloads,
-            "target_urls_seen": sorted({u["value"] for u in urls}),
+            "target_urls_seen": sorted({u["host"] + u["path"] for u in urls}),
         },
         "targeted": {
             "urls": urls,
@@ -462,6 +542,7 @@ def main() -> None:
 
     print(format_summary(report))
     print(f"\n[*] JSON report written to {output_path}")
+    print("[*] For the HTML case report (all modules, findings.json), run main.py from the repo root.")
 
 
 if __name__ == "__main__":
