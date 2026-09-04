@@ -55,12 +55,13 @@ def _is_noise_value(value: str) -> bool:
     return bool(_NOISE_VALUE_RE.match(value))
 
 
-# A hit under \Downloads\ (Windows' actual save-to location, incl. the
-# browser's own portable installer if the user downloaded it) is real user
-# evidence. A hit anywhere else in a file:// URI or path (Tor Browser's own
-# install dir, its extensions/omni.ja, %AppData%\...\OneDrive, etc.) is the
-# browser/OS's own files, not something the user fetched.
-_DOWNLOADS_DIR_RE = re.compile(r"downloads[\\/]", re.IGNORECASE)
+# A hit under \Users\<name>\Downloads\ (Windows' actual save-to location,
+# incl. the browser's own portable installer if the user downloaded it) is
+# real user evidence. Anchored to the full Users/<name>/Downloads shape, not
+# a bare "downloads" substring — Firefox's own UI resources use "downloads"
+# as a path segment too (chrome/.../skin/.../downloads/downloads.svg is an
+# icon, not a saved file) and would otherwise false-positive as high confidence.
+_DOWNLOADS_DIR_RE = re.compile(r"users[\\/][^\\/]+[\\/]downloads[\\/]", re.IGNORECASE)
 
 
 def _is_confirmed_download(value: str) -> bool:
@@ -72,11 +73,13 @@ def _is_confirmed_download(value: str) -> bool:
 # e.g. "<url>^privateBrowsingId=1&firstPartyDomain=..." — never something a
 # person typed or navigated to).
 _TEMPLATE_NOISE_RE = re.compile(r"[{}]|searchTerms|TERMS%|^%s$")
-_ORIGIN_ATTR_RE = re.compile(r"\^privateBrowsingId|\^partitionKey|\^firstPartyDomain")
+# Public (no leading underscore): report.py reuses this to build a clean site map too.
+ORIGIN_ATTR_RE = re.compile(r"\^privateBrowsingId|\^partitionKey|\^firstPartyDomain")
 
 
-def _is_timeline_noise(value: str) -> bool:
-    return bool(_is_noise_value(value) or _TEMPLATE_NOISE_RE.search(value) or _ORIGIN_ATTR_RE.search(value))
+# Public: report.py reuses this to dedupe search-term evidence for the same reason.
+def is_timeline_noise(value: str) -> bool:
+    return bool(_is_noise_value(value) or _TEMPLATE_NOISE_RE.search(value) or ORIGIN_ATTR_RE.search(value))
 
 
 def _ascii_pattern(min_len: int) -> re.Pattern[bytes]:
@@ -158,7 +161,7 @@ def _build_timeline(
             events[key] = {"offset": hex(off), "type": kind, "detail": label}
 
     for u in urls:
-        if _ORIGIN_ATTR_RE.search(u["value"]):
+        if ORIGIN_ATTR_RE.search(u["value"]):
             continue
         add_event("page_visit", f"Visited {u['value']}", u["value"], u["offset"])
 
@@ -168,7 +171,7 @@ def _build_timeline(
         add_event("session", f"Session value observed: {c['name']}={c['value']}", f"{c['name']}={c['value']}", c["offset"])
 
     for q in search_queries:
-        if _is_timeline_noise(q["value"]):
+        if is_timeline_noise(q["value"]):
             continue
         label = f"Searched/typed: {q['value']}"
         if username and username.lower() in q["value"].lower():
@@ -446,6 +449,11 @@ def main() -> None:
         "--min-length", type=int, default=DEFAULT_MIN_LEN, help="Minimum string length to extract (default: %(default)s)"
     )
     parser.add_argument("--output", type=Path, help="Path for the JSON report (default: <dump>.report.json)")
+    parser.add_argument(
+        "--html-report",
+        type=Path,
+        help="Also render a structured, human-readable HTML report to this path (deterministic, offline, no LLM/API involved — see report.py)",
+    )
     args = parser.parse_args()
 
     if not args.onion and not args.host:
@@ -462,6 +470,12 @@ def main() -> None:
 
     print(format_summary(report))
     print(f"\n[*] JSON report written to {output_path}")
+
+    if args.html_report:
+        from modules.module_c_memory.report import render_html_report
+
+        args.html_report.write_text(render_html_report(report))
+        print(f"[*] HTML report written to {args.html_report}")
 
 
 if __name__ == "__main__":
