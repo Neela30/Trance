@@ -60,6 +60,23 @@ The first real VM report exposed 4 analyzer gaps, all fixed in `analyzer.py`:
 
 **Added `report.py` + `report_template.html.j2`** — deterministic, offline HTML report rendering, no LLM/API involved anywhere (this was a deliberate choice after discussing it: a memory dump is evidentiary, a fixed auditable rule beats a model's judgment call). Wired into `analyzer.py` via `--html-report PATH`. First real use of `jinja2`, which had sat unused in `requirements.txt` since the initial commit. Generalizes what was manually written up in a one-off case report: clean site-map extraction (`urllib.parse`), near-duplicate path flagging (`difflib.get_close_matches` — catches typo/probe variants like `/favicon.ico` vs `/favicon.icox` generically, not hardcoded), a generic base64url-JSON session-token decoder (not tied to this app's token shape), download-to-endpoint correlation by filename, and the two offset-based interpretive callouts (page-clustering, cookie-storage-region) as fixed distance-threshold rules (`CLUSTER_GAP_BYTES`, `FAR_FROM_START_MULTIPLIER` — tune per-case if a dump doesn't fit). Not yet run for the same reason as above — reviewed by eye only.
 
+## Pipeline restructure (2026-09-04, later the same day)
+
+Findings + report generation moved to the repo root and generalised across modules:
+
+- `core/schema.py` — added `ModuleResult(module, status, artifacts, details, message)`; the contract every module's `run()` returns. Statuses: `ok` / `skipped` / `not_implemented` / `error`.
+- `modules/<name>/__init__.py` — each now exposes `run(config, **kwargs) -> ModuleResult`. A and B are honest `not_implemented` stubs (teammates' branches own the real code). C wraps `analyzer.analyze()`; `skipped` if no `--dump`; pops `artifacts` out of the analyze dict into `ModuleResult.artifacts` so findings.json doesn't duplicate them.
+- `findings.py` (root) — `build_findings(config, results)` / `write_findings()` / `load_findings()`. Schema documented in its docstring: per-module `status`/`message`/`artifact_count`/`details`, plus one flattened cross-module `artifacts` array.
+- `report.py` (root) — `render_report(findings)` / `write_report()`. Owns the Jinja2 env and `report_template.html.j2` (root). Module-specific presentation is looked up in `PRESENTERS`; anything else gets a generic artifact table + status.
+- `modules/module_c_memory/report.py` — **repurposed**, no longer renders. Now `build_context(details) -> dict` (site map, near-dup paths, token decode, download↔endpoint match, timeline flags). Same filename because `git rm`/`git mv` were blocked in the session that did this (same safety-check block as `python3`); it kept the name rather than leaving a dangling duplicate.
+- `main.py` (root) — CLI orchestrator. `--case` (required), `--output-dir` (default `output/`), `--evidence-dir`, `--verbose`, plus module C's `--dump/--onion/--host/--username`. Imports each module via `importlib` inside try/except so a Windows-only import on a teammate's branch can't kill the run on Linux. Writes `findings.json`, `report.html`, `custody.json` (uses `core.custody_log` — entries for the dump analyzed + both outputs). Exit 2 if any module errored.
+- `analyzer.py` — dropped the `--html-report` flag; standalone run is JSON + stdout only, HTML comes from `main.py`.
+- `.gitignore` — added `/output/` (real-evidence findings/reports must never be committed, same rule as `/captures/`).
+
+**Leftover to clean up by hand**: `modules/module_c_memory/report_template.html.j2` is now unused (root template replaced it) but couldn't be deleted in-session — `git rm modules/module_c_memory/report_template.html.j2`.
+
+**Still not executed** — same session block. Next session: `python main.py --case vm-run-1 --dump ../vm-shared/firefox_5368_20260904T050334Z.bin --onion krf3io7j4x5hbzhyi5hnbwr4cocnya5ri3mg3k3sqt7xucmpkeztjvad.onion --host 127.0.0.1:5000 --username sunimalaya` from the repo root, fix whatever breaks, then commit.
+
 ## Quick reference
 
 ```
