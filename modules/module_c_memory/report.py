@@ -1,10 +1,14 @@
-"""Deterministic, offline HTML report rendering for an analyzer.py report dict.
+"""Module C's contribution to the case report: turn analyzer output into presentation context.
 
-No LLM or external API involved anywhere in this module. Every "interpretation" here
-(page-cluster grouping, the cookie-storage-region caveat, near-duplicate path flagging)
-is a fixed rule applied to evidence analyzer.py already extracted — not an inference call.
-That's a deliberate choice, not a missing feature: a memory dump is evidentiary, and a
-fixed, auditable rule beats a model's judgment call for something that needs to be
+This does not render anything — the root-level `report.py` owns the template and the
+HTML. This only prepares the memory-specific view of `details` (the dict analyze()
+returns, as stored under modules.module_c_memory.details in findings.json).
+
+Deterministic and offline — no LLM or external API involved anywhere. Every
+"interpretation" here (page-cluster grouping, the cookie-storage-region caveat,
+near-duplicate path flagging) is a fixed rule applied to evidence analyzer.py already
+extracted, not an inference call. That's deliberate: a memory dump is evidentiary, and a
+fixed, auditable rule beats a model's judgment call for something that has to be
 defensible later. Tune the thresholds below per-case if they don't fit a given dump.
 """
 
@@ -14,15 +18,9 @@ import base64
 import difflib
 import json
 from collections import Counter
-from pathlib import Path
 from urllib.parse import urlsplit
 
-from jinja2 import Environment, FileSystemLoader
-
 from modules.module_c_memory.analyzer import ORIGIN_ATTR_RE, is_timeline_noise
-
-TEMPLATE_DIR = Path(__file__).parent
-TEMPLATE_NAME = "report_template.html.j2"
 
 # Two consecutive timeline events this close together in the address space more likely
 # reflect one rendered page's set of links than two separate sequential navigations.
@@ -66,8 +64,8 @@ def _flag_near_duplicate_paths(paths: list[str]) -> dict[str, list[str]]:
 
 def _try_decode_jwt_like_payload(value: str) -> str | None:
     """If `value` has a dot-separated base64url segment whose first part is JSON
-    (Flask/itsdangerous session cookies, JWTs), return that JSON pretty-printed.
-    Not tied to any one app's token shape — just the generic base64url.JSON convention."""
+    (Flask/itsdangerous session cookies, JWTs), return that JSON. Not tied to any one
+    app's token shape — just the generic base64url.JSON convention."""
     segment = value.split(".", 1)[0]
     padded = segment + "=" * (-len(segment) % 4)
     try:
@@ -83,9 +81,9 @@ def _annotate_session_cookies(cookies: list[dict]) -> list[dict]:
 
 
 def _match_download_to_site_map(download_value: str, site_map: list[str]) -> str | None:
-    """If a confirmed local download's filename matches a recovered path's last
-    segment (e.g. local 'evidence_report.txt' <-> '/download/evidence_report.txt'),
-    surface that correlation — it's the strongest evidence a link was actually used."""
+    """If a confirmed local download's filename matches a recovered path's last segment
+    (local 'evidence_report.txt' <-> '/download/evidence_report.txt'), surface that
+    correlation — it's the strongest evidence a link was actually used."""
     name = download_value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
     for path in site_map:
         if path.split("?", 1)[0].rsplit("/", 1)[-1] == name:
@@ -129,35 +127,21 @@ def _annotate_timeline(events: list[dict]) -> list[dict]:
     return annotated
 
 
-def render_html_report(report: dict) -> str:
-    """Render `report` (analyzer.analyze()'s return value) to a self-contained HTML report."""
-    env = Environment(
-        loader=FileSystemLoader(str(TEMPLATE_DIR)),
-        # Not select_autoescape(["html"]) — it decides by filename suffix, and this
-        # template is named *.html.j2, which doesn't match. This template only ever
-        # renders HTML, so escape unconditionally instead of guessing from the name.
-        autoescape=True,
-        trim_blocks=True,
-        lstrip_blocks=True,
-    )
-    template = env.get_template(TEMPLATE_NAME)
-
-    site_map = _clean_site_map(report["targeted"]["urls"])
-    near_duplicates = _flag_near_duplicate_paths(site_map)
-    events = _annotate_timeline(report["timeline"]["events"])
-    session_cookies = _annotate_session_cookies(report["key_findings"]["session_cookies"])
-    downloads = _annotate_downloads(report["key_findings"]["downloads"], site_map)
-    search_terms = _search_term_frequencies(report["targeted"]["search_queries"], report["targeting"]["username"])
-
-    return template.render(
-        report=report,
-        site_map=site_map,
-        near_duplicates=near_duplicates,
-        events=events,
-        session_cookies=session_cookies,
-        downloads=downloads,
-        search_terms=search_terms,
-        any_clustered=any(e["clustered_with_prev"] for e in events),
-        any_far_from_start=any(e["far_from_start"] for e in events),
-        cluster_gap_bytes=CLUSTER_GAP_BYTES,
-    )
+def build_context(details: dict) -> dict:
+    """Presentation context for the memory section of the case report."""
+    site_map = _clean_site_map(details["targeted"]["urls"])
+    events = _annotate_timeline(details["timeline"]["events"])
+    return {
+        "details": details,
+        "site_map": site_map,
+        "near_duplicates": _flag_near_duplicate_paths(site_map),
+        "events": events,
+        "session_cookies": _annotate_session_cookies(details["key_findings"]["session_cookies"]),
+        "downloads": _annotate_downloads(details["key_findings"]["downloads"], site_map),
+        "search_terms": _search_term_frequencies(
+            details["targeted"]["search_queries"], details["targeting"]["username"]
+        ),
+        "any_clustered": any(e["clustered_with_prev"] for e in events),
+        "any_far_from_start": any(e["far_from_start"] for e in events),
+        "cluster_gap_bytes": CLUSTER_GAP_BYTES,
+    }
