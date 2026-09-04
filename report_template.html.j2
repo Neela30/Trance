@@ -253,6 +253,9 @@
       {% endfor %}
     </p>
     {% endif %}
+    {% if memory.assets %}
+    <p class="note" style="margin-top:10px;">+ {{ memory.assets|length }} automatic asset request{{ "s" if memory.assets|length != 1 }} (<span class="mono">{{ memory.assets|join(", ") }}</span>) — page-load traffic, not user actions; kept out of the sequence below.</p>
+    {% endif %}
   </section>
 
   <section>

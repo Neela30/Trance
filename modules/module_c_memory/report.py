@@ -18,9 +18,8 @@ import base64
 import difflib
 import json
 from collections import Counter
-from urllib.parse import urlsplit
 
-from modules.module_c_memory.analyzer import ORIGIN_ATTR_RE, is_timeline_noise
+from modules.module_c_memory.analyzer import is_timeline_noise
 
 # Two consecutive timeline events this close together in the address space more likely
 # reflect one rendered page's set of links than two separate sequential navigations.
@@ -31,31 +30,27 @@ CLUSTER_GAP_BYTES = 16 * 1024
 # where that data type happens to live in memory, not when it was created.
 FAR_FROM_START_MULTIPLIER = 10
 
-# How similar two recovered paths need to be (0-1, difflib ratio) to flag one as a
-# possible typo/probe variant of the other, e.g. "/favicon.ico" vs "/favicon.icox".
-NEAR_DUPLICATE_CUTOFF = 0.85
+# How similar two recovered paths need to be (0-1, difflib ratio) and how close in
+# length, to flag one as a possible typo/probe variant of the other — tuned to catch
+# "/favicon.ico" vs "/favicon.icox" without pairing every path that shares a prefix.
+NEAR_DUPLICATE_CUTOFF = 0.9
+NEAR_DUPLICATE_MAX_LEN_DIFF = 2
 
 
-def _clean_site_map(urls: list[dict]) -> list[str]:
-    """Canonical path+query for each recovered target URL, skipping internal noise."""
-    paths: set[str] = set()
-    for u in urls:
-        value = u["value"]
-        if ORIGIN_ATTR_RE.search(value) or "://" not in value:
-            continue
-        parts = urlsplit(value)
-        path = parts.path or "/"
-        if parts.query:
-            path = f"{path}?{parts.query}"
-        paths.add(path)
-    return sorted(paths)
+def _site_map(urls: list[dict]) -> tuple[list[str], list[str]]:
+    """(pages, assets): distinct target paths, with automatic asset loads split out."""
+    pages = sorted({u["path"] for u in urls if not u["asset"]})
+    assets = sorted({u["path"] for u in urls if u["asset"]})
+    return pages, assets
 
 
-def _flag_near_duplicate_paths(paths: list[str]) -> dict[str, list[str]]:
-    """path -> other paths it closely resembles (possible typo or endpoint probing)."""
+def _flag_near_duplicate_paths(pages: list[str], assets: list[str]) -> dict[str, list[str]]:
+    """page path -> known paths it closely resembles (possible typo or endpoint probing).
+    Compared against assets too, so "/favicon.icox" is caught against "/favicon.ico"."""
+    known = pages + assets
     flags: dict[str, list[str]] = {}
-    for p in paths:
-        others = [o for o in paths if o != p]
+    for p in pages:
+        others = [o for o in known if o != p and abs(len(o) - len(p)) <= NEAR_DUPLICATE_MAX_LEN_DIFF]
         close = difflib.get_close_matches(p, others, n=3, cutoff=NEAR_DUPLICATE_CUTOFF)
         if close:
             flags[p] = close
@@ -129,12 +124,13 @@ def _annotate_timeline(events: list[dict]) -> list[dict]:
 
 def build_context(details: dict) -> dict:
     """Presentation context for the memory section of the case report."""
-    site_map = _clean_site_map(details["targeted"]["urls"])
+    site_map, assets = _site_map(details["targeted"]["urls"])
     events = _annotate_timeline(details["timeline"]["events"])
     return {
         "details": details,
         "site_map": site_map,
-        "near_duplicates": _flag_near_duplicate_paths(site_map),
+        "assets": assets,
+        "near_duplicates": _flag_near_duplicate_paths(site_map, assets),
         "events": events,
         "session_cookies": _annotate_session_cookies(details["key_findings"]["session_cookies"]),
         "downloads": _annotate_downloads(details["key_findings"]["downloads"], site_map),
