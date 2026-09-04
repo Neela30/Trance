@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRANCE — {{ findings.case.name }}</title>
+<style>
+  :root {
+    --bg: #eef1f0; --surface: #ffffff; --surface-2: #e3e7e6; --ink: #1b2226; --ink-muted: #5b6570;
+    --border: #c7cdcc; --accent: #a23e2a; --accent-bg: #f3e1dc; --confirm: #2f7a5c; --confirm-bg: #e1efe8;
+    --noise: #92702c; --noise-bg: #efe9d8; --mono-chip-bg: #e7ebea;
+    --shadow: 0 1px 2px rgba(20, 24, 27, 0.06), 0 6px 20px rgba(20, 24, 27, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181b; --surface: #1b2126; --surface-2: #232a2f; --ink: #dce2e6; --ink-muted: #8b969c;
+      --border: #313a40; --accent: #e2694f; --accent-bg: #33211c; --confirm: #4fae84; --confirm-bg: #1e2e27;
+      --noise: #c9a552; --noise-bg: #2c2818; --mono-chip-bg: #232a2f;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14181b; --surface: #1b2126; --surface-2: #232a2f; --ink: #dce2e6; --ink-muted: #8b969c;
+    --border: #313a40; --accent: #e2694f; --accent-bg: #33211c; --confirm: #4fae84; --confirm-bg: #1e2e27;
+    --noise: #c9a552; --noise-bg: #2c2818; --mono-chip-bg: #232a2f;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); margin: 0; font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.55; }
+  .page { max-width: 800px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1, h2, h3 { font-family: Georgia, "Iowan Old Style", "Times New Roman", serif; text-wrap: balance; margin: 0; color: var(--ink); }
+  .eyebrow { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-muted); }
+  code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, "Liberation Mono", monospace; }
+  .masthead { display: flex; flex-direction: column; gap: 18px; padding-bottom: 28px; border-bottom: 2px solid var(--ink); margin-bottom: 32px; }
+  .masthead-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+  .masthead h1 { font-size: 30px; font-weight: 600; margin-top: 6px; }
+  .stamp { font-family: ui-monospace, monospace; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); border: 1.5px solid var(--accent); border-radius: 3px; padding: 7px 10px; transform: rotate(-2deg); white-space: nowrap; flex-shrink: 0; }
+  .meta-grid { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; font-size: 13px; }
+  .meta-grid dt { color: var(--ink-muted); font-family: ui-monospace, monospace; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding-top: 2px; }
+  .meta-grid dd { margin: 0; font-family: ui-monospace, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
+  .flag-warn { color: var(--noise); font-weight: 600; }
+  .flag-ok { color: var(--confirm); font-weight: 600; }
+  section { margin-bottom: 44px; }
+  .band { border-top: 2px solid var(--ink); padding-top: 22px; margin-top: 52px; }
+  .band .eyebrow { margin-bottom: 4px; }
+  .band h2 { font-size: 24px; font-weight: 600; margin-bottom: 20px; }
+  .section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; }
+  .section-head h2 { font-size: 20px; font-weight: 600; }
+  .section-head .count { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ink-muted); }
+  p { margin: 0 0 12px; color: var(--ink); max-width: 66ch; }
+  .note { font-size: 13.5px; color: var(--ink-muted); max-width: 62ch; }
+  .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .tiles.three { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 560px) { .tiles, .tiles.three { grid-template-columns: 1fr; } }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--confirm); border-radius: 6px; padding: 16px 18px; box-shadow: var(--shadow); }
+  .tile.gap { border-left-color: var(--noise); }
+  .tile.err { border-left-color: var(--accent); }
+  .tile h3 { font-size: 15px; margin-bottom: 6px; }
+  .tile p { font-size: 13px; color: var(--ink-muted); margin-bottom: 0; }
+  .tile .tile-value { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ink); background: var(--mono-chip-bg); border-radius: 4px; padding: 4px 7px; display: inline-block; margin-top: 6px; overflow-wrap: anywhere; }
+  .evidence-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; box-shadow: var(--shadow); font-size: 13px; }
+  .evidence-table th { text-align: left; font-family: ui-monospace, monospace; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+  .evidence-table td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .evidence-table tr:last-child td { border-bottom: none; }
+  .evidence-table .val { font-family: ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }
+  .evidence-table .off { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--ink-muted); white-space: nowrap; }
+  .table-scroll { overflow-x: auto; }
+  .chip { display: inline-block; font-family: ui-monospace, monospace; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
+  .chip.high, .chip.ok { background: var(--confirm-bg); color: var(--confirm); }
+  .chip.low, .chip.skipped, .chip.not_implemented { background: var(--noise-bg); color: var(--noise); }
+  .chip.error { background: var(--accent-bg); color: var(--accent); }
+  .path-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .path-pill { font-family: ui-monospace, monospace; font-size: 12.5px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; }
+  .path-pill.odd { border-color: var(--noise); color: var(--noise); }
+  .ribbon { background: var(--noise-bg); color: var(--noise); border: 1px solid var(--noise); border-radius: 6px; padding: 12px 16px; font-size: 13px; margin-bottom: 18px; }
+  .ribbon strong { color: var(--noise); }
+  .sequence { list-style: none; padding: 0; margin: 0; counter-reset: seq; }
+  .sequence li { counter-increment: seq; display: grid; grid-template-columns: 30px 1fr; gap: 4px 12px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; align-items: baseline; }
+  .sequence li::before { content: counter(seq); font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-muted); text-align: right; }
+  .sequence li:last-child { border-bottom: none; }
+  .seq-off { grid-column: 2; font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--ink-muted); }
+  .seq-type { font-family: ui-monospace, monospace; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-muted); margin-right: 6px; }
+  .seq-flag { font-size: 10px; color: var(--accent); font-family: ui-monospace, monospace; margin-left: 6px; }
+  .callout { background: var(--surface-2); border-left: 3px solid var(--accent); border-radius: 0 5px 5px 0; padding: 10px 14px; font-size: 12.5px; color: var(--ink-muted); margin: 10px 0 14px; }
+  .callout strong { color: var(--ink); }
+  details.appendix { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 16px; }
+  details.appendix summary { cursor: pointer; padding: 12px 0; font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--ink-muted); }
+  details.appendix summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .appendix-body { padding-bottom: 14px; }
+  .appendix-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 6px 0; border-top: 1px solid var(--border); }
+  .appendix-row .val { font-family: ui-monospace, monospace; color: var(--ink-muted); overflow-wrap: anywhere; }
+  .appendix-row .why { color: var(--ink-muted); text-align: right; flex-shrink: 0; max-width: 40%; }
+  .reco-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  .reco-list li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; font-size: 13.5px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+  .reco-list li::before { content: "→"; color: var(--accent); font-weight: 600; }
+  footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="page">
+
+  {% set modules = findings.modules %}
+  {% set ok_count = modules.values()|selectattr("status", "equalto", "ok")|list|length %}
+
+  <div class="masthead">
+    <div class="masthead-top">
+      <div>
+        <div class="eyebrow">TRANCE · Forensic Artifact Triage · Case Report</div>
+        <h1>{{ findings.case.name }}</h1>
+      </div>
+      <div class="stamp">Authorized security exercise<br>Test environment</div>
+    </div>
+    <dl class="meta-grid">
+      <dt>Generated</dt><dd>{{ findings.generated_at }}</dd>
+      <dt>Modules</dt><dd>{{ ok_count }} of {{ modules|length }} ran cleanly</dd>
+      <dt>Artifacts</dt><dd>{{ findings.artifacts|length }} across all modules</dd>
+      <dt>Output dir</dt><dd>{{ findings.case.output_dir }}</dd>
+      {% if findings.case.evidence_dir %}<dt>Evidence dir</dt><dd>{{ findings.case.evidence_dir }}</dd>{% endif %}
+    </dl>
+  </div>
+
+  <section>
+    <div class="section-head"><h2>Module status</h2></div>
+    <div class="tiles three">
+      {% for name, m in modules.items() %}
+      <div class="tile{{ ' err' if m.status == 'error' else (' gap' if m.status != 'ok' else '') }}">
+        <h3 class="mono" style="font-size:13px;">{{ name }}</h3>
+        <p><span class="chip {{ m.status }}">{{ m.status.replace('_', ' ') }}</span>
+        {% if m.status == 'ok' %} · {{ m.artifact_count }} artifact{{ 's' if m.artifact_count != 1 }}{% endif %}</p>
+        {% if m.message %}<p style="margin-top:6px;">{{ m.message }}</p>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  {% if memory %}
+  {% set d = memory.details %}
+  <div class="band">
+    <div class="eyebrow">Module C</div>
+    <h2>Memory — Tor Browser process dump</h2>
+    <dl class="meta-grid" style="margin-bottom:32px;">
+      <dt>Dump file</dt><dd>{{ d.dump.path.split('/')[-1].split('\\')[-1] }}</dd>
+      <dt>Size</dt><dd>{{ "{:,}".format(d.dump.size_bytes) }} bytes ({{ "%.1f"|format(d.dump.size_bytes / 1048576) }} MiB)</dd>
+      <dt>SHA-256</dt><dd>{{ d.dump.sha256 }}</dd>
+      <dt>Integrity</dt>
+      <dd>
+        {% if d.dump.integrity_verified == true %}<span class="flag-ok">✓ Verified against .sha256 sidecar</span>
+        {% else %}<span class="flag-warn">⚠ Unverified — no .sha256 sidecar alongside this copy</span>
+        {% endif %}
+      </dd>
+      <dt>Target onion</dt><dd>{{ d.targeting.onion or "— not supplied" }}</dd>
+      <dt>Target host</dt><dd>{{ d.targeting.host or "— not supplied" }}</dd>
+      <dt>Username</dt><dd>{{ d.targeting.username or "— not supplied this run" }}</dd>
+    </dl>
+  </div>
+
+  {% if d.targeting_suggestions %}
+  <section>
+    <div class="callout">
+      <strong>Heads up:</strong> onion address(es) seen repeatedly in memory but not covered by <span class="mono">--onion</span>/<span class="mono">--host</span> (Tor Browser's own bundled default services also land here — check before assuming a missed target):
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        {% for s in d.targeting_suggestions %}
+        <li class="mono" style="font-size:12px;">{{ s.onion }} (seen {{ s.hit_count }}×)</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </section>
+  {% endif %}
+
+  <section>
+    <div class="section-head"><h2>Summary</h2></div>
+    <div class="tiles">
+      <div class="tile">
+        <h3>Session &amp; cookie evidence</h3>
+        <p>{{ memory.session_cookies|length }} high-confidence value{{ "s" if memory.session_cookies|length != 1 }} recovered from the cookie jar.</p>
+        {% for c in memory.session_cookies %}{% if c.decoded_payload %}<span class="tile-value">{{ c.decoded_payload }}</span>{% endif %}{% endfor %}
+      </div>
+      <div class="tile">
+        <h3>Site map</h3>
+        <p>{{ memory.site_map|length }} distinct path{{ "s" if memory.site_map|length != 1 }} recovered on the target.
+        {% if memory.near_duplicates %}{{ memory.near_duplicates|length }} look like possible typos/probes.{% endif %}</p>
+      </div>
+      <div class="tile{{ '' if memory.downloads else ' gap' }}">
+        <h3>Local downloads</h3>
+        {% if memory.downloads %}
+        <p>{{ memory.downloads|length }} file{{ "s" if memory.downloads|length != 1 }} confirmed under a real <span class="mono">Downloads</span> folder.</p>
+        {% else %}
+        <p>No files found under a <span class="mono">Users\*\Downloads\</span> path in this dump.</p>
+        {% endif %}
+      </div>
+      <div class="tile{{ '' if d.key_findings.credentials else ' gap' }}">
+        <h3>Credentials</h3>
+        {% if d.key_findings.credentials %}
+        <p>{{ d.key_findings.credentials|length }} high-confidence submission{{ "s" if d.key_findings.credentials|length != 1 }} recovered.</p>
+        {% else %}
+        <p>No plaintext <span class="mono">field=value</span> or JSON-shaped login submission found in memory. Not proof no login happened — session cookie evidence already establishes that independently; this data type just wasn't in a text-matchable shape (or was overwritten) by capture time.</p>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Session &amp; cookies</h2><span class="count">{{ memory.session_cookies|length }} unique, high-confidence</span></div>
+    {% if memory.session_cookies %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Name</th><th>Value</th><th>First offset</th><th>Occ.</th></tr></thead>
+        <tbody>
+          {% for c in memory.session_cookies %}
+          <tr>
+            <td class="val">{{ c.name }}</td>
+            <td class="val">{{ c.value }}{% if c.decoded_payload %}<br><span style="color:var(--ink-muted)">↳ decodes to {{ c.decoded_payload }}</span>{% endif %}</td>
+            <td class="off">{{ c.offset }}</td>
+            <td class="mono">{{ c.occurrences }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="note">No high-confidence session/cookie values recovered.</p>
+    {% endif %}
+  </section>
+
+  {% if d.key_findings.credentials %}
+  <section>
+    <div class="section-head"><h2>Credentials</h2><span class="count">{{ d.key_findings.credentials|length }} unique, high-confidence</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Field</th><th>Value</th><th>Shape</th><th>First offset</th><th>Occ.</th></tr></thead>
+        <tbody>
+          {% for c in d.key_findings.credentials %}
+          <tr><td class="val">{{ c.field }}</td><td class="val">{{ c.value }}</td><td class="mono">{{ c.shape }}</td><td class="off">{{ c.offset }}</td><td class="mono">{{ c.occurrences }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  <section>
+    <div class="section-head"><h2>Site map</h2><span class="count">{{ memory.site_map|length }} distinct paths</span></div>
+    <div class="path-list">
+      {% for p in memory.site_map %}
+      <span class="path-pill{{ ' odd' if p in memory.near_duplicates }}">{{ p }}</span>
+      {% endfor %}
+    </div>
+    {% if memory.near_duplicates %}
+    <p class="note" style="margin-top:10px;">
+      {% for p, close in memory.near_duplicates.items() %}
+      <strong style="color:var(--noise)">{{ p }}</strong> closely resembles {{ close|join(", ") }} — possible typo, stray keystroke, or manual endpoint probing.<br>
+      {% endfor %}
+    </p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Local downloads</h2><span class="count">{{ memory.downloads|length }} confirmed under \Downloads\</span></div>
+    {% if memory.downloads %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>File</th><th>Matches site endpoint</th></tr></thead>
+        <tbody>
+          {% for dl in memory.downloads %}
+          <tr><td class="val">{{ dl.value }}</td><td class="val">{{ dl.matched_endpoint or "— no matching path recovered" }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="note">No confirmed local downloads.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Search / typed terms</h2><span class="count">by occurrence count</span></div>
+    {% if memory.search_terms %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Term</th><th>Occurrences</th></tr></thead>
+        <tbody>
+          {% for t in memory.search_terms %}
+          <tr><td class="val">{{ t.value }}{% if t.matches_username %}<span class="chip high" style="margin-left:6px;">matches --username</span>{% endif %}</td><td class="mono">{{ t.count }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="note">No non-template search terms recovered.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Reconstructed activity sequence</h2><span class="count">{{ memory.events|length }} events, offset-ordered</span></div>
+    <div class="ribbon"><strong>Not a verified timeline.</strong> {{ d.timeline.disclaimer }}</div>
+    {% if memory.events %}
+    <ol class="sequence">
+      {% for e in memory.events %}
+      <li>
+        <div><span class="seq-type">{{ e.type }}</span>{{ e.detail }}{% if e.clustered_with_prev %}<span class="seq-flag">‡ clustered</span>{% endif %}{% if e.far_from_start %}<span class="seq-flag">† storage-region caveat</span>{% endif %}</div>
+        <div class="seq-off">{{ e.offset }}</div>
+      </li>
+      {% endfor %}
+    </ol>
+    {% if memory.any_clustered %}
+    <div class="callout">
+      <strong>‡ Clustered events:</strong> events flagged with ‡ sit within {{ "{:,}".format(memory.cluster_gap_bytes) }} bytes of the previous one — tight enough to more likely be one rendered page's set of links (e.g. a dashboard listing everything at once) than separate sequential navigations. Treat clustered runs as "seen together," not necessarily "done in that exact order."
+    </div>
+    {% endif %}
+    {% if memory.any_far_from_start %}
+    <div class="callout">
+      <strong>† Storage-region caveat:</strong> events flagged with † sit far past the sequence's typical spacing from the earliest event. Cookie/session and download-manager data live in their own memory regions, separate from rendered page content — a late offset here reflects where that data happens to sit in memory, not when it was created. Don't read these as "happened last."
+    </div>
+    {% endif %}
+    {% else %}
+    <p class="note">No timeline events recovered.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Filtered as noise</h2><span class="count">kept for transparency, not evidentiary</span></div>
+    <details class="appendix">
+      <summary>Show unfiltered context — {{ "{:,}".format(d.unfiltered.total_strings_extracted) }} printable strings scanned in total</summary>
+      <div class="appendix-body">
+        <div class="appendix-row"><span class="val">Cookie/credential regex hits, low-confidence</span><span class="why">{{ d.targeted.cookies|selectattr("confidence","equalto","low")|list|length }} cookie + {{ d.targeted.credentials|selectattr("confidence","equalto","low")|list|length }} credential hits look like Firefox's own printf format strings, not real values</span></div>
+        <div class="appendix-row"><span class="val">Download-path regex hits, low-confidence</span><span class="why">{{ d.targeted.downloads|selectattr("confidence","equalto","low")|list|length }} paths outside a real Downloads folder — Tor Browser's own install/extension files</span></div>
+        <div class="appendix-row"><span class="val">Onion domains seen but not targeted</span><span class="why">{{ d.targeting_suggestions|length }} — see the callout above if any</span></div>
+        <div class="appendix-row"><span class="val">Unanchored URL-like strings</span><span class="why">{{ d.unfiltered.urls.count }} total seen, not evidence on their own — includes Firefox's own code/strings</span></div>
+      </div>
+    </details>
+  </section>
+  {% endif %}
+
+  {% for g in generic_modules %}
+  <div class="band">
+    <div class="eyebrow">{{ g.name }}</div>
+    <h2>{{ g.name.replace('module_', '').replace('_', ' — ', 1)|title }}</h2>
+  </div>
+  <section>
+    <p><span class="chip {{ g.status }}">{{ g.status.replace('_', ' ') }}</span>{% if g.message %} <span class="note">{{ g.message }}</span>{% endif %}</p>
+    {% if g.artifacts %}
+    <div class="section-head" style="margin-top:14px;"><h2 style="font-size:16px;">Artifacts</h2><span class="count">showing {{ g.artifacts|length }} of {{ g.total }}</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Type</th><th>Source</th><th>Description</th><th>SHA-256</th><th>Timestamp</th></tr></thead>
+        <tbody>
+          {% for a in g.artifacts %}
+          <tr>
+            <td class="mono">{{ a.artifact_type }}</td>
+            <td class="val">{{ a.source }}</td>
+            <td class="val">{{ a.description }}</td>
+            <td class="off">{{ a.sha256[:12] ~ "…" if a.sha256 else "—" }}</td>
+            <td class="off">{{ a.timestamp or "—" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% elif g.status == 'ok' %}
+    <p class="note">Ran cleanly, no artifacts reported.</p>
+    {% elif g.status == 'not_implemented' %}
+    <p class="note">This module has no implementation yet — nothing from this evidence layer contributes to the case until it does.</p>
+    {% elif g.status == 'skipped' %}
+    <p class="note">No evidence was supplied for this module this run.</p>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  <div class="band">
+    <div class="eyebrow">Next steps</div>
+    <h2>Recommendations</h2>
+  </div>
+  <section>
+    <ul class="reco-list">
+      {% if memory %}
+      {% if not memory.details.targeting.username %}
+      <li>Re-run with <span class="mono">--username &lt;candidate&gt;</span> to confirm which search term was the real login via the <span class="mono">matches_username</span> flag.</li>
+      {% endif %}
+      {% if memory.details.targeting_suggestions %}
+      <li>Check the onion address(es) flagged in the memory section — re-run with <span class="mono">--onion</span> set to any that turn out to be a real missed target.</li>
+      {% endif %}
+      {% if not memory.details.key_findings.credentials %}
+      <li>No plaintext credentials recovered from memory strings alone — for firmer proof of the login itself, correlate with server-side access logs or a disk-based artifact (browser saved-logins store, if enabled).</li>
+      {% endif %}
+      <li>If the source machine is still available, pull real filesystem MACB timestamps on the confirmed downloads — actual time data this memory-only view can't provide.</li>
+      <li>Treat every ‡/† flag in the activity sequence as an investigative lead worth checking against another source, not as settled fact.</li>
+      {% endif %}
+      {% for g in generic_modules if g.status != 'ok' %}
+      <li><span class="mono">{{ g.name }}</span> did not contribute ({{ g.status.replace('_', ' ') }}){% if g.message %}: {{ g.message }}{% endif %}. Cross-layer correlation is incomplete until it does.</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <footer>
+    <span>TRANCE · findings.json schema v{{ findings.schema_version }}</span>
+    <span>{{ findings.generated_at }}</span>
+  </footer>
+
+</div>
+</body>
+</html>

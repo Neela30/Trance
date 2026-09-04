@@ -449,11 +449,6 @@ def main() -> None:
         "--min-length", type=int, default=DEFAULT_MIN_LEN, help="Minimum string length to extract (default: %(default)s)"
     )
     parser.add_argument("--output", type=Path, help="Path for the JSON report (default: <dump>.report.json)")
-    parser.add_argument(
-        "--html-report",
-        type=Path,
-        help="Also render a structured, human-readable HTML report to this path (deterministic, offline, no LLM/API involved — see report.py)",
-    )
     args = parser.parse_args()
 
     if not args.onion and not args.host:
@@ -470,12 +465,7 @@ def main() -> None:
 
     print(format_summary(report))
     print(f"\n[*] JSON report written to {output_path}")
-
-    if args.html_report:
-        from modules.module_c_memory.report import render_html_report
-
-        args.html_report.write_text(render_html_report(report))
-        print(f"[*] HTML report written to {args.html_report}")
+    print("[*] For the HTML case report (all modules, findings.json), run main.py from the repo root.")
 
 
 if __name__ == "__main__":
