@@ -146,3 +146,41 @@ process requires a full physical-RAM capture taken before shutdown (e.g.
 WinPMEM) and analysis with a memory-forensics framework such as
 Volatility 3 (already declared in `requirements.txt` for this reason).
 That path is future work and is not implemented here.
+
+## Module B — preserve evidence during profile analysis
+
+Run the profile analyzer against a **static extracted acquisition**, with its
+`hashes.sha256` manifest and SQLite `-wal` / `-shm` companions kept in their
+original relative directories:
+
+```sh
+python -m modules.module_b_disk.recover_evidence /path/to/acquired/profile \
+    --output-dir output/module-b
+```
+
+Each run creates a new timestamped directory containing `recovery_report.json`
+and `recovery_report.custody.json`. `--out /path/to/new/report.json` selects an
+explicit report path instead. Both outputs must be outside the evidence tree;
+existing outputs are refused. The main `main.py` pipeline still has a Module B
+stub; use this standalone command for profile analysis.
+
+Before parsing, the analyzer verifies SHA-256 manifest entries using their full
+relative paths (standard `sha256sum` text or binary format). Missing files,
+malformed/duplicate entries, unsafe paths, symbolic links, and mismatches stop
+the run. WAL and SHM mismatches are treated as failures too. Without a manifest,
+analysis proceeds with `manifest_status: absent`; newly computed hashes do not
+establish acquisition-time integrity. Files absent from a supplied manifest are
+listed separately as `unmanifested_files`.
+
+The analyzer hashes the source tree, makes and verifies a disposable working
+copy, and checks source hashes again after analysis. SQLite queries operate on
+temporary copies with their WAL/SHM companions, preserving committed WAL data.
+Custody records identify original paths and hashes, plus the generated report.
+Use an offline, read-only acquisition: these content checks do not provide a
+filesystem write blocker, preserve access times, or authenticate the manifest.
+
+Exit codes: `0` analysis completed, `1` integrity/output/input failure, `2`
+incomplete analysis due to missing or unreadable artifacts. Check the report's
+per-artifact errors; incomplete input is not evidence of no browsing activity.
+The daemon and raw-carving standalone scripts are not covered by this profile
+snapshot workflow yet.
