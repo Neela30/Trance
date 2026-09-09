@@ -18,12 +18,19 @@ import argparse
 import json
 import sqlite3
 import sys
+from contextlib import contextmanager
+from dataclasses import asdict
+from datetime import datetime, timezone
+import shutil
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.custody_log import CustodyEntry, CustodyLog
 from core.hashing import hash_file
+from core.exceptions import IntegrityError
+from modules.module_b_disk.evidence import external_output, verify_hashes, working_copy
 
 # URLs/titles baked into every fresh Tor Browser profile's "Tor Project
 # Bookmarks" folder. Anything matching these is default noise, not evidence
@@ -40,84 +47,65 @@ DEFAULT_BOOKMARK_URLS = {
 }
 
 
-def _open_ro(path: Path) -> sqlite3.Connection:
-    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-
-
-def verify_hashes(evidence_dir: Path) -> dict:
-    hashes_file = evidence_dir / "hashes.sha256"
-    result = {}
-    if not hashes_file.exists():
-        return result
-    for line in hashes_file.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        digest, _, recorded_path = line.partition("  ")
-        if not recorded_path:
-            digest, _, recorded_path = line.partition(" ")
-        fname = Path(recorded_path.strip()).name
-        if fname == "hashes.sha256":
-            continue  # the manifest doesn't hash itself
-        target = evidence_dir / fname
-        if not target.exists():
-            result[fname] = {"status": "missing"}
-            continue
-        actual = hash_file(target)
-        if actual == digest:
-            status = "match"
-        elif fname.endswith(("-shm", "-wal")):
-            # SQLite rewrites the shared-memory index / WAL on open even in
-            # read-only mode; a mismatch here is expected, not tampering.
-            status = "changed (expected: -shm/-wal touched by read-only open)"
-        else:
-            status = "MISMATCH"
-        result[fname] = {"status": status, "recorded": digest, "actual": actual}
-    return result
+@contextmanager
+def _open_ro(path: Path):
+    """Open a disposable database + WAL/SHM copy, even for direct parser callers."""
+    with tempfile.TemporaryDirectory(prefix="trance-sqlite-") as directory:
+        target = Path(directory) / path.name
+        for suffix in ("", "-wal", "-shm"):
+            source = path.with_name(path.name + suffix)
+            if source.is_symlink():
+                raise IntegrityError(f"Database input must not be a symbolic link: {source}")
+            if source.exists():
+                shutil.copyfile(source, target.with_name(target.name + suffix))
+        conn = sqlite3.connect(target.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
 
 def analyze_places(db_path: Path) -> dict:
     if not db_path.exists():
         return {"error": "not found"}
-    conn = _open_ro(db_path)
-    cur = conn.cursor()
+    with _open_ro(db_path) as conn:
+        cur = conn.cursor()
 
-    cur.execute(
-        "SELECT id, url, title, visit_count, hidden, typed, last_visit_date "
-        "FROM moz_places"
-    )
-    places = []
-    user_activity = []
-    for row in cur.fetchall():
-        pid, url, title, visit_count, hidden, typed, last_visit_date = row
-        is_default = url in DEFAULT_BOOKMARK_URLS
-        looks_like_activity = bool(visit_count) or bool(typed) or last_visit_date is not None
-        entry = {
-            "id": pid,
-            "url": url,
-            "title": title,
-            "visit_count": visit_count,
-            "typed": typed,
-            "last_visit_date": last_visit_date,
-            "default_profile_entry": is_default,
-        }
-        places.append(entry)
-        if looks_like_activity and not is_default:
-            user_activity.append(entry)
+        cur.execute(
+            "SELECT id, url, title, visit_count, hidden, typed, last_visit_date "
+            "FROM moz_places"
+        )
+        places = []
+        user_activity = []
+        for row in cur.fetchall():
+            pid, url, title, visit_count, hidden, typed, last_visit_date = row
+            is_default = url in DEFAULT_BOOKMARK_URLS
+            looks_like_activity = bool(visit_count) or bool(typed) or last_visit_date is not None
+            entry = {
+                "id": pid,
+                "url": url,
+                "title": title,
+                "visit_count": visit_count,
+                "typed": typed,
+                "last_visit_date": last_visit_date,
+                "default_profile_entry": is_default,
+            }
+            places.append(entry)
+            if looks_like_activity and not is_default:
+                user_activity.append(entry)
 
-    cur.execute("SELECT COUNT(*) FROM moz_historyvisits")
-    historyvisits_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM moz_historyvisits")
+        historyvisits_count = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM moz_inputhistory")
-    inputhistory_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM moz_inputhistory")
+        inputhistory_count = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM moz_annos")
-    annos_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM moz_annos")
+        annos_count = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM moz_keywords")
-    keywords_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM moz_keywords")
+        keywords_count = cur.fetchone()[0]
 
-    conn.close()
     return {
         "moz_places_rows": len(places),
         "moz_places": places,
@@ -132,25 +120,23 @@ def analyze_places(db_path: Path) -> dict:
 def analyze_cookies(db_path: Path) -> dict:
     if not db_path.exists():
         return {"error": "not found"}
-    conn = _open_ro(db_path)
-    cur = conn.cursor()
-    cur.execute("SELECT host, name, creationTime, lastAccessed, expiry FROM moz_cookies")
-    cookies = [
-        {"host": h, "name": n, "creationTime": c, "lastAccessed": la, "expiry": e}
-        for h, n, c, la, e in cur.fetchall()
-    ]
-    conn.close()
+    with _open_ro(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT host, name, creationTime, lastAccessed, expiry FROM moz_cookies")
+        cookies = [
+            {"host": h, "name": n, "creationTime": c, "lastAccessed": la, "expiry": e}
+            for h, n, c, la, e in cur.fetchall()
+        ]
     return {"moz_cookies_rows": len(cookies), "moz_cookies": cookies}
 
 
 def analyze_favicons(db_path: Path) -> dict:
     if not db_path.exists():
         return {"error": "not found"}
-    conn = _open_ro(db_path)
-    cur = conn.cursor()
-    cur.execute("SELECT page_url FROM moz_pages_w_icons")
-    pages = [r[0] for r in cur.fetchall()]
-    conn.close()
+    with _open_ro(db_path) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT page_url FROM moz_pages_w_icons")
+        pages = [r[0] for r in cur.fetchall()]
     non_default = [p for p in pages if p not in DEFAULT_BOOKMARK_URLS]
     return {
         "pages_with_icons": len(pages),
@@ -189,108 +175,84 @@ def analyze_bookmark_backups(backups_dir: Path) -> dict:
     return {"backups": results}
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("evidence_dir", type=Path, help="Directory with extracted profile files")
-    parser.add_argument("--out", type=Path, default=None, help="Write JSON report to this path")
-    args = parser.parse_args()
+def analyze_profile(evidence_dir: Path) -> dict:
+    """Analyze a verified snapshot and retain source hashes, never temporary paths."""
+    with working_copy(evidence_dir) as (copy, hashes, verification):
+        report = {
+            "evidence_dir": str(evidence_dir.resolve()),
+            "hash_verification": verification,
+            "integrity": {
+                "manifest_status": "verified" if verification else "absent",
+                "unmanifested_files": sorted(set(hashes) - set(verification) - {"hashes.sha256"}),
+                "source_sha256": hashes,
+                "source_unchanged": False,
+            },
+        }
+        for section, parser, name in (
+            ("places", analyze_places, "places.sqlite"),
+            ("cookies", analyze_cookies, "cookies.sqlite"),
+            ("favicons", analyze_favicons, "favicons.sqlite"),
+            ("bookmark_backups", analyze_bookmark_backups, "bookmarkbackups"),
+        ):
+            try:
+                report[section] = parser(copy / name)
+            except Exception as exc:
+                report[section] = {"error": f"{type(exc).__name__}: {exc}"}
+        report["analysis_status"] = "incomplete" if any(
+            report[k].get("error") or any(b.get("error") for b in report[k].get("backups", []))
+            for k in ("places", "cookies", "favicons", "bookmark_backups")
+        ) else "ok"
+    report["integrity"]["source_unchanged"] = True
+    return report
 
-    evidence_dir: Path = args.evidence_dir
-    if not evidence_dir.is_dir():
-        print(f"error: {evidence_dir} is not a directory", file=sys.stderr)
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("evidence_dir", type=Path, help="Static directory of acquired profile files")
+    parser.add_argument("--out", type=Path, help="New JSON report path outside evidence")
+    parser.add_argument("--output-dir", type=Path, default=Path("output/module-b"),
+                        help="Parent for a new run directory when --out is omitted")
+    args = parser.parse_args(argv)
+    if not args.evidence_dir.is_dir():
+        print(f"error: {args.evidence_dir} is not a directory", file=sys.stderr)
+        return 1
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    requested = args.out or args.output_dir / stamp / "recovery_report.json"
+    try:
+        output = external_output(requested, args.evidence_dir)
+        custody_path = external_output(
+            output.with_name(output.stem + ".custody.json"), args.evidence_dir)
+        report = analyze_profile(args.evidence_dir)
+        custody = CustodyLog(custody_path)
+        for name, digest in report["integrity"]["source_sha256"].items():
+            custody.record(CustodyEntry(
+                artifact_path=str(args.evidence_dir.resolve() / name), sha256=digest,
+                action="verified_and_copied",
+                notes="Source hashed before/after analysis; parsers used disposable copies",
+            ))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, indent=2)
+        custody.record(CustodyEntry(artifact_path=str(output), sha256=hash_file(output),
+                                   action="generated"))
+        with custody_path.open("x", encoding="utf-8") as stream:
+            json.dump([asdict(entry) for entry in custody.entries], stream, indent=2)
+    except (OSError, ValueError, IntegrityError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    report = {
-        "evidence_dir": str(evidence_dir),
-        "hash_verification": verify_hashes(evidence_dir),
-        "places": analyze_places(evidence_dir / "places.sqlite"),
-        "cookies": analyze_cookies(evidence_dir / "cookies.sqlite"),
-        "favicons": analyze_favicons(evidence_dir / "favicons.sqlite"),
-        "bookmark_backups": analyze_bookmark_backups(evidence_dir / "bookmarkbackups"),
-    }
-
-    custody = CustodyLog(evidence_dir / "custody_log_module_b.json")
-    for fname in ("places.sqlite", "cookies.sqlite", "favicons.sqlite"):
-        fpath = evidence_dir / fname
-        if fpath.exists():
-            custody.record(
-                CustodyEntry(
-                    artifact_path=str(fpath),
-                    sha256=hash_file(fpath),
-                    action="analyzed",
-                    notes="recover_evidence.py disk artifact analysis",
-                )
-            )
-    custody.save()
-
-    # --- Summary ---
-    places = report["places"]
-    cookies = report["cookies"]
-    favicons = report["favicons"]
-    backups = report["bookmark_backups"].get("backups", [])
-
-    print("=== TRANCE Module B — Disk Evidence Recovery Summary ===\n")
-
-    hv = report["hash_verification"]
-    mismatches = {k: v for k, v in hv.items() if v.get("status") == "MISMATCH"}
-    expected_changes = {k: v for k, v in hv.items() if v.get("status", "").startswith("changed")}
-    if mismatches:
-        print(f"!! HASH MISMATCH on {len(mismatches)} file(s) — integrity compromised: {list(mismatches)}\n")
-    elif hv:
-        print(f"Hash verification: {len(hv)} file(s) checked, {len(hv) - len(expected_changes)} match.")
-        if expected_changes:
-            print(f"  ({len(expected_changes)} -shm/-wal file(s) changed as expected from read-only open: {list(expected_changes)})")
-        print()
-    else:
-        print("Hash verification: no hashes.sha256 found, skipped.\n")
-
-    print(f"places.sqlite: {places.get('moz_places_rows', 0)} URL entries, "
-          f"{places.get('moz_historyvisits_rows', 0)} history visits, "
-          f"{places.get('moz_inputhistory_rows', 0)} typed-URL entries, "
-          f"{places.get('moz_annos_rows', 0)} annotations.")
-    activity = places.get("user_activity_candidates", [])
-    if activity:
-        print(f"  -> {len(activity)} entries look like real user activity (non-default, visited/typed):")
-        for e in activity:
-            print(f"     {e['url']}  (visits={e['visit_count']}, typed={e['typed']}, last_visit={e['last_visit_date']})")
-    else:
-        print("  -> No entries beyond Tor Browser's default bookmark set. No recoverable browsing history.")
-
-    print(f"\ncookies.sqlite: {cookies.get('moz_cookies_rows', 0)} cookies.")
-    if cookies.get("moz_cookies"):
-        for c in cookies["moz_cookies"]:
-            print(f"     {c['host']}  {c['name']}")
-    else:
-        print("  -> No cookies recovered.")
-
-    print(f"\nfavicons.sqlite: {favicons.get('pages_with_icons', 0)} pages with icons, "
-          f"{len(favicons.get('non_default_pages', []))} non-default.")
-    for p in favicons.get("non_default_pages", []):
-        print(f"     {p}")
-
-    print(f"\nbookmarkbackups/: {len(backups)} backup file(s) found.")
-    for b in backups:
-        nd = b.get("non_default_bookmarks", [])
-        print(f"  {b['file']}: {len(nd)} non-default bookmark(s)")
-        for item in nd:
-            print(f"     {item['title']}  {item['uri']}")
-
-    print()
-    if not activity and not cookies.get("moz_cookies") and not favicons.get("non_default_pages") \
-            and all(not b.get("non_default_bookmarks") for b in backups):
-        print("CONCLUSION: This profile snapshot contains only Tor Browser's stock first-run\n"
-              "defaults. No trace of user browsing survives in places.sqlite, cookies.sqlite,\n"
-              "favicons.sqlite, or bookmark backups. This is consistent with Tor Browser's\n"
-              "permanent-private-browsing default (history is kept in memory only, never\n"
-              "written to disk, unless the user explicitly disables private browsing).")
-    else:
-        print("CONCLUSION: Evidence of user activity found above — review the flagged entries.")
-
-    if args.out:
-        args.out.write_text(json.dumps(report, indent=2, default=str))
-        print(f"\nFull JSON report written to {args.out}")
-
-    return 0
+    print("=== TRANCE Module B — Disk Evidence Recovery ===")
+    print(f"Analysis: {report['analysis_status']}")
+    print(f"Acquisition manifest: {report['integrity']['manifest_status']}")
+    print(f"Source files unchanged: {report['integrity']['source_unchanged']}")
+    for section in ("places", "cookies", "favicons", "bookmark_backups"):
+        result = report[section]
+        print(f"{section}: {result.get('error', 'parsed; see report for findings')}")
+    if report["analysis_status"] == "incomplete":
+        print("Analysis incomplete: missing or unreadable artifacts cannot establish absence of activity.")
+    print(f"Report: {output}")
+    print(f"Custody: {custody_path}")
+    return 2 if report["analysis_status"] == "incomplete" else 0
 
 
 if __name__ == "__main__":
