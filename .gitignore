@@ -33,9 +33,10 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Project-specific: forensic artifacts / captures should never be committed
+# Project-specific: forensic artifacts / captures / case outputs should never be committed
 /evidence/
 /captures/
+/output/
 *.mem
 *.vmem
 *.raw
