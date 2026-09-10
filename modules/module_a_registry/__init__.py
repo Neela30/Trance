@@ -1,16 +1,12 @@
-"""Module A — registry & execution evidence. Not implemented yet.
+"""Module A — Registry & Execution Evidence.
 
-Contract (see README, "Module contract"): run(config, **kwargs) -> ModuleResult.
-Return status "ok" with a list of core.schema.Artifact once real parsing exists.
+Parses NTUSER.DAT, SYSTEM, and Amcache.hve to establish whether Tor Browser
+was installed/run on the target machine and its approximate execution
+timeline. See modules/module_a_registry/pipeline.py for the orchestration
+and TRANCE_Project_and_ModuleA_Description.pdf section 2 for the design
+brief this module implements.
 """
 
-from __future__ import annotations
+from .pipeline import ModuleAResult, run_module_a, write_output
 
-from core.config import TranceConfig
-from core.schema import ModuleResult
-
-MODULE_NAME = "module_a_registry"
-
-
-def run(config: TranceConfig, **_: object) -> ModuleResult:
-    return ModuleResult(module=MODULE_NAME, status="not_implemented", message="registry parsing not written yet")
+__all__ = ["run_module_a", "write_output", "ModuleAResult"]
