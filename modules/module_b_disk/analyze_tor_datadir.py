@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.custody_log import CustodyEntry, CustodyLog
 from core.hashing import hash_file
+from modules.module_b_disk.evidence import working_copy
 
 GUARD_RE = re.compile(r"^Guard\s+(.*)$", re.MULTILINE)
 STATE_HEADER_RE = re.compile(
@@ -47,9 +48,21 @@ CRED_RE = re.compile(r"^([a-z2-7]{56}):descriptor:x25519:([A-Za-z2-7]{52})",
                      re.IGNORECASE | re.MULTILINE)
 
 
-def _utc(path: Path) -> str:
+def _utc(path: Path, metadata: dict | None = None) -> str:
+    if metadata and metadata.get("modified_utc"):
+        return metadata["modified_utc"]
     return dt.datetime.fromtimestamp(path.stat().st_mtime,
                                      dt.timezone.utc).isoformat()
+
+
+def _load_filesystem_metadata(directory: Path) -> dict:
+    path = directory / "filesystem_metadata.json"
+    if not path.exists():
+        return {"files": {}}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data.get("files"), dict):
+        raise ValueError("filesystem_metadata.json must contain a files object")
+    return data
 
 
 def _kv(text: str, key: str) -> str | None:
@@ -123,14 +136,14 @@ def parse_state(path: Path) -> dict:
     }
 
 
-def parse_consensus(path: Path) -> dict:
+def parse_consensus(path: Path, metadata: dict | None = None) -> dict:
     """Pull the authority-signed validity window off the cached consensus."""
     if not path.exists():
         return {"error": "not found"}
     with path.open("rb") as fh:
         head = fh.read(2048).decode("utf-8", errors="replace")
     return {
-        "file_mtime_utc": _utc(path),
+        "file_mtime_utc": _utc(path, metadata),
         "size_bytes": path.stat().st_size,
         "network_status_version": _kv(head, "network-status-version"),
         "valid_after_utc": _kv(head, "valid-after"),
@@ -139,7 +152,7 @@ def parse_consensus(path: Path) -> dict:
     }
 
 
-def parse_onion_auth(auth_dir: Path) -> dict:
+def parse_onion_auth(auth_dir: Path, metadata: dict | None = None) -> dict:
     """Read client-auth credentials; each names one hidden service."""
     if not auth_dir.is_dir():
         return {"error": "not found"}
@@ -150,11 +163,12 @@ def parse_onion_auth(auth_dir: Path) -> dict:
         st = f.stat()
         text = f.read_text(errors="replace")
         m = CRED_RE.search(text)
+        file_metadata = (metadata or {}).get(f"onion-auth/{f.name}", {})
         entry = {
             "filename": f.name,
-            "inode": st.st_ino,
+            "inode": file_metadata.get("inode", st.st_ino),
             "size": st.st_size,
-            "mtime_utc": _utc(f),
+            "mtime_utc": _utc(f, file_metadata),
             "sha256": hash_file(f),
             "onion_address": (m.group(1) + ".onion") if m else None,
             "x25519_private_key": m.group(2) if m else None,
@@ -162,13 +176,61 @@ def parse_onion_auth(auth_dir: Path) -> dict:
         # tor only loads files ending exactly in ".auth_private"; anything else
         # in this directory was placed by a user and was never read by tor.
         if f.name.endswith(".auth_private"):
-            entry["loaded_by_tor"] = True
+            entry["recognized_filename"] = True
             creds.append(entry)
         else:
-            entry["loaded_by_tor"] = False
+            entry["recognized_filename"] = False
             entry["note"] = "wrong extension - tor ignores this file"
             ignored.append(entry)
     return {"credentials": creds, "ignored_files": ignored}
+
+
+def _parse_tor_directory(directory: Path, source: Path) -> dict:
+    """Parse one disposable Tor data-directory copy."""
+    filesystem_metadata = _load_filesystem_metadata(directory)
+    files = filesystem_metadata["files"]
+    torrc = directory / "torrc"
+    return {
+        "tor_data_dir": str(source),
+        "state": parse_state(directory / "state"),
+        "consensus": parse_consensus(
+            directory / "cached-microdesc-consensus", files.get("cached-microdesc-consensus")
+        ),
+        "onion_auth": parse_onion_auth(directory / "onion-auth", files),
+        "daemon_start_utc": (
+            _utc(directory / "lock", files.get("lock"))
+            if (directory / "lock").exists()
+            else None
+        ),
+        "file_mtimes_utc": {
+            f.name: _utc(f, files.get(f.name))
+            for f in sorted(directory.iterdir())
+            if f.is_file() and f.name not in ("hashes.sha256", "filesystem_metadata.json")
+        },
+        "torrc": torrc.read_text(errors="replace") if torrc.exists() else None,
+        "filesystem_metadata": filesystem_metadata,
+    }
+
+
+def analyze_tor_directory(tor_dir: Path) -> dict:
+    """Verify, copy, and analyze a static Tor data-directory acquisition."""
+    source = tor_dir.resolve(strict=True)
+    with working_copy(source) as (copy, hashes, verification):
+        report = _parse_tor_directory(copy, source)
+        report["hash_verification"] = verification
+        report["integrity"] = {
+            "manifest_status": "verified" if verification else "absent",
+            "unmanifested_files": sorted(set(hashes) - set(verification) - {"hashes.sha256"}),
+            "source_sha256": hashes,
+            "source_unchanged": False,
+        }
+    report["integrity"]["source_unchanged"] = True
+    report["analysis_status"] = (
+        "incomplete"
+        if report["state"].get("error") or report["consensus"].get("error")
+        else "ok"
+    )
+    return report
 
 
 def main() -> int:
@@ -183,18 +245,7 @@ def main() -> int:
         print(f"error: {d} is not a directory", file=sys.stderr)
         return 1
 
-    torrc = d / "torrc"
-    report = {
-        "tor_data_dir": str(d),
-        "state": parse_state(d / "state"),
-        "consensus": parse_consensus(d / "cached-microdesc-consensus"),
-        "onion_auth": parse_onion_auth(d / "onion-auth"),
-        "daemon_start_utc": _utc(d / "lock") if (d / "lock").exists() else None,
-        "file_mtimes_utc": {
-            f.name: _utc(f) for f in sorted(d.iterdir()) if f.is_file()
-        },
-        "torrc": torrc.read_text(errors="replace") if torrc.exists() else None,
-    }
+    report = analyze_tor_directory(d)
 
     st = report["state"]
     print("=== TRANCE Module B - Tor daemon data directory ===\n")

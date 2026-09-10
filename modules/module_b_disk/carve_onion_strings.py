@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -68,10 +69,16 @@ MARKER_RE = {k: re.compile(v) for k, v in MARKER_PATTERNS.items()}
 def scan(image: Path, extra: list[re.Pattern]) -> dict:
     size = image.stat().st_size
     onion_hits: dict[bytes, list[int]] = {}
+    onion_counts: Counter[bytes] = Counter()
     auth_creds: dict[tuple[bytes, bytes], list[int]] = {}
+    auth_counts: Counter[tuple[bytes, bytes]] = Counter()
     utf16_hits: dict[bytes, list[int]] = {}
+    utf16_counts: Counter[bytes] = Counter()
     marker_hits: dict[str, list[int]] = {k: [] for k in MARKER_RE}
+    marker_counts: Counter[str] = Counter()
     extra_hits: dict[str, list[int]] = {p.pattern.decode(errors="replace"): [] for p in extra}
+    extra_counts: Counter[str] = Counter()
+    digest = hashlib.sha256()
 
     tail = b""
     base = 0
@@ -81,37 +88,56 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
             chunk = fh.read(CHUNK)
             if not chunk:
                 break
+            digest.update(chunk)
             read += len(chunk)
             buf = tail + chunk
             # Offset in the image of buf[0].
             buf_start = base
 
+            def new_match(match: re.Match) -> bool:
+                return not tail or match.end() > len(tail)
+
             for m in ONION_RE.finditer(buf):
+                if not new_match(m):
+                    continue
                 addr = m.group(0).lower()
+                onion_counts[addr] += 1
                 onion_hits.setdefault(addr, [])
                 if len(onion_hits[addr]) < 20:  # cap: we want proof, not a dump
                     onion_hits[addr].append(buf_start + m.start())
 
             for m in AUTH_CRED_RE.finditer(buf):
+                if not new_match(m):
+                    continue
                 key = (m.group(1).lower(), m.group(2).lower())
+                auth_counts[key] += 1
                 auth_creds.setdefault(key, [])
                 if len(auth_creds[key]) < 20:
                     auth_creds[key].append(buf_start + m.start())
 
             for m in UTF16_ONION_RE.finditer(buf):
+                if not new_match(m):
+                    continue
                 name = m.group(0).replace(b"\x00", b"").lower()
+                utf16_counts[name] += 1
                 utf16_hits.setdefault(name, [])
                 if len(utf16_hits[name]) < 20:
                     utf16_hits[name].append(buf_start + m.start())
 
             for name, rx in MARKER_RE.items():
                 for m in rx.finditer(buf):
+                    if not new_match(m):
+                        continue
+                    marker_counts[name] += 1
                     if len(marker_hits[name]) < 20:
                         marker_hits[name].append(buf_start + m.start())
 
             for rx in extra:
                 key = rx.pattern.decode(errors="replace")
                 for m in rx.finditer(buf):
+                    if not new_match(m):
+                        continue
+                    extra_counts[key] += 1
                     if len(extra_hits[key]) < 20:
                         extra_hits[key].append(buf_start + m.start())
 
@@ -128,22 +154,23 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
     return {
         "image": str(image),
         "image_bytes": size,
+        "image_sha256": digest.hexdigest(),
         "onion_addresses": {
-            addr.decode(): {"occurrences": len(offs), "first_offsets": offs}
+            addr.decode(): {"occurrences": onion_counts[addr], "first_offsets": offs}
             for addr, offs in sorted(onion_hits.items())
         },
         "client_auth_credentials": [
             {"onion_address": addr.decode() + ".onion",
              "x25519_private_key": key.decode(),
-             "occurrences": len(offs), "first_offsets": offs}
+             "occurrences": auth_counts[(addr, key)], "first_offsets": offs}
             for (addr, key), offs in sorted(auth_creds.items())
         ],
-        "utf16_filenames": {name.decode(): {"occurrences": len(offs),
+        "utf16_filenames": {name.decode(): {"occurrences": utf16_counts[name],
                                             "first_offsets": offs}
                             for name, offs in sorted(utf16_hits.items())},
-        "tor_markers": {k: {"occurrences": len(v), "first_offsets": v}
+        "tor_markers": {k: {"occurrences": marker_counts[k], "first_offsets": v}
                         for k, v in marker_hits.items() if v},
-        "extra_patterns": {k: {"occurrences": len(v), "first_offsets": v}
+        "extra_patterns": {k: {"occurrences": extra_counts[k], "first_offsets": v}
                            for k, v in extra_hits.items() if v},
     }
 
