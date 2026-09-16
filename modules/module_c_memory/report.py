@@ -36,6 +36,17 @@ FAR_FROM_START_MULTIPLIER = 10
 NEAR_DUPLICATE_CUTOFF = 0.9
 NEAR_DUPLICATE_MAX_LEN_DIFF = 2
 
+# Human-readable labels for the report; keyed on the fully-qualified plugin name
+# volatility_analyze.py runs (also its dict key in details["volatility3"]["plugins"]).
+VOL3_PLUGIN_LABELS = {
+    "windows.psscan.PsScan": "Processes (psscan)",
+    "windows.netscan.NetScan": "Network connections (netscan)",
+    "windows.filescan.FileScan": "Open files (filescan)",
+    "windows.cmdline.CmdLine": "Process command lines (cmdline)",
+    "windows.registry.hivelist.HiveList": "Registry hives (hivelist)",
+}
+VOL3_TABLE_CAP = 100
+
 
 def _site_map(urls: list[dict]) -> tuple[list[str], list[str]]:
     """(pages, assets): distinct target paths, with automatic asset loads split out."""
@@ -122,6 +133,112 @@ def _annotate_timeline(events: list[dict]) -> list[dict]:
     return annotated
 
 
+def _vol3_rows(plugins: dict, name_suffix: str) -> list[dict]:
+    """Rows from the one plugin result whose name ends in `name_suffix` (a plain
+    class-name shorthand -- e.g. "PsScan" for "windows.psscan.PsScan") if it ran
+    cleanly, else []. Matching on the class name keeps this independent of exactly
+    which fully-qualified plugin name volatility_analyze.py used."""
+    for name, result in plugins.items():
+        if name.endswith(name_suffix) and result.get("status") == "ok":
+            return result["rows"]
+    return []
+
+
+def _vol3_process_corroboration(psscan_rows: list[dict]) -> list[str]:
+    """Note, don't score: when psscan independently confirms a browser process existed,
+    that's worth surfacing next to the string-carver evidence that assumed one did --
+    not merged into it. See module docstring / task spec: juxtaposition only, no
+    automated confidence blending."""
+    notes = []
+    for row in psscan_rows:
+        name = (row.get("ImageFileName") or "").lower()
+        if "firefox" not in name:
+            continue
+        exited = f", exited {row['ExitTime']}" if row.get("ExitTime") else " — still running at capture time"
+        notes.append(
+            f"windows.psscan independently confirms a firefox.exe process existed "
+            f"(PID {row.get('PID')}, created {row.get('CreateTime')}{exited}). Structural "
+            f"corroboration of the process the string-carver evidence below was extracted from."
+        )
+    return notes
+
+
+def _vol3_network_corroboration(netscan_rows: list[dict], host_target: str | None) -> list[str]:
+    if not host_target:
+        return []
+    target_host, _, target_port = host_target.partition(":")
+    notes = []
+    for row in netscan_rows:
+        for addr_key, port_key in (("LocalAddr", "LocalPort"), ("ForeignAddr", "ForeignPort")):
+            if row.get(addr_key) != target_host:
+                continue
+            if target_port and str(row.get(port_key)) != target_port:
+                continue
+            notes.append(
+                f"windows.netscan independently observed a connection matching --host "
+                f"{host_target} (PID {row.get('PID')}, {row.get('Proto')}, state {row.get('State')}). "
+                f"Structural corroboration of the target the URL/cookie evidence was anchored to."
+            )
+            break
+    return notes
+
+
+def _vol3_file_corroboration(filescan_rows: list[dict], confirmed_downloads: list[str]) -> list[str]:
+    download_names = {d.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] for d in confirmed_downloads}
+    download_names.discard("")
+    notes = []
+    for row in filescan_rows:
+        path = (row.get("Name") or "").replace("\\", "/").rstrip("/")
+        base = path.rsplit("/", 1)[-1] if path else ""
+        if base and base in download_names:
+            notes.append(
+                f"windows.filescan independently lists a file named {base!r}. Matches a download "
+                f"the string carver confirmed under a real \\Downloads\\ folder."
+            )
+    return notes
+
+
+def _vol3_context(details: dict) -> dict:
+    """Presentation context for the Volatility3 structural-analysis section. Kept fully
+    separate from the string-carver sections above it -- every plugin result already
+    carries its own "source": "volatility3:<plugin>" tag (see volatility_analyze.py), and
+    nothing here merges a vol3 row into a string-carver finding or vice versa. The
+    `corroboration` notes are plain text pointing at two independent pieces of evidence
+    that happen to agree -- not a score, not a merge."""
+    vol3 = details.get("volatility3") or {"status": "skipped", "message": None, "plugins": {}}
+    plugins = vol3.get("plugins", {})
+
+    plugin_views = []
+    for name, result in plugins.items():
+        rows = result.get("rows", [])
+        plugin_views.append(
+            {
+                "name": name,
+                "label": VOL3_PLUGIN_LABELS.get(name, name),
+                "status": result.get("status"),
+                "message": result.get("message"),
+                "total_rows": result.get("row_count", len(rows)),
+                "rows": rows[:VOL3_TABLE_CAP],
+                "truncated": len(rows) > VOL3_TABLE_CAP,
+            }
+        )
+    plugin_views.sort(key=lambda p: list(VOL3_PLUGIN_LABELS).index(p["name"]) if p["name"] in VOL3_PLUGIN_LABELS else 99)
+
+    corroboration = (
+        _vol3_process_corroboration(_vol3_rows(plugins, "PsScan"))
+        + _vol3_network_corroboration(_vol3_rows(plugins, "NetScan"), details["targeting"].get("host"))
+        + _vol3_file_corroboration(_vol3_rows(plugins, "FileScan"), details["key_findings"]["downloads"])
+    )
+
+    return {
+        "status": vol3.get("status", "skipped"),
+        "message": vol3.get("message"),
+        "vol_bin": vol3.get("vol_bin"),
+        "plugins": plugin_views,
+        "corroboration": corroboration,
+    }
+
+
 def build_context(details: dict) -> dict:
     """Presentation context for the memory section of the case report."""
     site_map, assets = _site_map(details["targeted"]["urls"])
@@ -140,4 +257,5 @@ def build_context(details: dict) -> dict:
         "any_clustered": any(e["clustered_with_prev"] for e in events),
         "any_far_from_start": any(e["far_from_start"] for e in events),
         "cluster_gap_bytes": CLUSTER_GAP_BYTES,
+        "volatility3": _vol3_context(details),
     }
