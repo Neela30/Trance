@@ -63,7 +63,28 @@ CLI flags are declared in `main.py` and passed through as `kwargs`. To
 contribute a custom section to the HTML report, register a presenter in
 `report.py`'s `PRESENTERS`; without one a module gets a generic artifact table.
 
-Modules A (registry) and B (disk) currently return `not_implemented`.
+Module A (registry) currently returns `not_implemented`. Module B runs when at
+least one disk evidence path is supplied and otherwise returns `skipped`.
+
+### Run disk analysis through the pipeline
+
+Pass each extracted evidence source explicitly. The profile and Tor daemon
+directory are analyzed from verified disposable copies. Raw carving is optional
+because a full image can take a long time to scan:
+
+```sh
+python main.py --case disk-run-1 --output-dir output \
+    --disk-profile /path/to/acquired/profile \
+    --tor-dir "/path/to/Tor Browser/Browser/TorBrowser/Data/Tor"
+
+# Add this only when a full raw-byte scan is intended:
+#   --disk-image /path/to/disk.vdi
+```
+
+All supplied Module B results are stored under
+`modules.module_b_disk.details` in `findings.json`; selected findings are also
+flattened into its `artifacts` array and shown in the HTML report. `--evidence-dir`
+remains case-level provenance metadata and does not select a Module B parser.
 
 ## Module C — Memory forensics
 
@@ -161,8 +182,8 @@ python -m modules.module_b_disk.recover_evidence /path/to/acquired/profile \
 Each run creates a new timestamped directory containing `recovery_report.json`
 and `recovery_report.custody.json`. `--out /path/to/new/report.json` selects an
 explicit report path instead. Both outputs must be outside the evidence tree;
-existing outputs are refused. The main `main.py` pipeline still has a Module B
-stub; use this standalone command for profile analysis.
+existing outputs are refused. The same protected profile analysis is used when
+the directory is supplied to `main.py` with `--disk-profile`.
 
 Before parsing, the analyzer verifies SHA-256 manifest entries using their full
 relative paths (standard `sha256sum` text or binary format). Missing files,
