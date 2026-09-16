@@ -21,6 +21,19 @@ OVERLAP = 4096
 DEFAULT_MIN_LEN = 6
 SAMPLE_CAP = 20
 SUGGESTION_MIN_HITS = 3
+# Past process-dump scale (whole-system RAM images, pagefiles), an unbounded
+# per-category list is the memory risk, not iter_strings() itself — cap each
+# and record that it happened rather than let analyze() OOM silently.
+MAX_RECORDS_PER_TYPE = 50_000
+# A full-memory image carries every process's strings, not just one browser's, so the
+# same per-category cap that's generous for a single process dump truncates far sooner
+# on a whole-RAM image — raise it for that source type. Same extraction/regex logic
+# either way; this only changes when append_capped() starts dropping records.
+SOURCE_TYPE_RECORD_CAPS = {
+    "process": MAX_RECORDS_PER_TYPE,
+    "full-memory": 200_000,
+}
+DEFAULT_SOURCE_TYPE = "process"
 
 # Trailing charset stops at , ^ | ] ) } as well as whitespace/quotes: Firefox's in-memory
 # cache and principal keys wrap URLs in exactly those ("<host>,p,:http://…",
@@ -147,7 +160,13 @@ def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[i
     """Yield (offset, string) for printable ASCII and UTF-16LE runs, chunked to bound memory use."""
     ascii_re = _ascii_pattern(min_len)
     utf16_re = _utf16le_pattern(min_len)
-    seen_offsets: set[int] = set()
+    # finditer() yields strictly increasing start offsets within a window, and the only
+    # duplicates across windows are re-scans of the carried-over overlap region — so a
+    # per-pattern high-water mark dedupes exactly like a seen-offsets set would, without
+    # holding one Python int per match for the life of the scan (matters once "the dump"
+    # is a multi-GB physical-RAM image or pagefile instead of a single process's memory).
+    ascii_floor = -1
+    utf16_floor = -1
     with open(path, "rb") as f:
         offset = 0
         carry = b""
@@ -159,13 +178,13 @@ def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[i
             window_start = offset - len(carry)
             for m in ascii_re.finditer(window):
                 abs_off = window_start + m.start()
-                if abs_off not in seen_offsets:
-                    seen_offsets.add(abs_off)
+                if abs_off > ascii_floor:
+                    ascii_floor = abs_off
                     yield abs_off, m.group().decode("ascii")
             for m in utf16_re.finditer(window):
                 abs_off = window_start + m.start()
-                if abs_off not in seen_offsets:
-                    seen_offsets.add(abs_off)
+                if abs_off > utf16_floor:
+                    utf16_floor = abs_off
                     yield abs_off, m.group().decode("utf-16-le", errors="ignore")
             offset += len(chunk)
             carry = window[-OVERLAP:] if len(window) > OVERLAP else window
@@ -255,12 +274,14 @@ def analyze(
     host: str | None,
     username: str | None,
     min_len: int = DEFAULT_MIN_LEN,
+    source_type: str = DEFAULT_SOURCE_TYPE,
 ) -> dict:
     if not dump_path.exists():
         raise ParsingError(f"Dump file not found: {dump_path}")
 
     integrity_verified = verify_integrity(dump_path)
     targets = [t.lower() for t in (onion, host) if t]
+    record_cap = SOURCE_TYPE_RECORD_CAPS.get(source_type, MAX_RECORDS_PER_TYPE)
 
     urls: list[dict] = []
     cookies: list[dict] = []
@@ -275,9 +296,17 @@ def analyze(
     unfiltered_cookie_count = 0
     unfiltered_cookie_sample: list[str] = []
     onion_domain_hits: Counter[str] = Counter()
+    truncated: dict[str, bool] = {}
+
+    def append_capped(items: list[dict], item: dict, type_name: str) -> None:
+        if len(items) >= record_cap:
+            truncated[type_name] = True
+            return
+        items.append(item)
 
     def record_artifact(artifact_type: str, offset: int, description: str) -> None:
-        artifacts.append(
+        append_capped(
+            artifacts,
             asdict(
                 Artifact(
                     module="module_c_memory",
@@ -285,7 +314,8 @@ def analyze(
                     source=f"offset {hex(offset)}",
                     description=description,
                 )
-            )
+            ),
+            "artifacts",
         )
 
     for offset, s in iter_strings(dump_path, min_len=min_len):
@@ -309,25 +339,34 @@ def analyze(
             if len(unfiltered_url_sample) < SAMPLE_CAP:
                 unfiltered_url_sample.append(url)
             if targets and _matches_target(host, targets):
-                urls.append(
+                append_capped(
+                    urls,
                     {
                         "offset": hex(match_offset),
                         "value": url,
                         "host": host,
                         "path": path,
                         "asset": _is_asset_path(path),
-                    }
+                    },
+                    "urls",
                 )
                 record_artifact("url", match_offset, url)
         for m in ONION_DOMAIN_RE.finditer(s):
             onion_domain_hits[m.group().lower()] += 1
+            # Only the top 10 ever get reported (targeting_suggestions below); on a
+            # whole-system image with many distinct onion-like mentions this dict is
+            # the growth risk, so periodically drop everything but the leaders.
+            if len(onion_domain_hits) > 10_000:
+                onion_domain_hits = Counter(dict(onion_domain_hits.most_common(1_000)))
 
         for m in COOKIE_RE.finditer(s):
             name, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
             confidence = "low" if _is_noise_value(value) else "high"
-            cookies.append(
-                {"offset": hex(match_offset), "name": name, "value": value, "confidence": confidence}
+            append_capped(
+                cookies,
+                {"offset": hex(match_offset), "name": name, "value": value, "confidence": confidence},
+                "cookies",
             )
             record_artifact("cookie", match_offset, f"{name}={value}")
         for m in NOISY_COOKIE_RE.finditer(s):
@@ -339,23 +378,31 @@ def analyze(
             value = m.group(1)
             match_offset = offset + m.start()
             matches_username = bool(username) and username.lower() in value.lower()
-            search_queries.append({"offset": hex(match_offset), "value": value, "matches_username": matches_username})
+            append_capped(
+                search_queries,
+                {"offset": hex(match_offset), "value": value, "matches_username": matches_username},
+                "search_queries",
+            )
             record_artifact("search_query", match_offset, value)
 
         for m in CREDENTIAL_RE.finditer(s):
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
             confidence = "low" if _is_noise_value(value) else "high"
-            credentials.append(
-                {"offset": hex(match_offset), "field": field, "value": value, "shape": "form", "confidence": confidence}
+            append_capped(
+                credentials,
+                {"offset": hex(match_offset), "field": field, "value": value, "shape": "form", "confidence": confidence},
+                "credentials",
             )
             record_artifact("credential", match_offset, f"{field}={value}")
         for m in CREDENTIAL_JSON_RE.finditer(s):
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
             confidence = "low" if _is_noise_value(value) else "high"
-            credentials.append(
-                {"offset": hex(match_offset), "field": field, "value": value, "shape": "json", "confidence": confidence}
+            append_capped(
+                credentials,
+                {"offset": hex(match_offset), "field": field, "value": value, "shape": "json", "confidence": confidence},
+                "credentials",
             )
             record_artifact("credential", match_offset, f'"{field}":"{value}"')
 
@@ -363,7 +410,11 @@ def analyze(
             value = m.group()
             match_offset = offset + m.start()
             confidence = "high" if _is_confirmed_download(value) else "low"
-            downloads.append({"offset": hex(match_offset), "value": value, "confidence": confidence})
+            append_capped(
+                downloads,
+                {"offset": hex(match_offset), "value": value, "confidence": confidence},
+                "downloads",
+            )
             record_artifact("download", match_offset, value)
 
     # Tor Browser itself talks to a handful of bundled default onion services
@@ -401,7 +452,9 @@ def analyze(
             "size_bytes": dump_path.stat().st_size,
             "sha256": hash_file(dump_path),
             "integrity_verified": integrity_verified,
+            "source_type": source_type,
         },
+        "record_cap": record_cap,
         "targeting": {"onion": onion, "host": host, "username": username},
         "targeting_suggestions": targeting_suggestions,
         "key_findings": {
@@ -434,6 +487,7 @@ def analyze(
             "cookie_like": {"count": unfiltered_cookie_count, "sample": unfiltered_cookie_sample},
         },
         "artifacts": artifacts,
+        "truncated": truncated,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -443,13 +497,19 @@ def format_summary(report: dict) -> str:
     kf, sugg, tl = report["key_findings"], report["targeting_suggestions"], report["timeline"]
     lines = [
         "=== TRANCE Memory Analysis ===",
-        f"Dump: {d['path']} ({d['size_bytes']:,} bytes)",
+        f"Dump: {d['path']} ({d['size_bytes']:,} bytes, source_type={d.get('source_type', DEFAULT_SOURCE_TYPE)!r})",
         f"SHA-256: {d['sha256']}",
         {
             True: "Integrity: OK (matches .sha256 sidecar)",
             None: "Integrity: no .sha256 sidecar found, unverified",
         }[d["integrity_verified"]],
         f"Targeting: onion={t['onion']!r} host={t['host']!r} username={t['username']!r}",
+    ]
+    if report.get("truncated"):
+        record_cap = report.get("record_cap", MAX_RECORDS_PER_TYPE)
+        capped = ", ".join(sorted(report["truncated"]))
+        lines.append(f"[!] Result cap ({record_cap:,}/type) hit — truncated: {capped}")
+    lines += [
         "",
         "=== KEY FINDINGS (deduplicated, high-confidence) ===",
     ]
@@ -525,6 +585,14 @@ def main() -> None:
     parser.add_argument(
         "--min-length", type=int, default=DEFAULT_MIN_LEN, help="Minimum string length to extract (default: %(default)s)"
     )
+    parser.add_argument(
+        "--source-type",
+        choices=sorted(SOURCE_TYPE_RECORD_CAPS),
+        default=DEFAULT_SOURCE_TYPE,
+        help="What kind of image this is — a single process dump (dumper.py) or a full "
+        "physical-memory image (winpmem_acquire.py). Only changes per-category result caps "
+        "and report labeling, not extraction logic (default: %(default)s)",
+    )
     parser.add_argument("--output", type=Path, help="Path for the JSON report (default: <dump>.report.json)")
     args = parser.parse_args()
 
@@ -532,7 +600,9 @@ def main() -> None:
         print("[!] Warning: no --onion or --host given — targeted URL section will be empty.", file=sys.stderr)
 
     try:
-        report = analyze(args.dump, args.onion, args.host, args.username, min_len=args.min_length)
+        report = analyze(
+            args.dump, args.onion, args.host, args.username, min_len=args.min_length, source_type=args.source_type
+        )
     except (ParsingError, IntegrityError) as exc:
         print(f"[!] {exc}", file=sys.stderr)
         sys.exit(1)

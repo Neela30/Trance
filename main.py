@@ -52,10 +52,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verbose", action="store_true", help="Also print each module's full text summary")
 
     memory = parser.add_argument_group("module_c_memory")
-    memory.add_argument("--dump", type=Path, help="firefox.exe memory dump (.bin) from dumper.py")
+    memory.add_argument("--dump", type=Path, help="Memory image to analyze: a dumper.py process dump (.bin) or a winpmem_acquire.py full-memory image (.raw)")
     memory.add_argument("--onion", help="Target .onion address to anchor URL matching to")
     memory.add_argument("--host", help="Target host[:port] to anchor URL matching to")
     memory.add_argument("--username", help="Known username to highlight in recovered search queries")
+    memory.add_argument(
+        "--source-type",
+        choices=("process", "full-memory"),
+        default="process",
+        help="Which acquisition path produced --dump: dumper.py's live-process dump, or "
+        "winpmem_acquire.py's full physical-memory image. Provenance/labeling only — this "
+        "does not run either acquisition tool (both need a separate elevated Windows "
+        "session); it only tells the analyzer which one already produced --dump (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     if args.dump and not (args.onion or args.host):
@@ -73,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             "onion": args.onion,
             "host": args.host,
             "username": args.username,
+            "source_type": args.source_type,
         },
     }
 

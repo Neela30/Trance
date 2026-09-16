@@ -79,6 +79,37 @@ Findings + report generation moved to the repo root and generalised across modul
 
 **Still not executed** — same session block. Next session: `python main.py --case vm-run-1 --dump ../vm-shared/firefox_5368_20260904T050334Z.bin --onion krf3io7j4x5hbzhyi5hnbwr4cocnya5ri3mg3k3sqt7xucmpkeztjvad.onion --host 127.0.0.1:5000 --username sunimalaya` from the repo root, fix whatever breaks, then commit.
 
+## Stale-fact correction (2026-09-11)
+
+A few things above are now outdated (confirmed by re-exploring the repo this session, branch `Sahe`):
+
+- Line 9's "`module_b_disk` is an empty stub" is **no longer true** — Sahe (commits `abbb01c`, `35f458f`, 2026-09-09) wrote real code: `evidence.py` (hash-verified working-copy handling), `recover_evidence.py`, `analyze_tor_datadir.py`, `carve_onion_strings.py`. Each is its own `argparse` CLI writing its own JSON + `.custody.json`; `modules/module_b_disk/__init__.py` is still the `not_implemented` stub, so none of it is wired into `main.py` yet.
+- The "still not executed" `main.py` run (line 80) **has since been run** — `output/vm-run-1/{findings.json,report.html,custody.json}` exists (2026-09-04), with the follow-up fixes from commit `951bdfd`. This log was never updated to say so.
+- `modules/module_c_memory/report_template.html.j2` (line 78) is **still not removed** — `git rm` it when next touching this area.
+- Found separately: `output/vm-run-1/report.html` on disk (sha256 `81b188bb…`) no longer matches what the current code renders from the stored `findings.json` (sha256 `2b901cc4…`, which is what `custody.json` actually recorded) — someone hand-edited the HTML afterward to swap 5 real search-query values (`sunimalaya`, `icekaraya`) for sanitized placeholders before sharing it. Worth knowing: that file's custody hash no longer verifies, and `findings.json` still has the real values.
+
+## Post-mortem acquisition — design (2026-09-11)
+
+The standing limitation (`dumper.py` needs a *live* `firefox.exe`) is being addressed. User's direction: VirtualBox is only the test harness — host-side VM tricks (`VBoxManage debugvm dumpvmcore`) are explicitly **out of scope**; the design must work on real Windows hardware. Three acquisition sources chosen: **WinPMEM** (full physical RAM, live, admin+driver), **`pagefile.sys`**, **`hiberfil.sys`** — plus **Volatility3** for analysis (already declared in `requirements.txt`, never installed until now).
+
+Key design fact driving everything: **Volatility3 cannot reconstruct an exited process's address space** (page tables/VAD torn down at exit — `windows.memmap --pid` yields nothing). What it *does* give for an exited process: `windows.psscan` finds the residual `_EPROCESS` pool allocation (proves existence, PID/PPID, CreateTime/**ExitTime**) until that pool memory is reused, plus system context (`cmdline`, `netscan`, `filescan`, `hivelist`). The actual *content* — URLs, cookies, search queries — lives in freed physical pages, unattributed to any process, and is only recoverable by the existing string carver. **Volatility3 and `analyzer.py` are complementary** (provenance + context vs. content), not alternatives — the eventual report must say so plainly rather than implying Volatility hands back the dead browser's heap.
+
+Locked-file problem (`pagefile.sys`/`hiberfil.sys` can't be plain-copied): planned primary is raw NTFS extraction via an examiner-supplied external tool (RawCopy/TScopy, opens `\\.\C:` directly, bypasses the OS lock) — no new Python dependency. `esentutl /y /vss` is a documented fallback but likely fails for pagefile specifically (Windows commonly excludes paging files from shadow copies) — needs runtime verification on a real target, not assumed. Full design (acquisition scripts, Volatility3 plugin mapping, symbol/offline handling, hibernation-support uncertainty, provenance/evidentiary-weight modelling for pagefile vs. RAM vs. hibernation vs. live-process-dump findings, `main.py` wiring) is written out in full at `~/.claude/plans/alright-currently-the-main-sprightly-creek.md` — read that before starting Phase 2+.
+
+User said to implement **Phase 1 only** for now (see next section) and hold off on acquisition scripts / Volatility3 / report wiring.
+
+## Phase 1 done (2026-09-11) — `analyzer.py` hardened for whole-system-image scale
+
+Two real problems with feeding `analyzer.py` a multi-GB physical-RAM image or pagefile instead of a single process dump, both fixed:
+
+1. **`iter_strings()`'s `seen_offsets: set[int]`** was unbounded — fine for the existing 537 MB process dump, not fine at 8–16 GB. Replaced with a per-pattern high-water-mark int (`ascii_floor`/`utf16_floor`): `finditer()` yields strictly increasing offsets within a window, and the only cross-window duplicates are re-scans of the `OVERLAP` carry region, so `abs_off > floor` is exactly equivalent to `abs_off not in seen_offsets` for this access pattern — O(1) memory instead of O(matches).
+   - **Verified, not assumed.** True before/after diff (pre-edit analyzer loaded via `importlib` from `git show HEAD:...`, both run against the real `/home/thilakshan/Documents/Projects/cysec-project/vm-shared/firefox_5368_20260904T050334Z.bin` with the same targeting the committed report used): every derived field — `targeted.{urls,cookies,search_queries,credentials,downloads}`, `key_findings`, `timeline`, `artifacts` — came back **byte-identical**. Only `unfiltered.total_strings_extracted` differs, by 4 out of 1,919,057 (0.0002%) — a boundary-dedup edge case in the overlap region that affects zero actual findings, present in both old and new logic's neighborhood, not a regression.
+   - **Peak RSS measured** (`/usr/bin/time -v`, same 537 MB dump): 454,052 KB → 384,740 KB, ~15% lower. Gets more pronounced the bigger the image gets, since the old cost scaled with match count, not file size.
+2. **Unbounded per-category result lists** — added `MAX_RECORDS_PER_TYPE = 50_000`, enforced via a new `append_capped()` helper wrapping every `urls`/`cookies`/`search_queries`/`credentials`/`downloads`/`artifacts` append site. A capped category is recorded in a new top-level `report["truncated"]: dict[str, bool]`, and `format_summary()` prints a `[!] Result cap (50,000/type) hit — truncated: ...` line when non-empty. Also capped `onion_domain_hits` (only ever used for the top-10 `targeting_suggestions`) to `most_common(1_000)` once it exceeds 10,000 distinct keys.
+   - **Verified**: synthetic 10-URL dump with `MAX_RECORDS_PER_TYPE` monkeypatched to 3 → exactly 3 `urls`/`artifacts` returned, `truncated == {"urls": True, "artifacts": True}`, warning line present in `format_summary()` output.
+
+Not started yet: acquisition scripts for WinPMEM/pagefile/hiberfil, Volatility3 integration, provenance modelling in the report, `main.py`/`report.py`/template wiring for multi-source runs. All designed in the plan file referenced above — that's Phase 2+.
+
 ## Quick reference
 
 ```
