@@ -1,8 +1,18 @@
 """Module C — memory forensics.
 
-Acquire with dumper.py (Windows, live), analyze with analyzer.py (anywhere, offline).
-run() is the pipeline entry: it only analyzes an existing dump — acquisition stays a
-separate, deliberate step because process memory only exists while firefox.exe runs.
+Two acquisition paths, one analyzer:
+  - dumper.py           — Windows, live: a target process's readable committed memory.
+  - winpmem_acquire.py  — Windows, live: the whole physical address space, so an already-
+                           exited process's freed/unmapped pages can still be recovered.
+analyzer.py runs anywhere, offline, against whatever image either path produced.
+
+run() is the pipeline entry: it only analyzes an existing dump/image — acquisition stays
+a separate, deliberate step (needs an elevated Windows session either way), not something
+main.py triggers on an examiner's analysis machine. --source-type is provenance only: it
+tells the analyzer/report which acquisition path produced the given file (a whole-RAM
+image is bigger and noisier than one process's memory, so it also raises the per-category
+result cap — see analyzer.SOURCE_TYPE_RECORD_CAPS) and never invokes dumper.py or
+winpmem_acquire.py itself.
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ def run(
     onion: str | None = None,
     host: str | None = None,
     username: str | None = None,
+    source_type: str = "process",
     **_: object,
 ) -> ModuleResult:
     if dump is None:
@@ -30,7 +41,7 @@ def run(
     from modules.module_c_memory.analyzer import analyze
 
     try:
-        details = analyze(Path(dump), onion, host, username)
+        details = analyze(Path(dump), onion, host, username, source_type=source_type)
     except TranceError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))
 
