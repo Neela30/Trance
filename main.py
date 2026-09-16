@@ -65,6 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         "does not run either acquisition tool (both need a separate elevated Windows "
         "session); it only tells the analyzer which one already produced --dump (default: %(default)s)",
     )
+    memory.add_argument(
+        "--vol3-path",
+        help="Path (or bare name, resolved on $PATH) to Volatility3's 'vol' entry point. "
+        "When set, also runs the structural plugins (psscan/netscan/filescan/cmdline/"
+        "hivelist) against --dump as a second, independent pass alongside string carving. "
+        "Omit to skip Volatility3 entirely (default: skipped)",
+    )
     args = parser.parse_args(argv)
 
     if args.dump and not (args.onion or args.host):
@@ -83,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
             "host": args.host,
             "username": args.username,
             "source_type": args.source_type,
+            "vol3_path": args.vol3_path,
         },
     }
 
