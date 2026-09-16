@@ -322,6 +322,74 @@
   </section>
 
   <section>
+    <div class="section-head">
+      <h2>Process &amp; system context (Volatility3)</h2>
+      <span class="count">independent structural pass — never merged with string-carver evidence above</span>
+    </div>
+    <div class="ribbon">
+      <strong>A second, independent method, not a second string carver.</strong> Everything below comes from
+      parsing kernel data structures (process pool allocations, network/file/registry state), not from
+      scanning bytes for text patterns — see each row's <span class="mono">source</span> tag. It can confirm
+      <em>which process</em> and <em>when</em> in ways raw string carving can't, but needs kernel symbols
+      matching the imaged OS build to run at all.
+    </div>
+    {% if memory.volatility3.status == 'skipped' %}
+    <p class="note">Not run this pass — {{ memory.volatility3.message }}.</p>
+    {% elif memory.volatility3.status == 'error' %}
+    <p class="note"><span class="chip error">error</span> Volatility3 could not be invoked at all — {{ memory.volatility3.message }}</p>
+    {% else %}
+    {% if memory.volatility3.corroboration %}
+    <div class="callout">
+      <strong>Independent corroboration:</strong> the notes below point out where this structural pass and the
+      string-carver evidence above happen to agree — a human-readable juxtaposition, not an automated score.
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        {% for note in memory.volatility3.corroboration %}
+        <li>{{ note }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% for p in memory.volatility3.plugins %}
+    <div class="section-head" style="margin-top:22px;">
+      <h3 style="font-size:15px; font-weight:600;">{{ p.label }}</h3>
+      <span class="count mono">source: volatility3:{{ p.name }}</span>
+    </div>
+    {% if p.status == 'ok' %}
+    {% if p.rows %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead>
+          <tr>
+            {% for col in p.rows[0].keys() if col != 'source' %}
+            <th>{{ col }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in p.rows %}
+          <tr>
+            {% for col, val in row.items() if col != 'source' %}
+            <td class="val">{{ val if val is not none else "—" }}</td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if p.truncated %}
+    <p class="note">Showing {{ p.rows|length }} of {{ p.total_rows }} rows.</p>
+    {% endif %}
+    {% else %}
+    <p class="note">Ran cleanly, no rows returned.</p>
+    {% endif %}
+    {% else %}
+    <p class="note"><span class="chip error">error</span> {{ p.message }}</p>
+    {% endif %}
+    {% endfor %}
+    {% endif %}
+  </section>
+
+  <section>
     <div class="section-head"><h2>Filtered as noise</h2><span class="count">kept for transparency, not evidentiary</span></div>
     <details class="appendix">
       <summary>Show unfiltered context — {{ "{:,}".format(d.unfiltered.total_strings_extracted) }} printable strings scanned in total</summary>
