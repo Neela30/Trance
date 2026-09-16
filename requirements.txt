@@ -1,4 +1,4 @@
-volatility3
+volatility3>=2.26.0
 yara-python
 python-registry
 jinja2
