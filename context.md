@@ -79,12 +79,127 @@ Findings + report generation moved to the repo root and generalised across modul
 
 **Still not executed** — same session block. Next session: `python main.py --case vm-run-1 --dump ../vm-shared/firefox_5368_20260904T050334Z.bin --onion krf3io7j4x5hbzhyi5hnbwr4cocnya5ri3mg3k3sqt7xucmpkeztjvad.onion --host 127.0.0.1:5000 --username sunimalaya` from the repo root, fix whatever breaks, then commit.
 
+## Stale-fact correction (2026-09-11)
+
+A few things above are now outdated (confirmed by re-exploring the repo this session, branch `Sahe`):
+
+- Line 9's "`module_b_disk` is an empty stub" is **no longer true** — Sahe (commits `abbb01c`, `35f458f`, 2026-09-09) wrote real code: `evidence.py` (hash-verified working-copy handling), `recover_evidence.py`, `analyze_tor_datadir.py`, `carve_onion_strings.py`. Each is its own `argparse` CLI writing its own JSON + `.custody.json`; `modules/module_b_disk/__init__.py` is still the `not_implemented` stub, so none of it is wired into `main.py` yet.
+- The "still not executed" `main.py` run (line 80) **has since been run** — `output/vm-run-1/{findings.json,report.html,custody.json}` exists (2026-09-04), with the follow-up fixes from commit `951bdfd`. This log was never updated to say so.
+- `modules/module_c_memory/report_template.html.j2` (line 78) is **still not removed** — `git rm` it when next touching this area.
+- Found separately: `output/vm-run-1/report.html` on disk (sha256 `81b188bb…`) no longer matches what the current code renders from the stored `findings.json` (sha256 `2b901cc4…`, which is what `custody.json` actually recorded) — someone hand-edited the HTML afterward to swap 5 real search-query values (`sunimalaya`, `icekaraya`) for sanitized placeholders before sharing it. Worth knowing: that file's custody hash no longer verifies, and `findings.json` still has the real values.
+
+## Post-mortem acquisition — design (2026-09-11)
+
+The standing limitation (`dumper.py` needs a *live* `firefox.exe`) is being addressed. User's direction: VirtualBox is only the test harness — host-side VM tricks (`VBoxManage debugvm dumpvmcore`) are explicitly **out of scope**; the design must work on real Windows hardware. Three acquisition sources chosen: **WinPMEM** (full physical RAM, live, admin+driver), **`pagefile.sys`**, **`hiberfil.sys`** — plus **Volatility3** for analysis (already declared in `requirements.txt`, never installed until now).
+
+Key design fact driving everything: **Volatility3 cannot reconstruct an exited process's address space** (page tables/VAD torn down at exit — `windows.memmap --pid` yields nothing). What it *does* give for an exited process: `windows.psscan` finds the residual `_EPROCESS` pool allocation (proves existence, PID/PPID, CreateTime/**ExitTime**) until that pool memory is reused, plus system context (`cmdline`, `netscan`, `filescan`, `hivelist`). The actual *content* — URLs, cookies, search queries — lives in freed physical pages, unattributed to any process, and is only recoverable by the existing string carver. **Volatility3 and `analyzer.py` are complementary** (provenance + context vs. content), not alternatives — the eventual report must say so plainly rather than implying Volatility hands back the dead browser's heap.
+
+Locked-file problem (`pagefile.sys`/`hiberfil.sys` can't be plain-copied): planned primary is raw NTFS extraction via an examiner-supplied external tool (RawCopy/TScopy, opens `\\.\C:` directly, bypasses the OS lock) — no new Python dependency. `esentutl /y /vss` is a documented fallback but likely fails for pagefile specifically (Windows commonly excludes paging files from shadow copies) — needs runtime verification on a real target, not assumed. Full design (acquisition scripts, Volatility3 plugin mapping, symbol/offline handling, hibernation-support uncertainty, provenance/evidentiary-weight modelling for pagefile vs. RAM vs. hibernation vs. live-process-dump findings, `main.py` wiring) is written out in full at `~/.claude/plans/alright-currently-the-main-sprightly-creek.md` — read that before starting Phase 2+.
+
+User said to implement **Phase 1 only** for now (see next section) and hold off on acquisition scripts / Volatility3 / report wiring.
+
+## Phase 1 done (2026-09-11) — `analyzer.py` hardened for whole-system-image scale
+
+Two real problems with feeding `analyzer.py` a multi-GB physical-RAM image or pagefile instead of a single process dump, both fixed:
+
+1. **`iter_strings()`'s `seen_offsets: set[int]`** was unbounded — fine for the existing 537 MB process dump, not fine at 8–16 GB. Replaced with a per-pattern high-water-mark int (`ascii_floor`/`utf16_floor`): `finditer()` yields strictly increasing offsets within a window, and the only cross-window duplicates are re-scans of the `OVERLAP` carry region, so `abs_off > floor` is exactly equivalent to `abs_off not in seen_offsets` for this access pattern — O(1) memory instead of O(matches).
+   - **Verified, not assumed.** True before/after diff (pre-edit analyzer loaded via `importlib` from `git show HEAD:...`, both run against the real `/home/thilakshan/Documents/Projects/cysec-project/vm-shared/firefox_5368_20260904T050334Z.bin` with the same targeting the committed report used): every derived field — `targeted.{urls,cookies,search_queries,credentials,downloads}`, `key_findings`, `timeline`, `artifacts` — came back **byte-identical**. Only `unfiltered.total_strings_extracted` differs, by 4 out of 1,919,057 (0.0002%) — a boundary-dedup edge case in the overlap region that affects zero actual findings, present in both old and new logic's neighborhood, not a regression.
+   - **Peak RSS measured** (`/usr/bin/time -v`, same 537 MB dump): 454,052 KB → 384,740 KB, ~15% lower. Gets more pronounced the bigger the image gets, since the old cost scaled with match count, not file size.
+2. **Unbounded per-category result lists** — added `MAX_RECORDS_PER_TYPE = 50_000`, enforced via a new `append_capped()` helper wrapping every `urls`/`cookies`/`search_queries`/`credentials`/`downloads`/`artifacts` append site. A capped category is recorded in a new top-level `report["truncated"]: dict[str, bool]`, and `format_summary()` prints a `[!] Result cap (50,000/type) hit — truncated: ...` line when non-empty. Also capped `onion_domain_hits` (only ever used for the top-10 `targeting_suggestions`) to `most_common(1_000)` once it exceeds 10,000 distinct keys.
+   - **Verified**: synthetic 10-URL dump with `MAX_RECORDS_PER_TYPE` monkeypatched to 3 → exactly 3 `urls`/`artifacts` returned, `truncated == {"urls": True, "artifacts": True}`, warning line present in `format_summary()` output.
+
+Not started at the time this section was written: acquisition scripts for WinPMEM/pagefile/hiberfil, Volatility3 integration, provenance modelling in the report, `main.py`/`report.py`/template wiring for multi-source runs. **WinPMEM acquisition and Volatility3 integration are both done now — see the two sections below.** pagefile.sys/hiberfil.sys extraction is still not started.
+
+## WinPMEM full-memory acquisition (2026-09-16, commit `f9f4511`)
+
+Added `modules/module_c_memory/winpmem_acquire.py` — Windows-only, admin-required, shells
+out to an examiner-supplied WinPMEM binary (`--winpmem-path`; not vendored, same pattern
+as RawCopy/TScopy in the pagefile/hiberfil design above) to capture a full physical-memory
+`.raw` image, hash it, sidecar it, and log it — same pattern as `dumper.py`'s process
+dumps. `analyzer.py` gained a `source_type: process|full-memory` parameter (`--source-type`
+on its CLI and `main.py`) that's pure provenance/threshold labeling — it raises the
+per-category result cap for full-memory images (`SOURCE_TYPE_RECORD_CAPS`, 50k → 200k) and
+records which acquisition path produced the analyzed file, but never invokes either
+acquisition tool itself. `module_c_memory/__init__.py::run()` stays "analyze an existing
+--dump" only, by design — see that file's docstring for why auto-invoking Windows-only
+acquisition from an otherwise offline analysis entrypoint was deliberately not done.
+
+## Volatility3 structural analysis (2026-09-16, 4 commits)
+
+Added a second, independent analysis pass alongside the string carver:
+
+- **`modules/module_c_memory/volatility_analyze.py`** — thin subprocess wrapper around
+  the `vol` CLI (`vol -q -f <image> -r json <plugin>`), not Volatility3's internal
+  framework API. Runs `windows.psscan.PsScan`, `windows.netscan.NetScan`,
+  `windows.filescan.FileScan`, `windows.cmdline.CmdLine`,
+  `windows.registry.hivelist.HiveList` — each independently; one plugin's failure
+  (typically: no symbol table matching the imaged OS build) is recorded and doesn't
+  abort the rest. Only a genuinely unreachable `vol` binary or missing image raises
+  `core.exceptions.AnalysisError` (new — narrowly scoped, not reusing `AcquisitionError`
+  since this is an analysis-time failure, not an acquisition-time one). Every row is
+  tagged `"source": "volatility3:<plugin>"` so it can never be confused with a
+  string-carver finding downstream.
+- Actually installed `volatility3` (2.28.0, previously in `requirements.txt` unused since
+  the initial commit — bumped to `>=2.26.0` as the tested floor) to verify this against a
+  **real** `vol` CLI, not guessed. Two things only a real run caught:
+  1. **`windows.hivelist` is not a valid plugin name** in 2.28.0 — it's
+     `windows.registry.hivelist.HiveList` (moved under a `registry` sub-namespace at some
+     point). The design doc's plugin list (line ~93 above) has the old short name; the
+     actual code uses the fully-qualified one.
+  2. Exit-code/output-shape behavior isn't obvious from docs alone: `vol` exits 1 (not 0)
+     when a plugin's symbol/layer requirements aren't met, error text goes to *both*
+     stdout and stderr, and there's no JSON on stdout at all in that case — confirmed by
+     running against a 1 MB `/dev/urandom` file with all 5 plugins. The wrapper treats a
+     non-zero exit OR a JSON-parse failure as "this plugin didn't run," never a crash.
+  3. Pulled the exact `TreeGrid` column names for all 5 plugins straight from the
+     installed package source (`volatility3/framework/plugins/windows/{psscan,netscan,
+     filescan,cmdline,registry/hivelist}.py`) rather than assuming — e.g. psscan is
+     `PID/PPID/ImageFileName/Offset{V,P}/Threads/Handles/SessionId/Wow64/CreateTime/
+     ExitTime/File output`, netscan is `Offset/Proto/LocalAddr/LocalPort/ForeignAddr/
+     ForeignPort/State/PID/Owner/Created`. These are what the report's corroboration
+     logic keys off.
+- **`modules/module_c_memory/__init__.py::run()`** gained a `vol3_path` parameter
+  (`--vol3-path` in `main.py`, opt-in — omitted means the whole pass is skipped). Merged
+  into `details["volatility3"]` as its own top-level key, never interleaved into the
+  string-carver's `targeted`/`key_findings` categories. Degrades cleanly: no path given,
+  or `vol` unreachable, both land in `details["volatility3"]["status"] ==
+  "skipped"/"error"` without touching the module's own `ok` status — the string-carver
+  path keeps working independently of whether Volatility3 is installed at all.
+- **Report**: new "Process & system context (Volatility3)" section in
+  `report_template.html.j2`, fed by `_vol3_context()` in `modules/module_c_memory/
+  report.py`. Per-plugin tables driven directly off each row's own keys (no hardcoded
+  column list to keep in sync). Corroboration is deliberately plain-text juxtaposition,
+  not a scoring engine, per the task spec: a psscan row whose `ImageFileName` is
+  `firefox.exe` gets a note that structural evidence agrees a browser process existed; a
+  netscan row matching `--host` gets a note it saw that connection independently; a
+  filescan row whose filename matches an already-confirmed `\Downloads\` hit gets a note
+  they match. All three verified against synthetic Volatility3-shaped row data (a real
+  successful plugin run needs actual Windows kernel symbols + a real Windows image,
+  neither available in this environment — see below).
+
+**Still unverified, same reason as the WinPMEM section above**: no real Volatility3
+plugin run against a real Windows memory image in this session — only against a junk
+1 MB file (confirms invocation/argument/error-handling correctness, not real output
+parsing) and hand-built synthetic JSON matching the real `TreeGrid` schemas (confirms
+report/corroboration logic, not that Volatility3 itself will actually produce that shape
+against a real capture). The existing real dump (`firefox_5368_20260904T050334Z.bin`) is
+a single-process dump, not a full-system image most `windows.*` plugins expect, so even
+once a Windows box is available, that specific file likely won't exercise this well —
+next real validation should pair a `winpmem_acquire.py` full-memory image with a real
+Volatility3 run on Windows or against a copied-off image with correct symbols.
+
 ## Quick reference
 
 ```
-# Dump (Windows VM, elevated shell, Tor Browser open)
+# Dump a live process (Windows VM, elevated shell, Tor Browser open)
 python -m modules.module_c_memory.dumper --output-dir captures
 
-# Analyze (any machine, offline)
-python -m modules.module_c_memory.analyzer captures\firefox_<pid>_<ts>.bin --host 127.0.0.1:5000 --onion <addr>.onion --username <user>
+# OR: full physical-memory capture (Windows, elevated, WinPMEM binary supplied by examiner)
+python -m modules.module_c_memory.winpmem_acquire --winpmem-path C:\tools\winpmem.exe --output-dir captures
+
+# Analyze the string-carve pass alone (any machine, offline)
+python -m modules.module_c_memory.analyzer captures\firefox_<pid>_<ts>.bin --host 127.0.0.1:5000 --onion <addr>.onion --username <user> --source-type process
+
+# Full pipeline incl. Volatility3 structural pass (any machine, offline; --vol3-path opt-in)
+python main.py --case demo --dump captures\fullmem_<ts>.raw --host 127.0.0.1:5000 --source-type full-memory --vol3-path vol
 ```
