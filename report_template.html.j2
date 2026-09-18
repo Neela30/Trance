@@ -134,6 +134,61 @@
     </div>
   </section>
 
+  {% if registry %}
+  <div class="band">
+    <div class="eyebrow">Module A</div>
+    <h2>Registry &amp; execution evidence</h2>
+    <dl class="meta-grid" style="margin-bottom:32px;">
+      <dt>Hives analyzed</dt><dd>{{ registry.hives_analyzed|join(", ") if registry.hives_analyzed else "— none" }}</dd>
+      {% if registry.hives_missing %}
+      <dt>Hives not provided</dt><dd>{{ registry.hives_missing|join(", ") }}</dd>
+      {% endif %}
+      <dt>Summary</dt><dd>{{ registry.summary }}</dd>
+    </dl>
+  </div>
+
+  {% if registry.errors %}
+  <section>
+    <div class="callout">
+      <strong>Extraction errors:</strong> the findings below are from whichever hives/plugins succeeded; these did not.
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        {% for err in registry.errors %}
+        <li class="mono" style="font-size:12px;">{{ err }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </section>
+  {% endif %}
+
+  <section>
+    <div class="section-head"><h2>Tor-related registry artifacts</h2><span class="count">{{ registry.total_findings }} finding{{ "s" if registry.total_findings != 1 }}, strongest confidence first</span></div>
+    {% if registry.sections %}
+    {% for s in registry.sections %}
+    <div class="section-head" style="margin-top:22px;">
+      <h3 style="font-size:15px; font-weight:600;">{{ s.label }}</h3>
+      <span class="count"><span class="chip {{ 'high' if s.confidence == 'high' else ('low' if s.confidence == 'low' else '') }}">{{ s.confidence }}</span> {{ s.findings|length }} finding{{ "s" if s.findings|length != 1 }}</span>
+    </div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Description</th><th>Source hive</th><th>Timestamp</th></tr></thead>
+        <tbody>
+          {% for f in s.findings %}
+          <tr>
+            <td class="val">{{ f.description }}</td>
+            <td class="off">{{ f.source }}</td>
+            <td class="off">{{ f.timestamp or "—" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p class="note">No Tor-related registry artifacts found in the provided hives.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {% if memory %}
   {% set d = memory.details %}
   <div class="band">
