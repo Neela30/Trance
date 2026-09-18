@@ -181,12 +181,15 @@
         <p>{{ memory.site_map|length }} distinct path{{ "s" if memory.site_map|length != 1 }} recovered on the target.
         {% if memory.near_duplicates %}{{ memory.near_duplicates|length }} look like possible typos/probes.{% endif %}</p>
       </div>
-      <div class="tile{{ '' if memory.downloads else ' gap' }}">
+      <div class="tile{{ '' if memory.downloads.matched else ' gap' }}">
         <h3>Local downloads</h3>
-        {% if memory.downloads %}
-        <p>{{ memory.downloads|length }} file{{ "s" if memory.downloads|length != 1 }} confirmed under a real <span class="mono">Downloads</span> folder.</p>
+        {% if memory.downloads.matched %}
+        <p>{{ memory.downloads.matched|length }} file{{ "s" if memory.downloads.matched|length != 1 }} confirmed under a real <span class="mono">Downloads</span> folder, matched to a target-site path.</p>
         {% else %}
-        <p>No files found under a <span class="mono">Users\*\Downloads\</span> path in this dump.</p>
+        <p>No downloads correlate to a target-site path in this dump.</p>
+        {% endif %}
+        {% if memory.downloads.unmatched %}
+        <p class="note">+ {{ memory.downloads.unmatched|length }} other download{{ "s" if memory.downloads.unmatched|length != 1 }} seen on this machine, not correlated to the target site — see below.</p>
         {% endif %}
       </div>
       <div class="tile{{ '' if d.key_findings.credentials else ' gap' }}">
@@ -259,20 +262,31 @@
   </section>
 
   <section>
-    <div class="section-head"><h2>Local downloads</h2><span class="count">{{ memory.downloads|length }} confirmed under \Downloads\</span></div>
-    {% if memory.downloads %}
+    <div class="section-head"><h2>Local downloads</h2><span class="count">{{ memory.downloads.matched|length }} matched to a target-site path</span></div>
+    {% if memory.downloads.matched %}
     <div class="table-scroll">
       <table class="evidence-table">
         <thead><tr><th>File</th><th>Matches site endpoint</th></tr></thead>
         <tbody>
-          {% for dl in memory.downloads %}
-          <tr><td class="val">{{ dl.value }}</td><td class="val">{{ dl.matched_endpoint or "— no matching path recovered" }}</td></tr>
+          {% for dl in memory.downloads.matched %}
+          <tr><td class="val">{{ dl.value }}</td><td class="val">{{ dl.matched_endpoint }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
     {% else %}
-    <p class="note">No confirmed local downloads.</p>
+    <p class="note">No downloads correlate to a target-site path.</p>
+    {% endif %}
+    {% if memory.downloads.unmatched %}
+    <details class="appendix" style="margin-top:14px;">
+      <summary>Show {{ memory.downloads.unmatched|length }} other download{{ "s" if memory.downloads.unmatched|length != 1 }} seen on this machine — not correlated to the target site</summary>
+      <div class="appendix-body">
+        <p class="note" style="margin-bottom:10px;">This is a full-memory image: a <span class="mono">Users\*\Downloads\</span> path anywhere on the machine — any user account, any application, unrelated installers — shows up here, not just this investigation's target. None of these correlate to a recovered target-site path; treat them as machine-wide context, not evidence tied to the target.</p>
+        {% for dl in memory.downloads.unmatched %}
+        <div class="appendix-row"><span class="val">{{ dl.value }}</span></div>
+        {% endfor %}
+      </div>
+    </details>
     {% endif %}
   </section>
 

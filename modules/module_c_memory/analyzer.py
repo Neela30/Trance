@@ -21,6 +21,16 @@ OVERLAP = 4096
 DEFAULT_MIN_LEN = 6
 SAMPLE_CAP = 20
 SUGGESTION_MIN_HITS = 3
+# A full-memory image carries every process's memory, not just one browser's -- Tor
+# Browser's own bundled default services (search engine, connectivity checks) rack up
+# more incidental hits there than in a single-process dump simply because there's more
+# total scanned content, not because they're more significant. Same reasoning as
+# SOURCE_TYPE_RECORD_CAPS below: same detection logic, source-type-scaled threshold for
+# what counts as worth flagging.
+SOURCE_TYPE_SUGGESTION_MIN_HITS = {
+    "process": SUGGESTION_MIN_HITS,
+    "full-memory": 6,
+}
 # Past process-dump scale (whole-system RAM images, pagefiles), an unbounded
 # per-category list is the memory risk, not iter_strings() itself — cap each
 # and record that it happened rather than let analyze() OOM silently.
@@ -62,19 +72,29 @@ NOISY_COOKIE_RE = re.compile(r"\b(\w*(?:session|token|auth|cookie|csrf)\w*)=([^\
 # strings carry either a file:// URI or an absolute Windows path ending in a
 # common downloaded-file extension.
 FILE_URI_RE = re.compile(r"file:///[^\s\"'<>\\]+", re.IGNORECASE)
+# ':' excluded from the path body (not just control/quote/angle-bracket/pipe chars): a
+# real Windows path never contains a second ':' after the drive letter, and without this
+# exclusion, memory holding the SAME path written twice back-to-back with no separator
+# (seen in practice -- Explorer/MRU-style duplication) makes \b fail right after the
+# first extension (word-char 'e' meeting word-char 'C' is not a boundary), so the regex
+# backtrack-extends into the second copy and reports "...exeC:\...\...exe" as one bogus
+# concatenated "path". Verified: this exact shape showed up 3x in a real capture.
 DOWNLOAD_PATH_RE = re.compile(
-    r"[A-Za-z]:\\(?:Users|Downloads)[^\x00-\x1f\"'<>|]*?"
+    r"[A-Za-z]:\\(?:Users|Downloads)[^\x00-\x1f\"'<>|:]*?"
     r"\.(?:pdf|zip|rar|7z|exe|msi|docx?|xlsx?|pptx?|csv|txt|jpg|jpeg|png|gif|mp4|mp3|iso|dat)\b",
     re.IGNORECASE,
 )
-# Values that are Firefox's own printf-style format strings ("%p", "%lld.")
-# or single/near-empty leftovers ("a", "]") rather than real captured data —
-# these otherwise drown out genuine hits under the same exact-name regex.
-_NOISE_VALUE_RE = re.compile(r"^%|^.{1,2}$")
+# Values that are Firefox's own printf-style format strings ("%p", "%lld."), near-empty
+# leftovers ("a", "]"), or minified JS source that happens to contain "session=<code>"
+# as a substring (destructuring/chained-assignment syntax, no whitespace) rather than
+# real captured data -- these otherwise drown out genuine hits under the same exact-name
+# regex. A real cookie/credential/session value never legitimately contains JS/code
+# punctuation like parens or braces.
+_NOISE_VALUE_RE = re.compile(r"^%|^.{1,2}$|[(){}]")
 
 
 def _is_noise_value(value: str) -> bool:
-    return bool(_NOISE_VALUE_RE.match(value))
+    return bool(_NOISE_VALUE_RE.search(value))
 
 
 # A hit under \Users\<name>\Downloads\ (Windows' actual save-to location,
@@ -298,6 +318,28 @@ def analyze(
     onion_domain_hits: Counter[str] = Counter()
     truncated: dict[str, bool] = {}
 
+    # Unlike URLs, a cookie/credential/search-query match carries no host of its own to
+    # check against _matches_target() -- so on a single-process dump (already scoped to
+    # one browser's memory) they're kept exactly as before. On a full-memory image,
+    # every process's memory is in scope, and an exact-shape regex match (e.g. "user=...")
+    # from an unrelated process is otherwise indistinguishable from a real one -- see
+    # context.md's "why the 78 credentials are garbage" incident. The best proxy for
+    # "this hit belongs to the target" without real per-process attribution (that's what
+    # volatility_analyze.py's process extraction is for) is: does the *same extracted
+    # string* also mention the target onion/host? Real form submissions and JS-rendered
+    # page state commonly carry both in one contiguous run; unrelated processes' strings
+    # essentially never do. Hits that fail this check aren't discarded -- they're kept
+    # under "unanchored" for transparency, just excluded from "targeted"/key_findings.
+    require_host_anchor = source_type == "full-memory" and bool(targets)
+    unanchored_counts = {"credentials": 0, "search_queries": 0}
+    unanchored_samples: dict[str, list[str]] = {"credentials": [], "search_queries": []}
+
+    def record_unanchored(category: str, value: str) -> None:
+        unanchored_counts[category] += 1
+        sample = unanchored_samples[category]
+        if len(sample) < SAMPLE_CAP:
+            sample.append(value)
+
     def append_capped(items: list[dict], item: dict, type_name: str) -> None:
         if len(items) >= record_cap:
             truncated[type_name] = True
@@ -320,6 +362,7 @@ def analyze(
 
     for offset, s in iter_strings(dump_path, min_len=min_len):
         total_strings += 1
+        s_matches_target = require_host_anchor and any(t in s.lower() for t in targets)
 
         url_spans: list[tuple[int, int]] = []
         url_hits: list[tuple[int, str, str, str]] = []
@@ -360,6 +403,13 @@ def analyze(
                 onion_domain_hits = Counter(dict(onion_domain_hits.most_common(1_000)))
 
         for m in COOKIE_RE.finditer(s):
+            # Not host-anchored, unlike credentials/search-queries below: a cookie lives
+            # in Firefox's own cookie-jar structure, not co-located in memory with the
+            # page/URL text that set it, so the same-string proximity check that works
+            # for form submissions just drops real cookies here (verified: it silently
+            # ate a real, high-confidence JWT session cookie in testing). COOKIE_RE's own
+            # exact app-specific name match (session/trance_user/trance_pref, not a
+            # generic field name) is already the precision this needs.
             name, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
             confidence = "low" if _is_noise_value(value) else "high"
@@ -377,6 +427,9 @@ def analyze(
         for m in SEARCH_QUERY_RE.finditer(s):
             value = m.group(1)
             match_offset = offset + m.start()
+            if require_host_anchor and not s_matches_target:
+                record_unanchored("search_queries", value)
+                continue
             matches_username = bool(username) and username.lower() in value.lower()
             append_capped(
                 search_queries,
@@ -388,6 +441,9 @@ def analyze(
         for m in CREDENTIAL_RE.finditer(s):
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
+            if require_host_anchor and not s_matches_target:
+                record_unanchored("credentials", f"{field}={value}")
+                continue
             confidence = "low" if _is_noise_value(value) else "high"
             append_capped(
                 credentials,
@@ -398,6 +454,9 @@ def analyze(
         for m in CREDENTIAL_JSON_RE.finditer(s):
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
+            if require_host_anchor and not s_matches_target:
+                record_unanchored("credentials", f'"{field}":"{value}"')
+                continue
             confidence = "low" if _is_noise_value(value) else "high"
             append_capped(
                 credentials,
@@ -422,10 +481,11 @@ def analyze(
     # anything — those show up here too and are expected background noise,
     # not evidence of user action. Capped and left unlabeled rather than
     # guessing which specific v3 addresses are "default" (those can rotate).
+    suggestion_min_hits = SOURCE_TYPE_SUGGESTION_MIN_HITS.get(source_type, SUGGESTION_MIN_HITS)
     targeting_suggestions = [
         {"onion": domain, "hit_count": count}
         for domain, count in onion_domain_hits.most_common(10)
-        if count >= SUGGESTION_MIN_HITS and not any(domain in t for t in targets)
+        if count >= suggestion_min_hits and not any(domain in t for t in targets)
     ]
 
     def _dedup_high_confidence(items: list[dict], value_key: str) -> list[dict]:
@@ -455,6 +515,7 @@ def analyze(
             "source_type": source_type,
         },
         "record_cap": record_cap,
+        "suggestion_min_hits": suggestion_min_hits,
         "targeting": {"onion": onion, "host": host, "username": username},
         "targeting_suggestions": targeting_suggestions,
         "key_findings": {
@@ -488,6 +549,21 @@ def analyze(
         },
         "artifacts": artifacts,
         "truncated": truncated,
+        "host_anchoring": {
+            "applied": require_host_anchor,
+            "note": "credentials/search_queries only count as targeted evidence when the same extracted "
+            "string also mentions --onion/--host; a full-memory image scans every process's memory, not "
+            "just one browser's, and this is the closest proxy for 'this belongs to the target' without "
+            "true per-process attribution (see volatility_analyze.py process extraction for that). NOT "
+            "applied to cookies (COOKIE_RE's exact app-specific name is already precise, and a cookie "
+            "isn't co-located in memory with the page that set it -- this dropped a real session cookie "
+            "in testing) or to source_type='process' dumps (already scoped to one process). Hits that "
+            "fail this check are kept below, not discarded, just excluded from 'targeted'.",
+            "unanchored": {
+                category: {"count": unanchored_counts[category], "sample": unanchored_samples[category]}
+                for category in ("credentials", "search_queries")
+            },
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -509,6 +585,15 @@ def format_summary(report: dict) -> str:
         record_cap = report.get("record_cap", MAX_RECORDS_PER_TYPE)
         capped = ", ".join(sorted(report["truncated"]))
         lines.append(f"[!] Result cap ({record_cap:,}/type) hit — truncated: {capped}")
+    ha = report.get("host_anchoring")
+    if ha and ha["applied"]:
+        dropped = sum(v["count"] for v in ha["unanchored"].values())
+        if dropped:
+            lines.append(
+                f"[i] Host-anchoring dropped {dropped} cookie/credential/search-query hit(s) not "
+                f"co-located with --onion/--host in the same string (full-memory scan) — see "
+                f"'host_anchoring.unanchored' in the JSON report."
+            )
     lines += [
         "",
         "=== KEY FINDINGS (deduplicated, high-confidence) ===",

@@ -161,6 +161,144 @@ def analyze(
     }
 
 
+def find_process_pid(vol_bin: str, image_path: Path, process_name: str = "firefox.exe") -> dict:
+    """Discover which PID(s) `process_name` has in `image_path`, via windows.pslist.
+
+    Deliberately pslist, not psscan, even though psscan is one of the five plugins
+    analyze() runs above: windows.memmap.Memmap (see extract_process_memory) builds its
+    per-process view by calling pslist.PsList.list_processes() internally (confirmed by
+    reading the installed Volatility3 source), so a PID psscan finds via its pool-scan
+    but that pslist's live kernel-list walk no longer sees -- i.e. one that has already
+    exited -- cannot be extracted by memmap regardless of what this function returns.
+    psscan is still the right tool to *confirm a since-exited process existed at all*
+    (see analyze()'s windows.psscan.PsScan pass); it just can't feed memmap.
+    """
+    result = _run_one(vol_bin, image_path, "windows.pslist.PsList")
+    if result["status"] != "ok":
+        return {
+            "status": "error",
+            "message": f"windows.pslist failed: {result['message']}",
+            "candidates": [],
+            "chosen_pid": None,
+            "chosen_reason": None,
+        }
+    candidates = [r for r in result["rows"] if (r.get("ImageFileName") or "").lower() == process_name.lower()]
+    if not candidates:
+        return {
+            "status": "not_found",
+            "message": f"No live {process_name} process visible to windows.pslist -- it may have already "
+            "exited by capture time (memmap can only extract a still-live process's pages; check "
+            "windows.psscan for a residual/exited entry instead, which proves existence/timing but not "
+            "content).",
+            "candidates": [],
+            "chosen_pid": None,
+            "chosen_reason": None,
+        }
+    # Firefox's multi-process architecture spawns content-process children with the main
+    # UI process's PID as their PPID, so the main process -- the one actually holding
+    # browsing-relevant memory -- is identifiable as whichever candidate is itself a
+    # parent of another same-named candidate. Falls back to the lowest PID (oldest, by
+    # PID-allocation convention) if that relationship isn't found, e.g. a single instance.
+    candidate_pids = {c["PID"] for c in candidates}
+    parent_pids = {c["PID"] for c in candidates if c["PID"] in {c2.get("PPID") for c2 in candidates}}
+    if parent_pids:
+        chosen, reason = min(parent_pids), "parent of other same-named child processes"
+    else:
+        chosen, reason = min(candidate_pids), "lowest PID (no parent/child relationship among candidates)"
+    return {"status": "ok", "message": None, "candidates": candidates, "chosen_pid": chosen, "chosen_reason": reason}
+
+
+def extract_process_memory(
+    vol_bin: str, image_path: Path, pid: int, output_dir: Path, timeout: int = PLUGIN_TIMEOUT_SECONDS
+) -> Path:
+    """Extract one process's resident pages from a full-memory image via
+    `windows.memmap --pid <pid> --dump`, writing `pid.<pid>.dmp` under `output_dir`
+    (Volatility3's own naming convention for this plugin -- see its source). Only
+    succeeds if `pid` is still visible to windows.pslist at capture time; see
+    find_process_pid()'s docstring for why an exited process can't be extracted this way.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        vol_bin, "-q", "-o", str(output_dir), "-f", str(image_path), "-r", "json",
+        "windows.memmap.Memmap", "--pid", str(pid), "--dump",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise AnalysisError(f"windows.memmap timed out after {timeout}s extracting PID {pid}: {exc}") from exc
+    if result.returncode != 0:
+        raise AnalysisError(
+            f"windows.memmap failed for PID {pid} (exit {result.returncode}).\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+        )
+    dump_path = output_dir / f"pid.{pid}.dmp"
+    if not dump_path.exists() or dump_path.stat().st_size == 0:
+        raise AnalysisError(
+            f"windows.memmap reported success but produced no (or an empty) {dump_path.name} -- PID {pid} "
+            "may have exited between discovery and extraction, or its pages could not be read."
+        )
+    return dump_path
+
+
+def extract_target_process(
+    vol_path: Path | str | None,
+    image_path: Path,
+    output_dir: Path,
+    process_name: str = "firefox.exe",
+    pid: int | None = None,
+) -> dict:
+    """Best-effort discover-then-extract: find `process_name`'s PID (unless `pid` is
+    given explicitly) and pull just its resident pages out of a full-memory image, so
+    analyzer.py's string carver can run against that far smaller, far less noisy extract
+    instead of the whole image.
+
+    Returns a dict describing the outcome -- status "ok"/"not_found"/"error" -- and never
+    raises for a normal "couldn't extract" outcome (the caller is expected to fall back
+    to analyzing the full image, which still works and still finds real evidence). Only
+    raises AnalysisError if Volatility3 itself can't be invoked at all or the source
+    image is missing, matching analyze()'s own contract.
+    """
+    if not image_path.exists():
+        raise AnalysisError(f"Image not found: {image_path}")
+    vol_bin = _resolve_vol_binary(vol_path)
+
+    if pid is not None:
+        discovery = {
+            "status": "ok", "message": None, "candidates": [], "chosen_pid": pid,
+            "chosen_reason": "explicit PID override",
+        }
+    else:
+        discovery = find_process_pid(vol_bin, image_path, process_name)
+        if discovery["status"] != "ok":
+            return {
+                "status": discovery["status"],
+                "message": discovery["message"],
+                "discovery": discovery,
+                "source_image": str(image_path),
+                "dump_path": None,
+            }
+        pid = discovery["chosen_pid"]
+
+    try:
+        dump_path = extract_process_memory(vol_bin, image_path, pid, output_dir)
+    except AnalysisError as exc:
+        return {
+            "status": "error",
+            "message": str(exc),
+            "discovery": discovery,
+            "source_image": str(image_path),
+            "dump_path": None,
+        }
+    return {
+        "status": "ok",
+        "message": None,
+        "discovery": discovery,
+        "source_image": str(image_path),
+        "pid": pid,
+        "dump_path": str(dump_path),
+    }
+
+
 def format_summary(report: dict) -> str:
     lines = [
         "=== TRANCE Volatility3 Structural Analysis ===",

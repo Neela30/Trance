@@ -137,6 +137,30 @@ def test_filescan_corroboration_matches_confirmed_download_basename(tmp_path):
     assert "evidence_report.txt" in notes[0]
 
 
+def test_downloads_split_matched_unmatched_on_full_memory(tmp_path):
+    dump = tmp_path / "d.bin"
+    dump.write_bytes(
+        b"http://target.onion/login\x00"
+        b"http://target.onion/download/evidence_report.txt\x00"
+        b"C:\\Users\\alice\\Downloads\\evidence_report.txt\x00"
+        b"C:\\Users\\bob\\Downloads\\unrelated_installer.exe\x00"
+    )
+    details = analyze(dump, onion="target.onion", host=None, username=None, source_type="full-memory")
+    ctx = build_context(details)
+    matched_values = {d["value"] for d in ctx["downloads"]["matched"]}
+    unmatched_values = {d["value"] for d in ctx["downloads"]["unmatched"]}
+    assert any("evidence_report.txt" in v for v in matched_values)
+    assert any("unrelated_installer.exe" in v for v in unmatched_values)
+    assert not any("unrelated_installer.exe" in v for v in matched_values)
+
+
+def test_downloads_not_split_on_process_source_type(tmp_path):
+    details = base_details(tmp_path)  # source_type="process" by default
+    ctx = build_context(details)
+    assert ctx["downloads"]["unmatched"] == []
+    assert len(ctx["downloads"]["matched"]) == len(details["key_findings"]["downloads"])
+
+
 def test_no_corroboration_notes_when_nothing_lines_up(tmp_path):
     details = base_details(tmp_path)
     details["volatility3"] = {
