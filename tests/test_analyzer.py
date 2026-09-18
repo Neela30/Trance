@@ -59,3 +59,33 @@ def test_no_targets_leaves_host_anchoring_inactive_on_full_memory(tmp_path):
     report = analyze(dump, onion=None, host=None, username=None, source_type="full-memory")
     assert not report["host_anchoring"]["applied"]
     assert len(report["targeted"]["credentials"]) == 2
+
+
+def test_download_path_regex_does_not_concatenate_repeated_paths(tmp_path):
+    # Real bug: the same path written twice back-to-back with no separator made \b fail
+    # right after the first extension (word-char 'e' meeting word-char 'C' is not a
+    # boundary), so the old regex backtrack-extended into a second copy and reported
+    # "...exeC:\...\...exe" as one bogus concatenated path. Reproduced on a real capture.
+    doubled = rb"C:\Users\vboxuser\Downloads\Git-2.55.0.5-64-bit.exeC:\Users\vboxuser\Downloads\Git-2.55.0.5-64-bit.exe"
+    dump = make_dump(tmp_path, doubled + b"\x00")
+    report = analyze(dump, onion=None, host=None, username=None)
+    values = [d["value"] for d in report["targeted"]["downloads"]]
+    assert r"C:\Users\vboxuser\Downloads\Git-2.55.0.5-64-bit.exe" in values
+    assert not any(v.count(":") > 1 for v in values)
+
+
+def test_noise_value_filters_code_shaped_cookie_values(tmp_path):
+    # Real bug: minified JS containing a literal "session=<code>" substring (destructuring/
+    # chained-assignment syntax, no whitespace) was tagged high-confidence alongside a real
+    # JWT session cookie. A real cookie/credential value never contains JS punctuation.
+    dump = make_dump(
+        tmp_path,
+        b"session=eyJyb2xlIjoidXNlciJ9\x00"
+        b"session=e}clear(){this.session.clearCache()}resetCacheControl(){this.setCacheControl(\x00"
+        b"session=c[0],l.count=uo(c[2])+1,l.upgrade=uo(c[3]),l.upload=c.length\x00",
+    )
+    report = analyze(dump, onion=None, host=None, username=None)
+    by_value = {c["value"]: c["confidence"] for c in report["targeted"]["cookies"]}
+    assert by_value["eyJyb2xlIjoidXNlciJ9"] == "high"
+    assert by_value["e}clear(){this.session.clearCache()}resetCacheControl(){this.setCacheControl("] == "low"
+    assert by_value["c[0],l.count=uo(c[2])+1,l.upgrade=uo(c[3]),l.upload=c.length"] == "low"
