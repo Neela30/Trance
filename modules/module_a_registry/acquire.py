@@ -22,7 +22,13 @@ winpmem_acquire.py's WinPMEM:
     it. Uses a Volume Shadow Copy instead: snapshot the volume, copy the
     file out of the point-in-time-consistent snapshot (the live lock
     doesn't apply there), then delete the shadow copy immediately after --
-    minimal footprint, nothing left behind on the target.
+    minimal footprint, nothing left behind on the target. Shadow creation
+    goes through WMI (Win32_ShadowCopy.Create() via PowerShell), not
+    `vssadmin create shadow` -- confirmed on a real client-Windows target
+    that vssadmin's own "create shadow" verb is Server-only ("Error:
+    Invalid command", and its own printed command list omits it while
+    still listing "Delete Shadows"/"List Shadows" as supported -- so
+    deletion/cleanup still goes through vssadmin, only creation doesn't).
 
 --ntuser-user reuses the same VSS mechanism for a NAMED user's NTUSER.DAT
 instead of the live HKCU export -- covers both "a different user is
@@ -62,8 +68,22 @@ else:
 
 
 ACQUIRE_TIMEOUT_SECONDS = 300
-_SHADOW_VOLUME_RE = re.compile(r"Shadow Copy Volume Name:\s*(\S+)")
-_SHADOW_ID_RE = re.compile(r"Shadow Copy ID:\s*(\{[0-9A-Fa-f-]+\})")
+_SHADOW_ID_LINE_RE = re.compile(r"^ShadowID=(\S+)", re.MULTILINE)
+_DEVICE_OBJECT_LINE_RE = re.compile(r"^DeviceObject=(\S+)", re.MULTILINE)
+# vssadmin's own "create shadow" verb is Server-only -- confirmed on a real client-Windows
+# target: it returns "Error: Invalid command" and its own printed command list omits
+# "Create Shadow" while still listing "Delete Shadows"/"List Shadows" as supported (so
+# _delete_shadow_copy() below keeps using vssadmin; only creation needs a different path).
+# WMI's Win32_ShadowCopy.Create() is the documented client-Windows workaround.
+_CREATE_SHADOW_PS_SCRIPT = (
+    "$ErrorActionPreference = 'Stop'; "
+    "$result = (Get-WmiObject -List Win32_ShadowCopy).Create('{drive}\\', 'ClientAccessible'); "
+    "if ($result.ReturnValue -ne 0) {{ "
+    "Write-Error \"Win32_ShadowCopy.Create failed, ReturnValue=$($result.ReturnValue)\"; exit 1 }} "
+    "$shadow = Get-WmiObject Win32_ShadowCopy | Where-Object {{ $_.ID -eq $result.ShadowID }}; "
+    "Write-Output \"ShadowID=$($shadow.ID)\"; "
+    "Write-Output \"DeviceObject=$($shadow.DeviceObject)\""
+)
 
 
 def _run(cmd: list[str], timeout: int = ACQUIRE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
@@ -116,28 +136,33 @@ def acquire_ntuser_live(output_dir: Path, custody: CustodyLog) -> Path:
 
 
 def _create_shadow_copy(drive: str = "C:") -> tuple[str, str]:
-    """Returns (shadow_id, shadow_volume_path). Caller must _delete_shadow_copy() when done."""
-    result = _run(["vssadmin", "create", "shadow", f"/for={drive}"])
+    """Returns (shadow_id, shadow_volume_path). Caller must _delete_shadow_copy() when done.
+
+    Via WMI/PowerShell, not vssadmin -- see module-level note above _CREATE_SHADOW_PS_SCRIPT.
+    """
+    script = _CREATE_SHADOW_PS_SCRIPT.format(drive=drive.rstrip("\\"))
+    result = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
     if result.returncode != 0:
         raise AcquisitionError(
-            f"vssadmin could not create a shadow copy of {drive} (exit {result.returncode}).\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}\n"
-            "Common cause: Volume Shadow Copy Service not running, or a Windows edition/policy "
-            "that restricts vssadmin -- try `net start vss` first, or confirm you're elevated."
+            f"Could not create a shadow copy of {drive} via WMI (exit {result.returncode}).\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
         )
-    volume_match = _SHADOW_VOLUME_RE.search(result.stdout)
-    id_match = _SHADOW_ID_RE.search(result.stdout)
-    if not volume_match or not id_match:
+    id_match = _SHADOW_ID_LINE_RE.search(result.stdout)
+    device_match = _DEVICE_OBJECT_LINE_RE.search(result.stdout)
+    if not id_match or not device_match:
         raise AcquisitionError(
-            "vssadmin reported success but its output didn't contain a recognizable shadow "
-            f"copy volume/ID -- output shape may differ on this Windows version:\n{result.stdout}"
+            "Shadow copy creation reported success but its output didn't contain a "
+            f"recognizable ShadowID/DeviceObject:\n{result.stdout}"
         )
-    return id_match.group(1), volume_match.group(1)
+    return id_match.group(1), device_match.group(1)
 
 
 def _delete_shadow_copy(shadow_id: str) -> None:
     """Best-effort cleanup, never raises -- so a copy failure still gets reported as
-    itself rather than being masked by a cleanup error, and cleanup still runs either way."""
+    itself rather than being masked by a cleanup error, and cleanup still runs either way.
+    vssadmin delete IS supported on client Windows (unlike create -- see above), confirmed
+    by the same real target's own printed command list."""
+    shadow_id = shadow_id if shadow_id.startswith("{") else f"{{{shadow_id}}}"
     result = _run(["vssadmin", "delete", "shadows", f"/shadow={shadow_id}", "/quiet"])
     if result.returncode != 0:
         print(
