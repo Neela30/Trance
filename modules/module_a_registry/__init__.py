@@ -17,6 +17,7 @@ this pipeline-contract wrapper.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 
 from core.config import TranceConfig
@@ -44,6 +45,13 @@ def run(
     except IntegrityError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))
 
+    # Grouped by artifact_type for the report presenter (modules/module_a_registry/
+    # report.py) -- ModuleResult.artifacts stays the flat Artifact list every other
+    # module uses for the cross-module array; this is a presentation-only duplicate.
+    findings_by_type: dict[str, list[dict]] = {}
+    for finding in result.findings:
+        findings_by_type.setdefault(finding.artifact_type, []).append(asdict(finding))
+
     return ModuleResult(
         module=MODULE_NAME,
         status="error" if result.errors else "ok",
@@ -52,6 +60,12 @@ def run(
             "summary": result.summary,
             "errors": result.errors,
             "custody_log_path": result.custody_log_path,
+            "findings_by_type": findings_by_type,
+            "hives_provided": {
+                "ntuser": ntuser is not None,
+                "system": system is not None,
+                "amcache": amcache is not None,
+            },
         },
         message="; ".join(result.errors) if result.errors else None,
     )

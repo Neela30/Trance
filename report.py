@@ -14,6 +14,7 @@ from typing import Callable
 
 from jinja2 import Environment, FileSystemLoader
 
+from modules.module_a_registry.report import build_context as registry_context
 from modules.module_c_memory.report import build_context as memory_context
 
 TEMPLATE_DIR = Path(__file__).parent
@@ -22,6 +23,7 @@ REPORT_FILENAME = "report.html"
 GENERIC_TABLE_CAP = 200
 
 PRESENTERS: dict[str, Callable[[dict], dict]] = {
+    "module_a_registry": registry_context,
     "module_c_memory": memory_context,
 }
 
@@ -57,6 +59,7 @@ def render_report(findings: dict) -> str:
 
     return template.render(
         findings=findings,
+        registry=presented.get("module_a_registry"),
         memory=presented.get("module_c_memory"),
         generic_modules=generic,
     )
