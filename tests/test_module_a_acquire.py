@@ -66,16 +66,14 @@ def test_acquire_system_writes_sidecar_and_custody(tmp_path, monkeypatch):
     assert custody.entries[0].sha256 == acquire.hash_file(path)
 
 
-def test_create_shadow_copy_parses_volume_and_id(monkeypatch):
-    stdout = (
-        "vssadmin 1.1 - Volume Shadow Copy Service administrative command-line tool\n"
-        "(C) Microsoft Corporation. All rights reserved.\n\n"
-        "Successfully created shadow copy for 'C:\\'\n"
-        "    Shadow Copy ID: {12345678-1234-1234-1234-1234567890ab}\n"
-        "    Shadow Copy Volume Name: \\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy2\n"
-    )
+def test_create_shadow_copy_parses_id_and_device_object(monkeypatch):
+    # Real shape of the PowerShell/WMI script's stdout (Win32_ShadowCopy.Create(), not
+    # vssadmin -- vssadmin's own "create shadow" verb is Server-only, confirmed on a real
+    # client-Windows target: "Error: Invalid command").
+    stdout = "ShadowID={12345678-1234-1234-1234-1234567890ab}\nDeviceObject=\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy2\n"
 
     def fake_run(cmd, capture_output, text, timeout):
+        assert cmd[0] == "powershell"
         return subprocess.CompletedProcess(cmd, returncode=0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
@@ -86,10 +84,10 @@ def test_create_shadow_copy_parses_volume_and_id(monkeypatch):
 
 def test_create_shadow_copy_surfaces_nonzero_exit(monkeypatch):
     def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="vssadmin: Error: ...")
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="Win32_ShadowCopy.Create failed")
 
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
-    with pytest.raises(AcquisitionError, match="could not create a shadow copy"):
+    with pytest.raises(AcquisitionError, match="Could not create a shadow copy"):
         acquire._create_shadow_copy()
 
 
@@ -100,6 +98,34 @@ def test_create_shadow_copy_rejects_unparseable_output(monkeypatch):
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
     with pytest.raises(AcquisitionError, match="didn't contain a recognizable"):
         acquire._create_shadow_copy()
+
+
+def test_delete_shadow_copy_braces_a_bare_guid(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(acquire.subprocess, "run", fake_run)
+    acquire._delete_shadow_copy("12345678-1234-1234-1234-1234567890ab")
+    assert captured["cmd"] == [
+        "vssadmin", "delete", "shadows", "/shadow={12345678-1234-1234-1234-1234567890ab}", "/quiet",
+    ]
+
+
+def test_delete_shadow_copy_keeps_braced_id_as_is(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(acquire.subprocess, "run", fake_run)
+    acquire._delete_shadow_copy("{12345678-1234-1234-1234-1234567890ab}")
+    assert captured["cmd"] == [
+        "vssadmin", "delete", "shadows", "/shadow={12345678-1234-1234-1234-1234567890ab}", "/quiet",
+    ]
 
 
 def test_copy_via_shadow_deletes_shadow_even_on_copy_failure(tmp_path, monkeypatch):
