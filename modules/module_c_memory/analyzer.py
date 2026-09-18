@@ -72,19 +72,29 @@ NOISY_COOKIE_RE = re.compile(r"\b(\w*(?:session|token|auth|cookie|csrf)\w*)=([^\
 # strings carry either a file:// URI or an absolute Windows path ending in a
 # common downloaded-file extension.
 FILE_URI_RE = re.compile(r"file:///[^\s\"'<>\\]+", re.IGNORECASE)
+# ':' excluded from the path body (not just control/quote/angle-bracket/pipe chars): a
+# real Windows path never contains a second ':' after the drive letter, and without this
+# exclusion, memory holding the SAME path written twice back-to-back with no separator
+# (seen in practice -- Explorer/MRU-style duplication) makes \b fail right after the
+# first extension (word-char 'e' meeting word-char 'C' is not a boundary), so the regex
+# backtrack-extends into the second copy and reports "...exeC:\...\...exe" as one bogus
+# concatenated "path". Verified: this exact shape showed up 3x in a real capture.
 DOWNLOAD_PATH_RE = re.compile(
-    r"[A-Za-z]:\\(?:Users|Downloads)[^\x00-\x1f\"'<>|]*?"
+    r"[A-Za-z]:\\(?:Users|Downloads)[^\x00-\x1f\"'<>|:]*?"
     r"\.(?:pdf|zip|rar|7z|exe|msi|docx?|xlsx?|pptx?|csv|txt|jpg|jpeg|png|gif|mp4|mp3|iso|dat)\b",
     re.IGNORECASE,
 )
-# Values that are Firefox's own printf-style format strings ("%p", "%lld.")
-# or single/near-empty leftovers ("a", "]") rather than real captured data —
-# these otherwise drown out genuine hits under the same exact-name regex.
-_NOISE_VALUE_RE = re.compile(r"^%|^.{1,2}$")
+# Values that are Firefox's own printf-style format strings ("%p", "%lld."), near-empty
+# leftovers ("a", "]"), or minified JS source that happens to contain "session=<code>"
+# as a substring (destructuring/chained-assignment syntax, no whitespace) rather than
+# real captured data -- these otherwise drown out genuine hits under the same exact-name
+# regex. A real cookie/credential/session value never legitimately contains JS/code
+# punctuation like parens or braces.
+_NOISE_VALUE_RE = re.compile(r"^%|^.{1,2}$|[(){}]")
 
 
 def _is_noise_value(value: str) -> bool:
-    return bool(_NOISE_VALUE_RE.match(value))
+    return bool(_NOISE_VALUE_RE.search(value))
 
 
 # A hit under \Users\<name>\Downloads\ (Windows' actual save-to location,
