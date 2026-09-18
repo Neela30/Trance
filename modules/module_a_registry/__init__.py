@@ -10,9 +10,18 @@ run() is the pipeline entry point every modules/<name>/__init__.py must
 expose (see README's "Module contract") — a thin adapter translating
 pipeline.py's own ModuleAResult into core.schema.ModuleResult so main.py
 can drive this module the same way it drives module_b_disk/module_c_memory.
-run_module_a()/write_output() stay directly importable too, since cli.py's
-standalone entrypoint (and any ad-hoc use) depends on them independent of
-this pipeline-contract wrapper.
+
+pipeline.py (and, transitively, extractors.py's regipy import) is loaded
+lazily inside run(), not at module import time — same convention
+module_b_disk/module_c_memory already use for their own analysis deps.
+This package also holds acquire.py (Windows-only, admin-required hive
+export via reg save/vssadmin — no regipy involved at all), which needs to
+stay importable and runnable without regipy installed; a top-level
+`from .pipeline import ...` here would force every import of this
+package, acquire.py included, to require it. cli.py's standalone
+entrypoint already imports run_module_a()/write_output() directly from
+.pipeline rather than through this package, so nothing else needs those
+names re-exported at the package level either.
 """
 
 from __future__ import annotations
@@ -25,9 +34,8 @@ from core.exceptions import IntegrityError
 from core.schema import ModuleResult
 
 from .normalize import MODULE_NAME
-from .pipeline import ModuleAResult, run_module_a, write_output
 
-__all__ = ["run", "run_module_a", "write_output", "ModuleAResult"]
+__all__ = ["run"]
 
 
 def run(
@@ -39,6 +47,8 @@ def run(
 ) -> ModuleResult:
     if not any((ntuser, system, amcache)):
         return ModuleResult(module=MODULE_NAME, status="skipped", message="no registry hive supplied")
+
+    from .pipeline import run_module_a
 
     try:
         result = run_module_a(config, ntuser=ntuser, system=system, amcache=amcache)
