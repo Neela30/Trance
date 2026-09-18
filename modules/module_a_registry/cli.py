@@ -50,12 +50,12 @@ from .pipeline import run_module_a, write_output
     default=None,
     help="Path to an acquired Amcache.hve hive.",
 )
-def main(case_name: str, output_dir: Path, ntuser: Path | None, system: Path | None, amcache: Path | None) -> None:
+def main(
+    case_name: str, output_dir: Path, ntuser: Path | None, system: Path | None, amcache: Path | None
+) -> None:
     """Run Module A (Registry & Execution Evidence) against one or more acquired hives."""
     if not any([ntuser, system, amcache]):
-        raise click.UsageError(
-            "At least one of --ntuser, --system, or --amcache must be provided."
-        )
+        raise click.UsageError("At least one of --ntuser, --system, or --amcache must be provided.")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     config = TranceConfig(case_name=case_name, output_dir=output_dir)

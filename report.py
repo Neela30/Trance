@@ -9,8 +9,8 @@ later without touching this file's rendering.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from jinja2 import Environment, FileSystemLoader
 

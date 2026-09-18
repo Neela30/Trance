@@ -43,8 +43,7 @@ ONION_RE = re.compile(rb"[a-z2-7]{16}(?:[a-z2-7]{40})?\.onion", re.IGNORECASE)
 #   <address>:descriptor:x25519:<base32 private key>
 # These are the highest-value disk artifacts for attributing access to a
 # specific hidden service, so they get their own pattern.
-AUTH_CRED_RE = re.compile(rb"([a-z2-7]{56}):descriptor:x25519:([A-Za-z2-7]{52})",
-                          re.IGNORECASE)
+AUTH_CRED_RE = re.compile(rb"([a-z2-7]{56}):descriptor:x25519:([A-Za-z2-7]{52})", re.IGNORECASE)
 
 # Same address stored as a UTF-16LE filename (e.g. "<addr>.auth_private" as it
 # appears in an NTFS MFT record or directory index) -- letters interleaved with
@@ -52,7 +51,8 @@ AUTH_CRED_RE = re.compile(rb"([a-z2-7]{56}):descriptor:x25519:([A-Za-z2-7]{52})"
 UTF16_ONION_RE = re.compile(
     rb"(?:[a-z2-7]\x00){16}(?:(?:[a-z2-7]\x00){40})?(?:\.\x00o\x00n\x00i\x00o\x00n\x00"
     rb"|\.\x00a\x00u\x00t\x00h\x00_\x00p\x00r\x00i\x00v\x00a\x00t\x00e\x00)",
-    re.IGNORECASE)
+    re.IGNORECASE,
+)
 
 # Strings that indicate Tor was present/running even when no address survives.
 MARKER_PATTERNS = {
@@ -145,10 +145,14 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
             base = buf_start + len(buf) - len(tail)
 
             pct = 100.0 * read / size if size else 0
-            print(f"\r  scanned {read / 2**30:6.2f} GiB / {size / 2**30:.2f} GiB "
-                  f"({pct:5.1f}%)  onion addrs: {len(onion_hits)}  "
-                  f"auth creds: {len(auth_creds)}",
-                  end="", file=sys.stderr, flush=True)
+            print(
+                f"\r  scanned {read / 2**30:6.2f} GiB / {size / 2**30:.2f} GiB "
+                f"({pct:5.1f}%)  onion addrs: {len(onion_hits)}  "
+                f"auth creds: {len(auth_creds)}",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
     print(file=sys.stderr)
 
     return {
@@ -160,18 +164,28 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
             for addr, offs in sorted(onion_hits.items())
         },
         "client_auth_credentials": [
-            {"onion_address": addr.decode() + ".onion",
-             "x25519_private_key": key.decode(),
-             "occurrences": auth_counts[(addr, key)], "first_offsets": offs}
+            {
+                "onion_address": addr.decode() + ".onion",
+                "x25519_private_key": key.decode(),
+                "occurrences": auth_counts[(addr, key)],
+                "first_offsets": offs,
+            }
             for (addr, key), offs in sorted(auth_creds.items())
         ],
-        "utf16_filenames": {name.decode(): {"occurrences": utf16_counts[name],
-                                            "first_offsets": offs}
-                            for name, offs in sorted(utf16_hits.items())},
-        "tor_markers": {k: {"occurrences": marker_counts[k], "first_offsets": v}
-                        for k, v in marker_hits.items() if v},
-        "extra_patterns": {k: {"occurrences": extra_counts[k], "first_offsets": v}
-                           for k, v in extra_hits.items() if v},
+        "utf16_filenames": {
+            name.decode(): {"occurrences": utf16_counts[name], "first_offsets": offs}
+            for name, offs in sorted(utf16_hits.items())
+        },
+        "tor_markers": {
+            k: {"occurrences": marker_counts[k], "first_offsets": v}
+            for k, v in marker_hits.items()
+            if v
+        },
+        "extra_patterns": {
+            k: {"occurrences": extra_counts[k], "first_offsets": v}
+            for k, v in extra_hits.items()
+            if v
+        },
     }
 
 
@@ -179,10 +193,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=Path, help="Disk image or block device to scan")
     parser.add_argument("--out", type=Path, default=None, help="Write JSON report here")
-    parser.add_argument("--extra-pattern", action="append", default=[],
-                        help="Additional regex to search for (repeatable)")
-    parser.add_argument("--custody-log", type=Path, default=None,
-                        help="Append a chain-of-custody entry to this log")
+    parser.add_argument(
+        "--extra-pattern",
+        action="append",
+        default=[],
+        help="Additional regex to search for (repeatable)",
+    )
+    parser.add_argument(
+        "--custody-log", type=Path, default=None, help="Append a chain-of-custody entry to this log"
+    )
     args = parser.parse_args()
 
     if not args.image.exists():
@@ -199,8 +218,10 @@ def main() -> int:
     for c in creds:
         print(f"  hidden service : {c['onion_address']}")
         print(f"  x25519 privkey : {c['x25519_private_key']}")
-        print(f"  found at       : x{c['occurrences']}, "
-              f"{', '.join('0x%x' % o for o in c['first_offsets'][:6])}")
+        print(
+            f"  found at       : x{c['occurrences']}, "
+            f"{', '.join(f'0x{o:x}' for o in c['first_offsets'][:6])}"
+        )
     if not creds:
         print("  (none)")
 
@@ -214,8 +235,7 @@ def main() -> int:
     addrs = report["onion_addresses"]
     print(f"\n.onion addresses found: {len(addrs)}")
     for addr, info in sorted(addrs.items(), key=lambda kv: -kv[1]["occurrences"]):
-        print(f"  {addr}  x{info['occurrences']}  "
-              f"first @ 0x{info['first_offsets'][0]:x}")
+        print(f"  {addr}  x{info['occurrences']}  " f"first @ 0x{info['first_offsets'][0]:x}")
     if not addrs:
         print("  (none)")
 
@@ -231,32 +251,40 @@ def main() -> int:
 
     print()
     if creds:
-        print("CONCLUSION: Tor client-authorisation credentials were recovered from disk, "
-              "naming\nthe specific hidden service(s) above in plaintext. Unlike the "
-              "browser profile,\nthis file is written by the Tor daemon and is NOT subject "
-              "to Tor Browser's\npermanent-private-browsing policy -- it persists across "
-              "shutdown. This attributes\naccess to a named onion service from disk "
-              "evidence alone.")
+        print(
+            "CONCLUSION: Tor client-authorisation credentials were recovered from disk, "
+            "naming\nthe specific hidden service(s) above in plaintext. Unlike the "
+            "browser profile,\nthis file is written by the Tor daemon and is NOT subject "
+            "to Tor Browser's\npermanent-private-browsing policy -- it persists across "
+            "shutdown. This attributes\naccess to a named onion service from disk "
+            "evidence alone."
+        )
     elif addrs:
-        print("CONCLUSION: .onion address(es) recovered from raw disk bytes. Because "
-              "this scan\nignores the filesystem, a hit outside any live file indicates "
-              "residue in slack or\nunallocated space -- correlate the offsets against "
-              "the filesystem to determine which.")
+        print(
+            "CONCLUSION: .onion address(es) recovered from raw disk bytes. Because "
+            "this scan\nignores the filesystem, a hit outside any live file indicates "
+            "residue in slack or\nunallocated space -- correlate the offsets against "
+            "the filesystem to determine which."
+        )
     elif markers:
-        print("CONCLUSION: no .onion address survives in raw bytes, but Tor presence "
-              "markers do.\nThe software's execution is provable from disk; the specific "
-              "destination is not.")
+        print(
+            "CONCLUSION: no .onion address survives in raw bytes, but Tor presence "
+            "markers do.\nThe software's execution is provable from disk; the specific "
+            "destination is not."
+        )
     else:
         print("CONCLUSION: no Tor residue recoverable at the byte level.")
 
     if args.custody_log:
         log = CustodyLog(args.custody_log)
-        log.record(CustodyEntry(
-            artifact_path=str(args.image),
-            sha256="(not hashed: multi-GB image, see acquisition manifest)",
-            action="analyzed",
-            notes="carve_onion_strings.py raw byte scan for .onion / Tor markers",
-        ))
+        log.record(
+            CustodyEntry(
+                artifact_path=str(args.image),
+                sha256="(not hashed: multi-GB image, see acquisition manifest)",
+                action="analyzed",
+                notes="carve_onion_strings.py raw byte scan for .onion / Tor markers",
+            )
+        )
         log.save()
 
     if args.out:

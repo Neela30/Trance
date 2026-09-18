@@ -135,7 +135,9 @@ def _build_component_timeline(annotated_by_type: dict[str, list[dict]]) -> list[
             component["sources"].setdefault(artifact_type, []).append(finding)
 
     def type_rank(artifact_type: str) -> int:
-        return ARTIFACT_TYPE_ORDER.index(artifact_type) if artifact_type in ARTIFACT_TYPE_ORDER else 99
+        return (
+            ARTIFACT_TYPE_ORDER.index(artifact_type) if artifact_type in ARTIFACT_TYPE_ORDER else 99
+        )
 
     timeline = []
     for component in components.values():
@@ -148,7 +150,9 @@ def _build_component_timeline(annotated_by_type: dict[str, list[dict]]) -> list[
                 "paths": sorted(component["paths"]),
                 "seen_in": sorted(sources.keys(), key=type_rank),
                 "amcache_first_seen": min((t for t in amcache_ts if t), default=None),
-                "userassist_run_count": sum(f.get("run_count") or 0 for f in sources.get("UserAssist", [])),
+                "userassist_run_count": sum(
+                    f.get("run_count") or 0 for f in sources.get("UserAssist", [])
+                ),
                 "userassist_last_run": max((t for t in userassist_ts if t), default=None),
                 "shimcache_hits": len(sources.get("ShimCache", [])),
             }

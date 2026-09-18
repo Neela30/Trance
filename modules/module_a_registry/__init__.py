@@ -46,7 +46,9 @@ def run(
     **_: object,
 ) -> ModuleResult:
     if not any((ntuser, system, amcache)):
-        return ModuleResult(module=MODULE_NAME, status="skipped", message="no registry hive supplied")
+        return ModuleResult(
+            module=MODULE_NAME, status="skipped", message="no registry hive supplied"
+        )
 
     from .pipeline import run_module_a
 

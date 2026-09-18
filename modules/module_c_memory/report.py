@@ -61,7 +61,9 @@ def _flag_near_duplicate_paths(pages: list[str], assets: list[str]) -> dict[str,
     known = pages + assets
     flags: dict[str, list[str]] = {}
     for p in pages:
-        others = [o for o in known if o != p and abs(len(o) - len(p)) <= NEAR_DUPLICATE_MAX_LEN_DIFF]
+        others = [
+            o for o in known if o != p and abs(len(o) - len(p)) <= NEAR_DUPLICATE_MAX_LEN_DIFF
+        ]
         close = difflib.get_close_matches(p, others, n=3, cutoff=NEAR_DUPLICATE_CUTOFF)
         if close:
             flags[p] = close
@@ -110,7 +112,10 @@ def _annotate_downloads(downloads: list[str], site_map: list[str], source_type: 
     that (presumably) did the downloading, so nothing is demoted there -- matches
     key_findings' own "high-confidence" framing rather than adding a second, narrower bar.
     """
-    annotated = [{"value": v, "matched_endpoint": _match_download_to_site_map(v, site_map)} for v in downloads]
+    annotated = [
+        {"value": v, "matched_endpoint": _match_download_to_site_map(v, site_map)}
+        for v in downloads
+    ]
     if source_type != "full-memory":
         return {"matched": annotated, "unmatched": []}
     return {
@@ -124,7 +129,11 @@ def _search_term_frequencies(search_queries: list[dict], username: str | None) -
     analyzer.py's own timeline uses, so counts here always agree with the timeline."""
     counts = Counter(q["value"] for q in search_queries if not is_timeline_noise(q["value"]))
     return [
-        {"value": v, "count": c, "matches_username": bool(username) and username.lower() in v.lower()}
+        {
+            "value": v,
+            "count": c,
+            "matches_username": bool(username) and username.lower() in v.lower(),
+        }
         for v, c in counts.most_common()
     ]
 
@@ -147,7 +156,9 @@ def _annotate_timeline(events: list[dict]) -> list[dict]:
             and median_gap > 0
             and (off - earliest) > median_gap * FAR_FROM_START_MULTIPLIER
         )
-        annotated.append({**e, "clustered_with_prev": clustered_with_prev, "far_from_start": far_from_start})
+        annotated.append(
+            {**e, "clustered_with_prev": clustered_with_prev, "far_from_start": far_from_start}
+        )
     return annotated
 
 
@@ -172,7 +183,11 @@ def _vol3_process_corroboration(psscan_rows: list[dict]) -> list[str]:
         name = (row.get("ImageFileName") or "").lower()
         if "firefox" not in name:
             continue
-        exited = f", exited {row['ExitTime']}" if row.get("ExitTime") else " — still running at capture time"
+        exited = (
+            f", exited {row['ExitTime']}"
+            if row.get("ExitTime")
+            else " — still running at capture time"
+        )
         notes.append(
             f"windows.psscan independently confirms a firefox.exe process existed "
             f"(PID {row.get('PID')}, created {row.get('CreateTime')}{exited}). Structural "
@@ -201,8 +216,12 @@ def _vol3_network_corroboration(netscan_rows: list[dict], host_target: str | Non
     return notes
 
 
-def _vol3_file_corroboration(filescan_rows: list[dict], confirmed_downloads: list[str]) -> list[str]:
-    download_names = {d.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] for d in confirmed_downloads}
+def _vol3_file_corroboration(
+    filescan_rows: list[dict], confirmed_downloads: list[str]
+) -> list[str]:
+    download_names = {
+        d.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] for d in confirmed_downloads
+    }
     download_names.discard("")
     notes = []
     for row in filescan_rows:
@@ -240,12 +259,20 @@ def _vol3_context(details: dict) -> dict:
                 "truncated": len(rows) > VOL3_TABLE_CAP,
             }
         )
-    plugin_views.sort(key=lambda p: list(VOL3_PLUGIN_LABELS).index(p["name"]) if p["name"] in VOL3_PLUGIN_LABELS else 99)
+    plugin_views.sort(
+        key=lambda p: (
+            list(VOL3_PLUGIN_LABELS).index(p["name"]) if p["name"] in VOL3_PLUGIN_LABELS else 99
+        )
+    )
 
     corroboration = (
         _vol3_process_corroboration(_vol3_rows(plugins, "PsScan"))
-        + _vol3_network_corroboration(_vol3_rows(plugins, "NetScan"), details["targeting"].get("host"))
-        + _vol3_file_corroboration(_vol3_rows(plugins, "FileScan"), details["key_findings"]["downloads"])
+        + _vol3_network_corroboration(
+            _vol3_rows(plugins, "NetScan"), details["targeting"].get("host")
+        )
+        + _vol3_file_corroboration(
+            _vol3_rows(plugins, "FileScan"), details["key_findings"]["downloads"]
+        )
     )
 
     return {

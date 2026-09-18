@@ -59,11 +59,15 @@ def run_winpmem(
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=ACQUIRE_TIMEOUT_SECONDS)
     except FileNotFoundError as exc:
-        raise AcquisitionError(f"WinPMEM binary not found or not executable: {winpmem_path} ({exc})") from exc
+        raise AcquisitionError(
+            f"WinPMEM binary not found or not executable: {winpmem_path} ({exc})"
+        ) from exc
     except OSError as exc:
         raise AcquisitionError(f"Failed to launch WinPMEM at {winpmem_path}: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise AcquisitionError(f"WinPMEM did not finish within {ACQUIRE_TIMEOUT_SECONDS}s: {exc}") from exc
+        raise AcquisitionError(
+            f"WinPMEM did not finish within {ACQUIRE_TIMEOUT_SECONDS}s: {exc}"
+        ) from exc
 
 
 def acquire(winpmem_path: Path, output_dir: Path, extra_args: list[str] | None = None) -> Path:
@@ -129,7 +133,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Acquire a full physical-memory image via an examiner-supplied WinPMEM binary."
     )
-    parser.add_argument("--winpmem-path", type=Path, required=True, help="Path to the WinPMEM executable")
+    parser.add_argument(
+        "--winpmem-path", type=Path, required=True, help="Path to the WinPMEM executable"
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,

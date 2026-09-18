@@ -62,7 +62,9 @@ def _mock_vol(monkeypatch, per_plugin_stdout: dict, per_plugin_returncode: dict 
     def fake_run(vol_bin, image_path, plugin, timeout=va.PLUGIN_TIMEOUT_SECONDS):
         rc = per_plugin_returncode.get(plugin, 0)
         stdout = per_plugin_stdout.get(plugin, "[]")
-        return subprocess.CompletedProcess([vol_bin, plugin], returncode=rc, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(
+            [vol_bin, plugin], returncode=rc, stdout=stdout, stderr=""
+        )
 
     monkeypatch.setattr(va, "run_plugin", fake_run)
     monkeypatch.setattr(va.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -101,7 +103,9 @@ def test_analyze_isolates_one_plugin_failure_from_the_rest(tmp_path, monkeypatch
         per_plugin_returncode={"windows.netscan.NetScan": 1},
     )
     report = va.analyze(
-        make_image(tmp_path), vol_path="vol", plugins=("windows.psscan.PsScan", "windows.netscan.NetScan")
+        make_image(tmp_path),
+        vol_path="vol",
+        plugins=("windows.psscan.PsScan", "windows.netscan.NetScan"),
     )
 
     assert report["plugins"]["windows.psscan.PsScan"]["status"] == "ok"
@@ -126,7 +130,9 @@ def test_format_summary_reports_ok_and_failed_plugins(tmp_path, monkeypatch):
         per_plugin_returncode={"windows.netscan.NetScan": 1},
     )
     report = va.analyze(
-        make_image(tmp_path), vol_path="vol", plugins=("windows.psscan.PsScan", "windows.netscan.NetScan")
+        make_image(tmp_path),
+        vol_path="vol",
+        plugins=("windows.psscan.PsScan", "windows.netscan.NetScan"),
     )
     summary = va.format_summary(report)
     assert "windows.psscan.PsScan: 1 row(s)" in summary

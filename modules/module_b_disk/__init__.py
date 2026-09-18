@@ -14,11 +14,19 @@ def _profile_artifacts(report: dict) -> list[Artifact]:
     source = report["evidence_dir"]
     artifacts = []
     for item in report["places"].get("user_activity_candidates", []):
-        artifacts.append(Artifact(MODULE_NAME, "browser_history", source, item["url"],
-                                  timestamp=str(item.get("last_visit_date") or "") or None))
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "browser_history",
+                source,
+                item["url"],
+                timestamp=str(item.get("last_visit_date") or "") or None,
+            )
+        )
     for item in report["cookies"].get("moz_cookies", []):
-        artifacts.append(Artifact(MODULE_NAME, "browser_cookie", source,
-                                  f"{item['host']} — {item['name']}"))
+        artifacts.append(
+            Artifact(MODULE_NAME, "browser_cookie", source, f"{item['host']} — {item['name']}")
+        )
     for item in report["favicons"].get("non_default_pages", []):
         artifacts.append(Artifact(MODULE_NAME, "favicon_page", source, item))
     for backup in report["bookmark_backups"].get("backups", []):
@@ -31,25 +39,38 @@ def _daemon_artifacts(report: dict) -> list[Artifact]:
     source = report["tor_data_dir"]
     artifacts = []
     for guard in report["state"].get("guards_used", []):
-        artifacts.append(Artifact(
-            MODULE_NAME, "tor_guard_usage", source,
-            f"Guard {guard['nickname']} ({guard['rsa_id']}); use attempts={guard['use_attempts']}",
-            timestamp=guard.get("confirmed_on"),
-        ))
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "tor_guard_usage",
+                source,
+                f"Guard {guard['nickname']} ({guard['rsa_id']}); use attempts={guard['use_attempts']}",
+                timestamp=guard.get("confirmed_on"),
+            )
+        )
     consensus = report["consensus"]
     if not consensus.get("error"):
-        artifacts.append(Artifact(
-            MODULE_NAME, "tor_consensus", source,
-            f"Cached consensus valid after {consensus['valid_after_utc']}",
-            timestamp=consensus.get("file_mtime_utc"),
-        ))
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "tor_consensus",
+                source,
+                f"Cached consensus valid after {consensus['valid_after_utc']}",
+                timestamp=consensus.get("file_mtime_utc"),
+            )
+        )
     for credential in report["onion_auth"].get("credentials", []):
-        artifacts.append(Artifact(
-            MODULE_NAME, "onion_client_auth_configuration", source,
-            f"Client credential configured for {credential['onion_address']}; "
-            "this alone does not prove a visit",
-            sha256=credential.get("sha256"), timestamp=credential.get("mtime_utc"),
-        ))
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "onion_client_auth_configuration",
+                source,
+                f"Client credential configured for {credential['onion_address']}; "
+                "this alone does not prove a visit",
+                sha256=credential.get("sha256"),
+                timestamp=credential.get("mtime_utc"),
+            )
+        )
     return artifacts
 
 
@@ -57,15 +78,25 @@ def _carve_artifacts(report: dict) -> list[Artifact]:
     source = report["image"]
     artifacts = []
     for address, hit in report["onion_addresses"].items():
-        artifacts.append(Artifact(MODULE_NAME, "carved_onion_string", source,
-                                  f"{address}; sampled offsets={hit['first_offsets']}",
-                                  sha256=report["image_sha256"]))
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "carved_onion_string",
+                source,
+                f"{address}; sampled offsets={hit['first_offsets']}",
+                sha256=report["image_sha256"],
+            )
+        )
     for credential in report["client_auth_credentials"]:
-        artifacts.append(Artifact(
-            MODULE_NAME, "carved_onion_client_auth", source,
-            f"Credential bytes for {credential['onion_address']}; presence alone does not prove a visit",
-            sha256=report["image_sha256"],
-        ))
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "carved_onion_client_auth",
+                source,
+                f"Credential bytes for {credential['onion_address']}; presence alone does not prove a visit",
+                sha256=report["image_sha256"],
+            )
+        )
     return artifacts
 
 
@@ -77,7 +108,9 @@ def run(
     **_: object,
 ) -> ModuleResult:
     if not any((profile_dir, tor_dir, disk_image)):
-        return ModuleResult(module=MODULE_NAME, status="skipped", message="no disk evidence supplied")
+        return ModuleResult(
+            module=MODULE_NAME, status="skipped", message="no disk evidence supplied"
+        )
 
     details: dict[str, dict] = {}
     artifacts: list[Artifact] = []
@@ -117,6 +150,9 @@ def run(
             details["raw_carve"] = {"error": f"{type(exc).__name__}: {exc}"}
             errors.append("raw-image carve failed")
     return ModuleResult(
-        module=MODULE_NAME, status="error" if errors else "ok", artifacts=artifacts,
-        details=details, message="; ".join(errors) if errors else None,
+        module=MODULE_NAME,
+        status="error" if errors else "ok",
+        artifacts=artifacts,
+        details=details,
+        message="; ".join(errors) if errors else None,
     )

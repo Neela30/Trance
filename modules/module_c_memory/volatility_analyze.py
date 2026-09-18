@@ -36,9 +36,9 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
 
 from core.exceptions import AnalysisError
 
@@ -122,7 +122,9 @@ def _run_one(vol_bin: str, image_path: Path, plugin: str) -> dict:
     if result.returncode != 0:
         return {
             "status": "error",
-            "message": (result.stderr or result.stdout or f"exit code {result.returncode}").strip()[:2000],
+            "message": (result.stderr or result.stdout or f"exit code {result.returncode}").strip()[
+                :2000
+            ],
             "rows": [],
             "row_count": 0,
         }
@@ -182,7 +184,9 @@ def find_process_pid(vol_bin: str, image_path: Path, process_name: str = "firefo
             "chosen_pid": None,
             "chosen_reason": None,
         }
-    candidates = [r for r in result["rows"] if (r.get("ImageFileName") or "").lower() == process_name.lower()]
+    candidates = [
+        r for r in result["rows"] if (r.get("ImageFileName") or "").lower() == process_name.lower()
+    ]
     if not candidates:
         return {
             "status": "not_found",
@@ -200,16 +204,31 @@ def find_process_pid(vol_bin: str, image_path: Path, process_name: str = "firefo
     # parent of another same-named candidate. Falls back to the lowest PID (oldest, by
     # PID-allocation convention) if that relationship isn't found, e.g. a single instance.
     candidate_pids = {c["PID"] for c in candidates}
-    parent_pids = {c["PID"] for c in candidates if c["PID"] in {c2.get("PPID") for c2 in candidates}}
+    parent_pids = {
+        c["PID"] for c in candidates if c["PID"] in {c2.get("PPID") for c2 in candidates}
+    }
     if parent_pids:
         chosen, reason = min(parent_pids), "parent of other same-named child processes"
     else:
-        chosen, reason = min(candidate_pids), "lowest PID (no parent/child relationship among candidates)"
-    return {"status": "ok", "message": None, "candidates": candidates, "chosen_pid": chosen, "chosen_reason": reason}
+        chosen, reason = (
+            min(candidate_pids),
+            "lowest PID (no parent/child relationship among candidates)",
+        )
+    return {
+        "status": "ok",
+        "message": None,
+        "candidates": candidates,
+        "chosen_pid": chosen,
+        "chosen_reason": reason,
+    }
 
 
 def extract_process_memory(
-    vol_bin: str, image_path: Path, pid: int, output_dir: Path, timeout: int = PLUGIN_TIMEOUT_SECONDS
+    vol_bin: str,
+    image_path: Path,
+    pid: int,
+    output_dir: Path,
+    timeout: int = PLUGIN_TIMEOUT_SECONDS,
 ) -> Path:
     """Extract one process's resident pages from a full-memory image via
     `windows.memmap --pid <pid> --dump`, writing `pid.<pid>.dmp` under `output_dir`
@@ -219,13 +238,25 @@ def extract_process_memory(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        vol_bin, "-q", "-o", str(output_dir), "-f", str(image_path), "-r", "json",
-        "windows.memmap.Memmap", "--pid", str(pid), "--dump",
+        vol_bin,
+        "-q",
+        "-o",
+        str(output_dir),
+        "-f",
+        str(image_path),
+        "-r",
+        "json",
+        "windows.memmap.Memmap",
+        "--pid",
+        str(pid),
+        "--dump",
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise AnalysisError(f"windows.memmap timed out after {timeout}s extracting PID {pid}: {exc}") from exc
+        raise AnalysisError(
+            f"windows.memmap timed out after {timeout}s extracting PID {pid}: {exc}"
+        ) from exc
     if result.returncode != 0:
         raise AnalysisError(
             f"windows.memmap failed for PID {pid} (exit {result.returncode}).\n"
@@ -264,7 +295,10 @@ def extract_target_process(
 
     if pid is not None:
         discovery = {
-            "status": "ok", "message": None, "candidates": [], "chosen_pid": pid,
+            "status": "ok",
+            "message": None,
+            "candidates": [],
+            "chosen_pid": pid,
             "chosen_reason": "explicit PID override",
         }
     else:
@@ -321,9 +355,12 @@ def main() -> None:
     )
     parser.add_argument("image", type=Path, help="Path to the memory image (.bin/.raw)")
     parser.add_argument(
-        "--vol-path", help=f"Path to the Volatility3 'vol' entry point (default: {DEFAULT_VOL_BIN!r} on $PATH)"
+        "--vol-path",
+        help=f"Path to the Volatility3 'vol' entry point (default: {DEFAULT_VOL_BIN!r} on $PATH)",
     )
-    parser.add_argument("--output", type=Path, help="Path for the JSON report (default: <image>.vol3.json)")
+    parser.add_argument(
+        "--output", type=Path, help="Path for the JSON report (default: <image>.vol3.json)"
+    )
     args = parser.parse_args()
 
     try:

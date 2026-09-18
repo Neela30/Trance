@@ -29,9 +29,9 @@ the whole module failing.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from core.config import TranceConfig
 from core.custody_log import CustodyEntry, CustodyLog
@@ -236,7 +236,9 @@ def run_module_a(
 
     _process_hive("NTUSER.DAT", ntuser, _ntuser_extractors(), custody_log, findings, errors, stats)
     _process_hive("SYSTEM", system, _system_extractors(), custody_log, findings, errors, stats)
-    _process_hive("Amcache.hve", amcache, _amcache_extractors(), custody_log, findings, errors, stats)
+    _process_hive(
+        "Amcache.hve", amcache, _amcache_extractors(), custody_log, findings, errors, stats
+    )
 
     custody_log.save()
 

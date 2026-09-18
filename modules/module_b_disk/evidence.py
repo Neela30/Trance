@@ -43,22 +43,40 @@ def verify_hashes(evidence_dir: Path) -> dict:
             continue
         digest, name = match.groups()
         relative = Path(name)
-        if relative.is_absolute() or PureWindowsPath(name).drive or ".." in relative.parts or "\\" in name:
-            result[f"line:{number}"] = {"status": "invalid", "reason": "Expected a safe relative path"}
+        if (
+            relative.is_absolute()
+            or PureWindowsPath(name).drive
+            or ".." in relative.parts
+            or "\\" in name
+        ):
+            result[f"line:{number}"] = {
+                "status": "invalid",
+                "reason": "Expected a safe relative path",
+            }
             continue
         key = relative.as_posix()
         target = root / relative
         if key in result or key in (".", "hashes.sha256"):
-            result[f"line:{number}"] = {"status": "invalid", "reason": "Duplicate or self-referencing entry"}
+            result[f"line:{number}"] = {
+                "status": "invalid",
+                "reason": "Duplicate or self-referencing entry",
+            }
             continue
-        if any(p.is_symlink() for p in [target, *target.parents] if p != root and p.is_relative_to(root)):
+        if any(
+            p.is_symlink()
+            for p in [target, *target.parents]
+            if p != root and p.is_relative_to(root)
+        ):
             result[key] = {"status": "invalid", "reason": "Symbolic link in manifest path"}
         elif not target.is_file():
             result[key] = {"status": "missing"}
         else:
             actual = hash_file(target)
-            result[key] = {"status": "match" if actual == digest.lower() else "MISMATCH",
-                           "recorded": digest.lower(), "actual": actual}
+            result[key] = {
+                "status": "match" if actual == digest.lower() else "MISMATCH",
+                "recorded": digest.lower(),
+                "actual": actual,
+            }
     if not result:
         result["manifest"] = {"status": "invalid", "reason": "Empty hash manifest"}
     return result

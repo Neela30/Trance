@@ -16,13 +16,17 @@ def test_credential_host_anchoring_applies_only_to_full_memory(tmp_path):
     noise = b"installer_id user=SOMEUNRELATEDGUID1234\x00"
     dump = make_dump(tmp_path, real + noise)
 
-    process_report = analyze(dump, onion="target.onion", host=None, username=None, source_type="process")
+    process_report = analyze(
+        dump, onion="target.onion", host=None, username=None, source_type="process"
+    )
     assert not process_report["host_anchoring"]["applied"]
     # process dumps are unfiltered by host-anchoring: all 3 field=value hits show up
     # (alice, hunter2, and the unrelated installer GUID).
     assert len(process_report["targeted"]["credentials"]) == 3
 
-    full_report = analyze(dump, onion="target.onion", host=None, username=None, source_type="full-memory")
+    full_report = analyze(
+        dump, onion="target.onion", host=None, username=None, source_type="full-memory"
+    )
     assert full_report["host_anchoring"]["applied"]
     fields_values = {(c["field"], c["value"]) for c in full_report["targeted"]["credentials"]}
     assert ("user", "alice") in fields_values
@@ -35,7 +39,9 @@ def test_search_query_host_anchoring_keeps_real_drops_unrelated(tmp_path):
     noise = b"some_unrelated_app.exe ?q=randomjunkterm\x00"
     dump = make_dump(tmp_path, real + noise)
 
-    report = analyze(dump, onion="target.onion", host=None, username=None, source_type="full-memory")
+    report = analyze(
+        dump, onion="target.onion", host=None, username=None, source_type="full-memory"
+    )
     values = [q["value"] for q in report["targeted"]["search_queries"]]
     assert "tharaka" in values
     assert "randomjunkterm" not in values
@@ -48,7 +54,9 @@ def test_cookie_host_anchoring_never_applied_even_on_full_memory(tmp_path):
     # this is the exact case that regressed during development and must stay fixed.
     dump = make_dump(tmp_path, b"session=REALTOKEN123\x00http://target.onion/dashboard\x00")
 
-    report = analyze(dump, onion="target.onion", host=None, username=None, source_type="full-memory")
+    report = analyze(
+        dump, onion="target.onion", host=None, username=None, source_type="full-memory"
+    )
     values = [c["value"] for c in report["targeted"]["cookies"]]
     assert "REALTOKEN123" in values
     assert "cookies" not in report["host_anchoring"]["unanchored"]
@@ -87,5 +95,8 @@ def test_noise_value_filters_code_shaped_cookie_values(tmp_path):
     report = analyze(dump, onion=None, host=None, username=None)
     by_value = {c["value"]: c["confidence"] for c in report["targeted"]["cookies"]}
     assert by_value["eyJyb2xlIjoidXNlciJ9"] == "high"
-    assert by_value["e}clear(){this.session.clearCache()}resetCacheControl(){this.setCacheControl("] == "low"
+    assert (
+        by_value["e}clear(){this.session.clearCache()}resetCacheControl(){this.setCacheControl("]
+        == "low"
+    )
     assert by_value["c[0],l.count=uo(c[2])+1,l.upgrade=uo(c[3]),l.upload=c.length"] == "low"
