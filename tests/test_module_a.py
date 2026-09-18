@@ -98,7 +98,7 @@ class TestNormalizeEntry:
         artifact = normalize_entry(ARTIFACT_TYPE_USER_ASSIST, entry, "NTUSER.DAT")
 
         assert isinstance(artifact, Artifact)
-        assert artifact.module == "A_registry_execution"
+        assert artifact.module == "module_a_registry"
         assert artifact.artifact_type == ARTIFACT_TYPE_USER_ASSIST
         assert artifact.source == "NTUSER.DAT"
         assert artifact.timestamp == "2026-07-14T14:15:22+00:00"
@@ -308,7 +308,7 @@ class TestPipelineRepeatability:
         out_path = write_output(result, output_dir / "module_a_registry.json")
 
         payload = json.loads(out_path.read_text())
-        assert payload["module"] == "A_registry_execution"
+        assert payload["module"] == "module_a_registry"
         assert isinstance(payload["findings"], list)
         assert isinstance(payload["summary"], str)
         assert "installed" in payload["summary"]

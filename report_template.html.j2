@@ -134,6 +134,105 @@
     </div>
   </section>
 
+  {% if registry %}
+  <div class="band">
+    <div class="eyebrow">Module A</div>
+    <h2>Registry &amp; execution evidence</h2>
+    <dl class="meta-grid" style="margin-bottom:32px;">
+      <dt>Hives analyzed</dt><dd>{{ registry.hives_analyzed|join(", ") if registry.hives_analyzed else "— none" }}</dd>
+      {% if registry.hives_missing %}
+      <dt>Hives not provided</dt><dd>{{ registry.hives_missing|join(", ") }}</dd>
+      {% endif %}
+      <dt>Summary</dt><dd>{{ registry.summary }}</dd>
+    </dl>
+  </div>
+
+  {% if registry.errors %}
+  <section>
+    <div class="callout">
+      <strong>Extraction errors:</strong> the findings below are from whichever hives/plugins succeeded; these did not.
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        {% for err in registry.errors %}
+        <li class="mono" style="font-size:12px;">{{ err }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </section>
+  {% endif %}
+
+  <section>
+    <div class="section-head">
+      <h2>Confirmed Tor Browser components</h2>
+      <span class="count">{{ registry.component_timeline|length }} distinct file{{ "s" if registry.component_timeline|length != 1 }} — {{ registry.corroborated_components }} corroborated by 2+ independent hive sources</span>
+    </div>
+    {% if registry.component_timeline %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>File</th><th>Seen in</th><th>Amcache first-seen</th><th>UserAssist runs</th><th>UserAssist last run</th><th>ShimCache hits</th></tr></thead>
+        <tbody>
+          {% for c in registry.component_timeline %}
+          <tr>
+            <td class="val">{{ c.basename }}{% if c.paths|length > 1 %}<br><span class="off">({{ c.paths|length }} path variants)</span>{% endif %}</td>
+            <td class="val">{% for t in c.seen_in %}<span class="chip {{ 'high' if t in ('UserAssist', 'Amcache') else 'low' if t == 'RecentDocs' else '' }}">{{ t }}</span> {% endfor %}</td>
+            <td class="off">{{ c.amcache_first_seen or "—" }}</td>
+            <td class="off">{{ c.userassist_run_count or "—" }}</td>
+            <td class="off">{{ c.userassist_last_run or "—" }}</td>
+            <td class="off">{{ c.shimcache_hits or "—" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if registry.corroborated_components %}
+    <div class="callout">
+      <strong>Independent corroboration:</strong> {{ registry.corroborated_components }} file{{ "s" if registry.corroborated_components != 1 }} above {{ "is" if registry.corroborated_components == 1 else "are" }} confirmed by 2 or more separate OS subsystems (execution history, cache insertion, install record) agreeing independently — stronger than any single artifact type's say-so alone.
+    </div>
+    {% endif %}
+    {% else %}
+    <p class="note">No cross-referenceable registry components found.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Raw findings by hive</h2><span class="count">{{ registry.total_findings }} finding{{ "s" if registry.total_findings != 1 }}, deduplicated — what the table above was built from</span></div>
+    {% if registry.sections %}
+    <details class="appendix">
+      <summary>Show per-hive detail</summary>
+      <div class="appendix-body">
+        {% for s in registry.sections %}
+        <div class="section-head" style="margin-top:22px;">
+          <h3 style="font-size:15px; font-weight:600;">{{ s.label }}</h3>
+          <span class="count"><span class="chip {{ 'high' if s.confidence == 'high' else ('low' if s.confidence == 'low' else '') }}">{{ s.confidence }}</span> {{ s.findings|length }} finding{{ "s" if s.findings|length != 1 }}</span>
+        </div>
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Path</th><th>Detail</th><th>Timestamp</th><th>Occ.</th></tr></thead>
+            <tbody>
+              {% for f in s.findings %}
+              <tr>
+                <td class="val">{{ f.path or "—" }}</td>
+                <td class="val">
+                  {% if s.type == 'UserAssist' %}run_count={{ f.run_count }}, focus_count={{ f.focus_count }}, focus_time_ms={{ f.total_focus_time_ms }}
+                  {% elif s.type == 'Amcache' %}sha1={{ f.sha1 or "—" }}, size={{ f.size or "—" }}
+                  {% else %}{{ f.description }}
+                  {% endif %}
+                </td>
+                <td class="off">{{ f.timestamp or "—" }}</td>
+                <td class="off">{{ f.occurrences }}{% if f.occurrences > 1 %} (collapsed dup.){% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endfor %}
+      </div>
+    </details>
+    {% else %}
+    <p class="note">No Tor-related registry artifacts found in the provided hives.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {% if memory %}
   {% set d = memory.details %}
   <div class="band">
