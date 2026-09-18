@@ -51,6 +51,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence-dir", type=Path, help="Recorded in findings.json for provenance")
     parser.add_argument("--verbose", action="store_true", help="Also print each module's full text summary")
 
+    registry = parser.add_argument_group("module_a_registry")
+    registry.add_argument("--ntuser", type=Path, help="Acquired NTUSER.DAT hive (feeds UserAssist and RecentDocs)")
+    registry.add_argument("--system", type=Path, help="Acquired SYSTEM hive (feeds ShimCache/AppCompatCache)")
+    registry.add_argument("--amcache", type=Path, help="Acquired Amcache.hve hive")
+
     disk = parser.add_argument_group("module_b_disk")
     disk.add_argument(
         "--disk-profile", type=Path,
@@ -121,6 +126,11 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     module_kwargs: dict[str, dict] = {
+        "module_a_registry": {
+            "ntuser": args.ntuser,
+            "system": args.system,
+            "amcache": args.amcache,
+        },
         "module_b_disk": {
             "profile_dir": args.disk_profile,
             "tor_dir": args.tor_dir,
