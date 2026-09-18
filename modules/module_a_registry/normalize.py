@@ -28,7 +28,7 @@ from .constants import (
     candidate_path,
 )
 
-MODULE_NAME = "A_registry_execution"
+MODULE_NAME = "module_a_registry"
 
 
 def _first(entry: dict, keys: tuple[str, ...]) -> object | None:

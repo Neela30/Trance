@@ -19,7 +19,7 @@ def test_run_skipped_without_any_hive(tmp_path):
 
 def test_run_ok_with_findings_and_no_errors(tmp_path, monkeypatch):
     artifact = Artifact(
-        module="A_registry_execution",
+        module="module_a_registry",
         artifact_type="UserAssist",
         source="/hives/NTUSER.DAT",
         description="UserAssist evidence for 'tor.exe'",
