@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from core.config import TranceConfig
 from core.exceptions import IntegrityError
 from core.schema import Artifact
@@ -28,7 +26,9 @@ def test_run_ok_with_findings_and_no_errors(tmp_path, monkeypatch):
     )
 
     def fake_run_module_a(config, ntuser=None, system=None, amcache=None):
-        return ModuleAResult(findings=[artifact], summary="Tor Browser executed 3 times.", errors=[])
+        return ModuleAResult(
+            findings=[artifact], summary="Tor Browser executed 3 times.", errors=[]
+        )
 
     monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)
     result = module_a_registry.run(make_config(tmp_path), ntuser=tmp_path / "NTUSER.DAT")

@@ -45,8 +45,8 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import AcquisitionError
@@ -79,14 +79,16 @@ _CREATE_SHADOW_PS_SCRIPT = (
     "$ErrorActionPreference = 'Stop'; "
     "$result = (Get-WmiObject -List Win32_ShadowCopy).Create('{drive}\\', 'ClientAccessible'); "
     "if ($result.ReturnValue -ne 0) {{ "
-    "Write-Error \"Win32_ShadowCopy.Create failed, ReturnValue=$($result.ReturnValue)\"; exit 1 }} "
+    'Write-Error "Win32_ShadowCopy.Create failed, ReturnValue=$($result.ReturnValue)"; exit 1 }} '
     "$shadow = Get-WmiObject Win32_ShadowCopy | Where-Object {{ $_.ID -eq $result.ShadowID }}; "
-    "Write-Output \"ShadowID=$($shadow.ID)\"; "
-    "Write-Output \"DeviceObject=$($shadow.DeviceObject)\""
+    'Write-Output "ShadowID=$($shadow.ID)"; '
+    'Write-Output "DeviceObject=$($shadow.DeviceObject)"'
 )
 
 
-def _run(cmd: list[str], timeout: int = ACQUIRE_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str], timeout: int = ACQUIRE_TIMEOUT_SECONDS
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError as exc:
@@ -102,7 +104,9 @@ def _timestamp() -> str:
 def _hash_sidecar_custody(path: Path, custody: CustodyLog, notes: str) -> str:
     digest = hash_file(path)
     path.with_name(path.name + ".sha256").write_text(f"{digest}  {path.name}\n")
-    custody.record(CustodyEntry(artifact_path=str(path), sha256=digest, action="acquire", notes=notes))
+    custody.record(
+        CustodyEntry(artifact_path=str(path), sha256=digest, action="acquire", notes=notes)
+    )
     return digest
 
 
@@ -188,7 +192,9 @@ def _copy_via_shadow(relative_path: str, output_path: Path, drive: str = "C:") -
         try:
             shutil.copyfile(source, output_path)
         except OSError as exc:
-            raise AcquisitionError(f"Could not copy {relative_path!r} from shadow copy {shadow_id}: {exc}") from exc
+            raise AcquisitionError(
+                f"Could not copy {relative_path!r} from shadow copy {shadow_id}: {exc}"
+            ) from exc
         if not output_path.exists() or output_path.stat().st_size == 0:
             raise AcquisitionError(
                 f"Copy from shadow copy {shadow_id} reported success but produced no "
@@ -210,7 +216,9 @@ def acquire_ntuser_for_user(user: str, output_dir: Path, custody: CustodyLog) ->
     current session (reg save HKCU only ever reaches your own live session)."""
     output_path = output_dir / f"NTUSER_{user}_{_timestamp()}.DAT"
     _copy_via_shadow(rf"Users\{user}\NTUSER.DAT", output_path)
-    _hash_sidecar_custody(output_path, custody, f"NTUSER.DAT for user {user!r} via Volume Shadow Copy")
+    _hash_sidecar_custody(
+        output_path, custody, f"NTUSER.DAT for user {user!r} via Volume Shadow Copy"
+    )
     return output_path
 
 
@@ -227,7 +235,9 @@ def acquire_all(
     if sys.platform != "win32":
         raise AcquisitionError("Registry hive acquisition only runs on Windows.")
     if not _is_admin():
-        raise AcquisitionError("Not running elevated. Re-run as Administrator -- SYSTEM and Amcache both need it.")
+        raise AcquisitionError(
+            "Not running elevated. Re-run as Administrator -- SYSTEM and Amcache both need it."
+        )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     custody = CustodyLog(output_dir / f"registry_acquire_{_timestamp()}.custody.json")
@@ -261,7 +271,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Export NTUSER.DAT, SYSTEM and Amcache.hve from a live Windows target for Module A."
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("captures"), help="Default: %(default)s")
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("captures"), help="Default: %(default)s"
+    )
     parser.add_argument("--skip-system", action="store_true", help="Don't export SYSTEM")
     parser.add_argument("--skip-ntuser", action="store_true", help="Don't export NTUSER.DAT")
     parser.add_argument("--skip-amcache", action="store_true", help="Don't export Amcache.hve")

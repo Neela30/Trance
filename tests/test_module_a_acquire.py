@@ -32,7 +32,9 @@ def _fake_run_factory(by_argv0: dict):
 
 def test_reg_save_surfaces_nonzero_exit(tmp_path, monkeypatch):
     def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="ERROR: Access is denied.")
+        return subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="ERROR: Access is denied."
+        )
 
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
     with pytest.raises(AcquisitionError, match="failed \\(exit 1\\)"):
@@ -84,7 +86,9 @@ def test_create_shadow_copy_parses_id_and_device_object(monkeypatch):
 
 def test_create_shadow_copy_surfaces_nonzero_exit(monkeypatch):
     def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="Win32_ShadowCopy.Create failed")
+        return subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="Win32_ShadowCopy.Create failed"
+        )
 
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
     with pytest.raises(AcquisitionError, match="Could not create a shadow copy"):
@@ -93,7 +97,9 @@ def test_create_shadow_copy_surfaces_nonzero_exit(monkeypatch):
 
 def test_create_shadow_copy_rejects_unparseable_output(monkeypatch):
     def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout="unexpected output shape", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, returncode=0, stdout="unexpected output shape", stderr=""
+        )
 
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
     with pytest.raises(AcquisitionError, match="didn't contain a recognizable"):
@@ -110,7 +116,11 @@ def test_delete_shadow_copy_braces_a_bare_guid(monkeypatch):
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
     acquire._delete_shadow_copy("12345678-1234-1234-1234-1234567890ab")
     assert captured["cmd"] == [
-        "vssadmin", "delete", "shadows", "/shadow={12345678-1234-1234-1234-1234567890ab}", "/quiet",
+        "vssadmin",
+        "delete",
+        "shadows",
+        "/shadow={12345678-1234-1234-1234-1234567890ab}",
+        "/quiet",
     ]
 
 
@@ -124,7 +134,11 @@ def test_delete_shadow_copy_keeps_braced_id_as_is(monkeypatch):
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
     acquire._delete_shadow_copy("{12345678-1234-1234-1234-1234567890ab}")
     assert captured["cmd"] == [
-        "vssadmin", "delete", "shadows", "/shadow={12345678-1234-1234-1234-1234567890ab}", "/quiet",
+        "vssadmin",
+        "delete",
+        "shadows",
+        "/shadow={12345678-1234-1234-1234-1234567890ab}",
+        "/quiet",
     ]
 
 
@@ -145,7 +159,9 @@ def test_copy_via_shadow_deletes_shadow_even_on_copy_failure(tmp_path, monkeypat
     monkeypatch.setattr(acquire.shutil, "copyfile", fake_copyfile)
 
     with pytest.raises(AcquisitionError, match="Could not copy"):
-        acquire._copy_via_shadow(r"Windows\AppCompat\Programs\Amcache.hve", tmp_path / "Amcache.hve")
+        acquire._copy_via_shadow(
+            r"Windows\AppCompat\Programs\Amcache.hve", tmp_path / "Amcache.hve"
+        )
 
     assert deleted == ["{shadow-id}"]
 
@@ -221,8 +237,12 @@ def test_acquire_all_uses_named_user_for_ntuser_when_given(tmp_path, monkeypatch
 
 
 def test_cli_skip_flags(monkeypatch, tmp_path):
-    monkeypatch.setattr(sys, "argv", ["acquire.py", "--output-dir", str(tmp_path), "--skip-amcache"])
-    monkeypatch.setattr(sys, "platform", "linux")  # forces AcquisitionError -> clean exit 1, no real acquisition
+    monkeypatch.setattr(
+        sys, "argv", ["acquire.py", "--output-dir", str(tmp_path), "--skip-amcache"]
+    )
+    monkeypatch.setattr(
+        sys, "platform", "linux"
+    )  # forces AcquisitionError -> clean exit 1, no real acquisition
     with pytest.raises(SystemExit) as exc_info:
         acquire.main()
     assert exc_info.value.code == 1

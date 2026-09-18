@@ -13,9 +13,7 @@ class CustodyEntry:
     artifact_path: str
     sha256: str
     action: str
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     notes: str = ""
 
 
@@ -28,6 +26,4 @@ class CustodyLog:
         self.entries.append(entry)
 
     def save(self) -> None:
-        self.log_path.write_text(
-            json.dumps([asdict(e) for e in self.entries], indent=2)
-        )
+        self.log_path.write_text(json.dumps([asdict(e) for e in self.entries], indent=2))

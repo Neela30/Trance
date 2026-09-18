@@ -69,9 +69,17 @@ def _extract_process(
     from modules.module_c_memory.volatility_analyze import extract_target_process
 
     try:
-        return extract_target_process(vol3_path, image, output_dir, process_name=process_name, pid=pid)
+        return extract_target_process(
+            vol3_path, image, output_dir, process_name=process_name, pid=pid
+        )
     except AnalysisError as exc:
-        return {"status": "error", "message": str(exc), "discovery": None, "source_image": str(image), "dump_path": None}
+        return {
+            "status": "error",
+            "message": str(exc),
+            "discovery": None,
+            "source_image": str(image),
+            "dump_path": None,
+        }
 
 
 def run(
@@ -109,7 +117,9 @@ def run(
             analyzer_source_type = "process"
 
     try:
-        details = analyze(analyzer_dump_path, onion, host, username, source_type=analyzer_source_type)
+        details = analyze(
+            analyzer_dump_path, onion, host, username, source_type=analyzer_source_type
+        )
     except TranceError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))
 

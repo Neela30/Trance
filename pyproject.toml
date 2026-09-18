@@ -18,6 +18,24 @@ target-version = ["py310"]
 line-length = 100
 target-version = "py310"
 
+[tool.ruff.lint]
+# Deliberate project conventions this ruleset otherwise fights, not oversights:
+#   BLE001   every acquisition/extraction wrapper (dumper.py, winpmem_acquire.py,
+#            extractors.py, ...) catches a third-party library's own broad exception
+#            hierarchy at the boundary and re-raises as our typed core.exceptions.*, so
+#            callers only ever need to catch our types.
+#   PLW1510  subprocess.run() call sites here check result.returncode manually (often
+#            against several acceptable codes, or to attach it to an error message)
+#            rather than relying on check=True's CalledProcessError.
+#   B023     both flagged closures are defined and called synchronously within the same
+#            loop iteration (never stored for deferred/later use), so they always see
+#            the current loop variable correctly -- a known false-positive shape for
+#            this rule, verified by reading each flagged call site.
+#   TRY004   both flagged raises are deliberately ValueError, not TypeError, specifically
+#            so they're caught by the same except clause as another ValueError/
+#            json.JSONDecodeError case a few lines below -- not an oversight.
+ignore = ["BLE001", "PLW1510", "B023", "TRY004"]
+
 [tool.mypy]
 python_version = "3.10"
 ignore_missing_imports = true

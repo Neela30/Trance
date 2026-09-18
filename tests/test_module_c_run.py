@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from core.config import TranceConfig
 from modules import module_c_memory
 
@@ -21,7 +19,9 @@ def test_run_skipped_without_dump(tmp_path):
 
 def test_run_without_vol3_path_skips_process_extraction(tmp_path):
     dump = make_dump(tmp_path, b"http://target.onion/x\x00")
-    result = module_c_memory.run(make_config(tmp_path), dump=dump, onion="target.onion", source_type="full-memory")
+    result = module_c_memory.run(
+        make_config(tmp_path), dump=dump, onion="target.onion", source_type="full-memory"
+    )
     assert result.status == "ok"
     assert "process_extraction" not in result.details
     assert result.details["dump"]["source_type"] == "full-memory"

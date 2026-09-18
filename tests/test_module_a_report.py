@@ -170,7 +170,11 @@ def test_component_timeline_empty_when_no_paths_extractable():
     details = {
         "summary": "x",
         "errors": [],
-        "findings_by_type": {"RecentDocs": [{"description": "no quoted path here", "source": "NTUSER.DAT", "timestamp": None}]},
+        "findings_by_type": {
+            "RecentDocs": [
+                {"description": "no quoted path here", "source": "NTUSER.DAT", "timestamp": None}
+            ]
+        },
         "hives_provided": {"ntuser": True, "system": False, "amcache": False},
     }
     ctx = build_context(details)

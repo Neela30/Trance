@@ -43,16 +43,17 @@ from modules.module_b_disk.evidence import working_copy
 GUARD_RE = re.compile(r"^Guard\s+(.*)$", re.MULTILINE)
 STATE_HEADER_RE = re.compile(
     r"^# Tor state file last generated on (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) local time",
-    re.MULTILINE)
-CRED_RE = re.compile(r"^([a-z2-7]{56}):descriptor:x25519:([A-Za-z2-7]{52})",
-                     re.IGNORECASE | re.MULTILINE)
+    re.MULTILINE,
+)
+CRED_RE = re.compile(
+    r"^([a-z2-7]{56}):descriptor:x25519:([A-Za-z2-7]{52})", re.IGNORECASE | re.MULTILINE
+)
 
 
 def _utc(path: Path, metadata: dict | None = None) -> str:
     if metadata and metadata.get("modified_utc"):
         return metadata["modified_utc"]
-    return dt.datetime.fromtimestamp(path.stat().st_mtime,
-                                     dt.timezone.utc).isoformat()
+    return dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc).isoformat()
 
 
 def _load_filesystem_metadata(directory: Path) -> dict:
@@ -78,28 +79,30 @@ def parse_state(path: Path) -> dict:
 
     guards = []
     for raw in GUARD_RE.findall(text):
-        fields = dict(
-            tok.split("=", 1) for tok in raw.split() if "=" in tok
-        )
+        fields = dict(tok.split("=", 1) for tok in raw.split() if "=" in tok)
         # A guard tor actually routed traffic through carries confirmed_on and
         # non-zero pb_use_attempts; merely "sampled" guards were never used.
         used = float(fields.get("pb_use_attempts", 0) or 0) > 0
-        guards.append({
-            "nickname": fields.get("nickname"),
-            "rsa_id": fields.get("rsa_id"),
-            "sampled_on": fields.get("sampled_on"),
-            "confirmed_on": fields.get("confirmed_on"),
-            "circuit_attempts": fields.get("pb_circ_attempts"),
-            "circuit_successes": fields.get("pb_circ_successes"),
-            "use_attempts": fields.get("pb_use_attempts"),
-            "use_successes": fields.get("pb_use_successes"),
-            "actually_used": used,
-        })
+        guards.append(
+            {
+                "nickname": fields.get("nickname"),
+                "rsa_id": fields.get("rsa_id"),
+                "sampled_on": fields.get("sampled_on"),
+                "confirmed_on": fields.get("confirmed_on"),
+                "circuit_attempts": fields.get("pb_circ_attempts"),
+                "circuit_successes": fields.get("pb_circ_successes"),
+                "use_attempts": fields.get("pb_use_attempts"),
+                "use_successes": fields.get("pb_use_successes"),
+                "actually_used": used,
+            }
+        )
 
     # The build-time histogram should sum to TotalBuildTimes; a mismatch means
     # the file was truncated or tampered with.
-    bins = [(int(a), int(b)) for a, b in
-            re.findall(r"^CircuitBuildTimeBin (\d+) (\d+)$", text, re.MULTILINE)]
+    bins = [
+        (int(a), int(b))
+        for a, b in re.findall(r"^CircuitBuildTimeBin (\d+) (\d+)$", text, re.MULTILINE)
+    ]
     hist_total = sum(n for _, n in bins)
     total_builds = _kv(text, "TotalBuildTimes")
 
@@ -127,8 +130,7 @@ def parse_state(path: Path) -> dict:
         "minutes_since_user_activity": mins_idle,
         "total_circuits_built": total_builds,
         "build_time_histogram_total": hist_total,
-        "histogram_consistent": (str(hist_total) == total_builds
-                                 if total_builds else None),
+        "histogram_consistent": (str(hist_total) == total_builds if total_builds else None),
         "build_time_ms_range": [bins[0][0], bins[-1][0]] if bins else None,
         "guards_sampled": len(guards),
         "guards_used": [g for g in guards if g["actually_used"]],
@@ -198,9 +200,7 @@ def _parse_tor_directory(directory: Path, source: Path) -> dict:
         ),
         "onion_auth": parse_onion_auth(directory / "onion-auth", files),
         "daemon_start_utc": (
-            _utc(directory / "lock", files.get("lock"))
-            if (directory / "lock").exists()
-            else None
+            _utc(directory / "lock", files.get("lock")) if (directory / "lock").exists() else None
         ),
         "file_mtimes_utc": {
             f.name: _utc(f, files.get(f.name))
@@ -226,9 +226,7 @@ def analyze_tor_directory(tor_dir: Path) -> dict:
         }
     report["integrity"]["source_unchanged"] = True
     report["analysis_status"] = (
-        "incomplete"
-        if report["state"].get("error") or report["consensus"].get("error")
-        else "ok"
+        "incomplete" if report["state"].get("error") or report["consensus"].get("error") else "ok"
     )
     return report
 
@@ -254,22 +252,27 @@ def main() -> int:
     print(f"state written (UTC): {st.get('last_written_utc')}")
     off = st.get("guest_utc_offset_hours")
     if off is not None:
-        print(f"guest TZ offset    : UTC{off:+g}  "
-              f"(guest local {st.get('generated_guest_local')})")
+        print(
+            f"guest TZ offset    : UTC{off:+g}  " f"(guest local {st.get('generated_guest_local')})"
+        )
         if abs(off) >= 6:
-            print("  !! large offset: guest-local artifact names (e.g. bookmark "
-                  "backups) may\n     show a different DATE than host-rendered "
-                  "mtimes for the same event.")
+            print(
+                "  !! large offset: guest-local artifact names (e.g. bookmark "
+                "backups) may\n     show a different DATE than host-rendered "
+                "mtimes for the same event."
+            )
 
-    print(f"\n-- network activity --")
+    print("\n-- network activity --")
     c = report["consensus"]
     if not c.get("error"):
         print(f"consensus valid-after (authority-signed): {c['valid_after_utc']}")
         print(f"consensus cached at (UTC)               : {c['file_mtime_utc']}")
         print(f"consensus size                          : {c['size_bytes']:,} bytes")
-    print(f"circuits built     : {st.get('total_circuits_built')} "
-          f"(histogram sums to {st.get('build_time_histogram_total')}, "
-          f"consistent={st.get('histogram_consistent')})")
+    print(
+        f"circuits built     : {st.get('total_circuits_built')} "
+        f"(histogram sums to {st.get('build_time_histogram_total')}, "
+        f"consistent={st.get('histogram_consistent')})"
+    )
     rng = st.get("build_time_ms_range")
     if rng:
         print(f"build times        : {rng[0]}-{rng[1]} ms")
@@ -277,13 +280,17 @@ def main() -> int:
     print(f"mins since user activity: {st.get('minutes_since_user_activity')}")
 
     used = st.get("guards_used", [])
-    print(f"\n-- entry guards ({st.get('guards_sampled')} sampled, "
-          f"{len(used)} actually carried traffic) --")
+    print(
+        f"\n-- entry guards ({st.get('guards_sampled')} sampled, "
+        f"{len(used)} actually carried traffic) --"
+    )
     for g in used:
         print(f"  {g['nickname']:20s} {g['rsa_id']}")
-        print(f"    confirmed {g['confirmed_on']}  circuits "
-              f"{g['circuit_successes']}/{g['circuit_attempts']}  streams "
-              f"{g['use_successes']}/{g['use_attempts']}")
+        print(
+            f"    confirmed {g['confirmed_on']}  circuits "
+            f"{g['circuit_successes']}/{g['circuit_attempts']}  streams "
+            f"{g['use_successes']}/{g['use_attempts']}"
+        )
 
     oa = report["onion_auth"]
     print("\n-- client-auth credentials --")
@@ -297,19 +304,25 @@ def main() -> int:
 
     print("\nCONCLUSION:")
     if st.get("guards_used"):
-        print("  Tor connected to the live network through the named entry guard(s) "
-              "above.\n  Guard fingerprints, circuit counts and the authority-signed "
-              "consensus are\n  written by tor itself and are independent of anything "
-              "the browser records.")
+        print(
+            "  Tor connected to the live network through the named entry guard(s) "
+            "above.\n  Guard fingerprints, circuit counts and the authority-signed "
+            "consensus are\n  written by tor itself and are independent of anything "
+            "the browser records."
+        )
     if st.get("minutes_since_user_activity") is not None:
-        print(f"  A user interacted with Tor Browser within "
-              f"{st['minutes_since_user_activity']} minute(s) of the state file\n"
-              f"  being written -- an on-disk record of live activity, not mere "
-              f"configuration.")
+        print(
+            f"  A user interacted with Tor Browser within "
+            f"{st['minutes_since_user_activity']} minute(s) of the state file\n"
+            f"  being written -- an on-disk record of live activity, not mere "
+            f"configuration."
+        )
     if oa.get("credentials"):
-        print("  Client-auth credential(s) name specific hidden service(s) in "
-              "plaintext.\n  Check inode/timestamp provenance before asserting these "
-              "were written by tor\n  rather than placed by hand.")
+        print(
+            "  Client-auth credential(s) name specific hidden service(s) in "
+            "plaintext.\n  Check inode/timestamp provenance before asserting these "
+            "were written by tor\n  rather than placed by hand."
+        )
     print("  Per-page browsing history remains unrecoverable from disk by design.")
 
     if args.custody_log:
@@ -317,9 +330,14 @@ def main() -> int:
         for name in ("state", "cached-microdesc-consensus", "torrc"):
             f = d / name
             if f.exists():
-                log.record(CustodyEntry(
-                    artifact_path=str(f), sha256=hash_file(f), action="analyzed",
-                    notes="analyze_tor_datadir.py Tor daemon state analysis"))
+                log.record(
+                    CustodyEntry(
+                        artifact_path=str(f),
+                        sha256=hash_file(f),
+                        action="analyzed",
+                        notes="analyze_tor_datadir.py Tor daemon state analysis",
+                    )
+                )
         log.save()
 
     if args.out:

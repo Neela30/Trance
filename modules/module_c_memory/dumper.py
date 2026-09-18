@@ -6,8 +6,8 @@ import argparse
 import ctypes
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import psutil
 
@@ -25,7 +25,14 @@ if sys.platform == "win32":
 
     MEM_COMMIT = 0x1000
     PAGE_GUARD = 0x100
-    READABLE_PROTECT = {0x02, 0x04, 0x08, 0x20, 0x40, 0x80}  # READONLY, READWRITE, WRITECOPY, EXEC_READ, EXEC_READWRITE, EXEC_WRITECOPY
+    READABLE_PROTECT = {
+        0x02,
+        0x04,
+        0x08,
+        0x20,
+        0x40,
+        0x80,
+    }  # READONLY, READWRITE, WRITECOPY, EXEC_READ, EXEC_READWRITE, EXEC_WRITECOPY
 
     class MEMORY_BASIC_INFORMATION(ctypes.Structure):
         _fields_ = [
@@ -84,12 +91,18 @@ def iter_readable_regions(handle: int) -> Iterator[tuple[int, int]]:
     mbi = MEMORY_BASIC_INFORMATION()
     mbi_size = ctypes.sizeof(mbi)
     while address < MAX_USERSPACE_ADDRESS:
-        result = kernel32.VirtualQueryEx(handle, ctypes.c_void_p(address), ctypes.byref(mbi), mbi_size)
+        result = kernel32.VirtualQueryEx(
+            handle, ctypes.c_void_p(address), ctypes.byref(mbi), mbi_size
+        )
         if result == 0:
             break
         region_size = mbi.RegionSize or mbi_size
         base_protect = mbi.Protect & 0xFF
-        if mbi.State == MEM_COMMIT and base_protect in READABLE_PROTECT and not (mbi.Protect & PAGE_GUARD):
+        if (
+            mbi.State == MEM_COMMIT
+            and base_protect in READABLE_PROTECT
+            and not (mbi.Protect & PAGE_GUARD)
+        ):
             yield (mbi.BaseAddress or address), region_size
         address += region_size
 
@@ -109,7 +122,11 @@ def dump_process_memory(pid: int, output_path: Path) -> tuple[int, int]:
                 buffer = (ctypes.c_char * read_size)()
                 bytes_read = ctypes.c_size_t(0)
                 ok = kernel32.ReadProcessMemory(
-                    handle, ctypes.c_void_p(base_address), buffer, read_size, ctypes.byref(bytes_read)
+                    handle,
+                    ctypes.c_void_p(base_address),
+                    buffer,
+                    read_size,
+                    ctypes.byref(bytes_read),
                 )
                 if not ok or bytes_read.value == 0:
                     continue

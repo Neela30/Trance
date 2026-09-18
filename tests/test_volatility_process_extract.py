@@ -1,6 +1,4 @@
-import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -66,7 +64,14 @@ def test_find_process_pid_case_insensitive_name_match(monkeypatch, tmp_path):
 
 def test_find_process_pid_propagates_pslist_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        va, "_run_one", lambda vol_bin, image_path, plugin: {"status": "error", "message": "no symbols", "rows": [], "row_count": 0}
+        va,
+        "_run_one",
+        lambda vol_bin, image_path, plugin: {
+            "status": "error",
+            "message": "no symbols",
+            "rows": [],
+            "row_count": 0,
+        },
     )
     result = va.find_process_pid("vol", make_image(tmp_path), "firefox.exe")
     assert result["status"] == "error"
@@ -84,7 +89,9 @@ def test_extract_process_memory_requires_output_file(tmp_path, monkeypatch):
 
 def test_extract_process_memory_surfaces_nonzero_exit(tmp_path, monkeypatch):
     def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="translation layer error")
+        return subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="translation layer error"
+        )
 
     monkeypatch.setattr(va.subprocess, "run", fake_run)
     with pytest.raises(AnalysisError, match="failed for PID 4321"):
@@ -116,7 +123,9 @@ def test_extract_target_process_end_to_end_with_discovery(tmp_path, monkeypatch)
         return path
 
     monkeypatch.setattr(va, "extract_process_memory", fake_extract)
-    result = va.extract_target_process("vol", make_image(tmp_path), tmp_path / "out", process_name="firefox.exe")
+    result = va.extract_target_process(
+        "vol", make_image(tmp_path), tmp_path / "out", process_name="firefox.exe"
+    )
     assert result["status"] == "ok"
     assert result["pid"] == 4321
     assert result["dump_path"].endswith("pid.4321.dmp")

@@ -7,10 +7,10 @@ import json
 import re
 import sys
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
 from core.exceptions import IntegrityError, ParsingError
 from core.hashing import hash_file
@@ -67,7 +67,9 @@ SEARCH_QUERY_RE = re.compile(r"\?q=([^\s&\"'<>]+)")
 CREDENTIAL_FIELDS = r"(username|user|uname|login|email|password|passwd|pwd)"
 CREDENTIAL_RE = re.compile(r"\b" + CREDENTIAL_FIELDS + r"=([^\s&\"'<>]+)")
 CREDENTIAL_JSON_RE = re.compile(r'"' + CREDENTIAL_FIELDS + r'"\s*:\s*"([^"\\]{1,200})"')
-NOISY_COOKIE_RE = re.compile(r"\b(\w*(?:session|token|auth|cookie|csrf)\w*)=([^\s;\"'<>]{1,80})", re.IGNORECASE)
+NOISY_COOKIE_RE = re.compile(
+    r"\b(\w*(?:session|token|auth|cookie|csrf)\w*)=([^\s;\"'<>]{1,80})", re.IGNORECASE
+)
 # Local download evidence: Firefox's in-memory download manager / session
 # strings carry either a file:// URI or an absolute Windows path ending in a
 # common downloaded-file extension.
@@ -136,8 +138,19 @@ def is_timeline_noise(value: str) -> bool:
 # Automatic page-load requests. Real evidence that the page loaded, but not a user
 # action — kept in the JSON, kept out of the site map and the activity sequence.
 ASSET_EXTENSIONS = (
-    ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
-    ".woff", ".woff2", ".ttf",
+    ".css",
+    ".js",
+    ".map",
+    ".ico",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".ttf",
 )
 
 
@@ -218,7 +231,9 @@ def verify_integrity(dump_path: Path) -> bool | None:
     expected = sidecar.read_text().split()[0].strip().lower()
     actual = hash_file(dump_path)
     if expected != actual:
-        raise IntegrityError(f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual}")
+        raise IntegrityError(
+            f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual}"
+        )
     return True
 
 
@@ -265,7 +280,12 @@ def _build_timeline(
     for c in cookies:
         if c["confidence"] != "high":
             continue
-        add_event("session", f"Session value observed: {c['name']}={c['value']}", f"{c['name']}={c['value']}", c["offset"])
+        add_event(
+            "session",
+            f"Session value observed: {c['name']}={c['value']}",
+            f"{c['name']}={c['value']}",
+            c["offset"],
+        )
 
     for q in search_queries:
         if is_timeline_noise(q["value"]):
@@ -278,7 +298,12 @@ def _build_timeline(
     for cr in credentials:
         if cr["confidence"] != "high":
             continue
-        add_event("credential", f"Credential submitted: {cr['field']}={cr['value']}", f"{cr['field']}={cr['value']}", cr["offset"])
+        add_event(
+            "credential",
+            f"Credential submitted: {cr['field']}={cr['value']}",
+            f"{cr['field']}={cr['value']}",
+            cr["offset"],
+        )
 
     for d in downloads:
         if d["confidence"] != "high":
@@ -415,7 +440,12 @@ def analyze(
             confidence = "low" if _is_noise_value(value) else "high"
             append_capped(
                 cookies,
-                {"offset": hex(match_offset), "name": name, "value": value, "confidence": confidence},
+                {
+                    "offset": hex(match_offset),
+                    "name": name,
+                    "value": value,
+                    "confidence": confidence,
+                },
                 "cookies",
             )
             record_artifact("cookie", match_offset, f"{name}={value}")
@@ -447,7 +477,13 @@ def analyze(
             confidence = "low" if _is_noise_value(value) else "high"
             append_capped(
                 credentials,
-                {"offset": hex(match_offset), "field": field, "value": value, "shape": "form", "confidence": confidence},
+                {
+                    "offset": hex(match_offset),
+                    "field": field,
+                    "value": value,
+                    "shape": "form",
+                    "confidence": confidence,
+                },
                 "credentials",
             )
             record_artifact("credential", match_offset, f"{field}={value}")
@@ -460,7 +496,13 @@ def analyze(
             confidence = "low" if _is_noise_value(value) else "high"
             append_capped(
                 credentials,
-                {"offset": hex(match_offset), "field": field, "value": value, "shape": "json", "confidence": confidence},
+                {
+                    "offset": hex(match_offset),
+                    "field": field,
+                    "value": value,
+                    "shape": "json",
+                    "confidence": confidence,
+                },
                 "credentials",
             )
             record_artifact("credential", match_offset, f'"{field}":"{value}"')
@@ -560,7 +602,10 @@ def analyze(
             "in testing) or to source_type='process' dumps (already scoped to one process). Hits that "
             "fail this check are kept below, not discarded, just excluded from 'targeted'.",
             "unanchored": {
-                category: {"count": unanchored_counts[category], "sample": unanchored_samples[category]}
+                category: {
+                    "count": unanchored_counts[category],
+                    "sample": unanchored_samples[category],
+                }
                 for category in ("credentials", "search_queries")
             },
         },
@@ -604,10 +649,14 @@ def format_summary(report: dict) -> str:
             "(note: Tor Browser's own bundled default services — search engine, connectivity checks — "
             "also land here and aren't necessarily user activity; check before assuming a missed target):"
         )
-        lines += [f"    {s['onion']}  (seen {s['hit_count']}x) — re-run with --onion {s['onion']}" for s in sugg]
+        lines += [
+            f"    {s['onion']}  (seen {s['hit_count']}x) — re-run with --onion {s['onion']}"
+            for s in sugg
+        ]
     lines.append(f"--- Session/cookie values ({len(kf['session_cookies'])} unique) ---")
     lines += [
-        f"  [{i['offset']}] {i['name']}={i['value']}" + (f"  (x{i['occurrences']})" if i["occurrences"] > 1 else "")
+        f"  [{i['offset']}] {i['name']}={i['value']}"
+        + (f"  (x{i['occurrences']})" if i["occurrences"] > 1 else "")
         for i in kf["session_cookies"]
     ]
     lines.append(f"--- Credentials ({len(kf['credentials'])} unique) ---")
@@ -629,18 +678,26 @@ def format_summary(report: dict) -> str:
     ]
     lines += [f"  {i + 1:>3}. [{e['offset']}] {e['detail']}" for i, e in enumerate(tl["events"])]
 
-    lines += ["", "=== FULL DETAIL (includes low-confidence noise) ===", f"--- Targeted URLs ({len(tg['urls'])}) ---"]
+    lines += [
+        "",
+        "=== FULL DETAIL (includes low-confidence noise) ===",
+        f"--- Targeted URLs ({len(tg['urls'])}) ---",
+    ]
     lines += [f"  [{i['offset']}] {i['value']}" for i in tg["urls"]]
     lines.append(f"--- Cookies ({len(tg['cookies'])}) ---")
-    lines += [f"  [{i['offset']}] {i['name']}={i['value']}  ({i['confidence']})" for i in tg["cookies"]]
+    lines += [
+        f"  [{i['offset']}] {i['name']}={i['value']}  ({i['confidence']})" for i in tg["cookies"]
+    ]
     lines.append(f"--- Search queries ({len(tg['search_queries'])}) ---")
     lines += [
-        f"  [{i['offset']}] q={i['value']}" + ("  <-- matches --username" if i["matches_username"] else "")
+        f"  [{i['offset']}] q={i['value']}"
+        + ("  <-- matches --username" if i["matches_username"] else "")
         for i in tg["search_queries"]
     ]
     lines.append(f"--- Credential submissions ({len(tg['credentials'])}) ---")
     lines += [
-        f"  [{i['offset']}] {i['field']}={i['value']} [{i['shape']}]  ({i['confidence']})" for i in tg["credentials"]
+        f"  [{i['offset']}] {i['field']}={i['value']} [{i['shape']}]  ({i['confidence']})"
+        for i in tg["credentials"]
     ]
     lines.append(f"--- Downloads ({len(tg['downloads'])}) ---")
     lines += [f"  [{i['offset']}] {i['value']}  ({i['confidence']})" for i in tg["downloads"]]
@@ -665,10 +722,17 @@ def main() -> None:
     )
     parser.add_argument("dump", type=Path, help="Path to the .bin memory dump")
     parser.add_argument("--onion", help="Target .onion address to anchor URL matching to")
-    parser.add_argument("--host", help="Target host[:port] to anchor URL matching to (e.g. 127.0.0.1:5000)")
-    parser.add_argument("--username", help="Known username to highlight in recovered search queries")
     parser.add_argument(
-        "--min-length", type=int, default=DEFAULT_MIN_LEN, help="Minimum string length to extract (default: %(default)s)"
+        "--host", help="Target host[:port] to anchor URL matching to (e.g. 127.0.0.1:5000)"
+    )
+    parser.add_argument(
+        "--username", help="Known username to highlight in recovered search queries"
+    )
+    parser.add_argument(
+        "--min-length",
+        type=int,
+        default=DEFAULT_MIN_LEN,
+        help="Minimum string length to extract (default: %(default)s)",
     )
     parser.add_argument(
         "--source-type",
@@ -678,15 +742,25 @@ def main() -> None:
         "physical-memory image (winpmem_acquire.py). Only changes per-category result caps "
         "and report labeling, not extraction logic (default: %(default)s)",
     )
-    parser.add_argument("--output", type=Path, help="Path for the JSON report (default: <dump>.report.json)")
+    parser.add_argument(
+        "--output", type=Path, help="Path for the JSON report (default: <dump>.report.json)"
+    )
     args = parser.parse_args()
 
     if not args.onion and not args.host:
-        print("[!] Warning: no --onion or --host given — targeted URL section will be empty.", file=sys.stderr)
+        print(
+            "[!] Warning: no --onion or --host given — targeted URL section will be empty.",
+            file=sys.stderr,
+        )
 
     try:
         report = analyze(
-            args.dump, args.onion, args.host, args.username, min_len=args.min_length, source_type=args.source_type
+            args.dump,
+            args.onion,
+            args.host,
+            args.username,
+            min_len=args.min_length,
+            source_type=args.source_type,
         )
     except (ParsingError, IntegrityError) as exc:
         print(f"[!] {exc}", file=sys.stderr)
@@ -697,7 +771,9 @@ def main() -> None:
 
     print(format_summary(report))
     print(f"\n[*] JSON report written to {output_path}")
-    print("[*] For the HTML case report (all modules, findings.json), run main.py from the repo root.")
+    print(
+        "[*] For the HTML case report (all modules, findings.json), run main.py from the repo root."
+    )
 
 
 if __name__ == "__main__":

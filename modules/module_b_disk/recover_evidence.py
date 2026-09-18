@@ -16,21 +16,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sqlite3
 import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
-import shutil
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.custody_log import CustodyEntry, CustodyLog
-from core.hashing import hash_file
 from core.exceptions import IntegrityError
-from modules.module_b_disk.evidence import external_output, verify_hashes, working_copy
+from core.hashing import hash_file
+from modules.module_b_disk.evidence import external_output, working_copy
 
 # URLs/titles baked into every fresh Tor Browser profile's "Tor Project
 # Bookmarks" folder. Anything matching these is default noise, not evidence
@@ -72,13 +72,12 @@ def analyze_places(db_path: Path) -> dict:
         cur = conn.cursor()
 
         cur.execute(
-            "SELECT id, url, title, visit_count, hidden, typed, last_visit_date "
-            "FROM moz_places"
+            "SELECT id, url, title, visit_count, hidden, typed, last_visit_date " "FROM moz_places"
         )
         places = []
         user_activity = []
         for row in cur.fetchall():
-            pid, url, title, visit_count, hidden, typed, last_visit_date = row
+            pid, url, title, visit_count, _hidden, typed, last_visit_date = row
             is_default = url in DEFAULT_BOOKMARK_URLS
             looks_like_activity = bool(visit_count) or bool(typed) or last_visit_date is not None
             entry = {
@@ -198,20 +197,30 @@ def analyze_profile(evidence_dir: Path) -> dict:
                 report[section] = parser(copy / name)
             except Exception as exc:
                 report[section] = {"error": f"{type(exc).__name__}: {exc}"}
-        report["analysis_status"] = "incomplete" if any(
-            report[k].get("error") or any(b.get("error") for b in report[k].get("backups", []))
-            for k in ("places", "cookies", "favicons", "bookmark_backups")
-        ) else "ok"
+        report["analysis_status"] = (
+            "incomplete"
+            if any(
+                report[k].get("error") or any(b.get("error") for b in report[k].get("backups", []))
+                for k in ("places", "cookies", "favicons", "bookmark_backups")
+            )
+            else "ok"
+        )
     report["integrity"]["source_unchanged"] = True
     return report
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("evidence_dir", type=Path, help="Static directory of acquired profile files")
+    parser.add_argument(
+        "evidence_dir", type=Path, help="Static directory of acquired profile files"
+    )
     parser.add_argument("--out", type=Path, help="New JSON report path outside evidence")
-    parser.add_argument("--output-dir", type=Path, default=Path("output/module-b"),
-                        help="Parent for a new run directory when --out is omitted")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("output/module-b"),
+        help="Parent for a new run directory when --out is omitted",
+    )
     args = parser.parse_args(argv)
     if not args.evidence_dir.is_dir():
         print(f"error: {args.evidence_dir} is not a directory", file=sys.stderr)
@@ -221,20 +230,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         output = external_output(requested, args.evidence_dir)
         custody_path = external_output(
-            output.with_name(output.stem + ".custody.json"), args.evidence_dir)
+            output.with_name(output.stem + ".custody.json"), args.evidence_dir
+        )
         report = analyze_profile(args.evidence_dir)
         custody = CustodyLog(custody_path)
         for name, digest in report["integrity"]["source_sha256"].items():
-            custody.record(CustodyEntry(
-                artifact_path=str(args.evidence_dir.resolve() / name), sha256=digest,
-                action="verified_and_copied",
-                notes="Source hashed before/after analysis; parsers used disposable copies",
-            ))
+            custody.record(
+                CustodyEntry(
+                    artifact_path=str(args.evidence_dir.resolve() / name),
+                    sha256=digest,
+                    action="verified_and_copied",
+                    notes="Source hashed before/after analysis; parsers used disposable copies",
+                )
+            )
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("x", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
-        custody.record(CustodyEntry(artifact_path=str(output), sha256=hash_file(output),
-                                   action="generated"))
+        custody.record(
+            CustodyEntry(artifact_path=str(output), sha256=hash_file(output), action="generated")
+        )
         with custody_path.open("x", encoding="utf-8") as stream:
             json.dump([asdict(entry) for entry in custody.entries], stream, indent=2)
     except (OSError, ValueError, IntegrityError) as exc:
@@ -249,7 +263,9 @@ def main(argv: list[str] | None = None) -> int:
         result = report[section]
         print(f"{section}: {result.get('error', 'parsed; see report for findings')}")
     if report["analysis_status"] == "incomplete":
-        print("Analysis incomplete: missing or unreadable artifacts cannot establish absence of activity.")
+        print(
+            "Analysis incomplete: missing or unreadable artifacts cannot establish absence of activity."
+        )
     print(f"Report: {output}")
     print(f"Custody: {custody_path}")
     return 2 if report["analysis_status"] == "incomplete" else 0

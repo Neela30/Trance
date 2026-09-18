@@ -38,7 +38,9 @@ def test_acquire_surfaces_nonzero_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(winpmem_acquire, "_is_admin", lambda: True)
 
     def fake_run(cmd, capture_output, text, timeout):
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="driver load failed")
+        return subprocess.CompletedProcess(
+            cmd, returncode=1, stdout="", stderr="driver load failed"
+        )
 
     monkeypatch.setattr(winpmem_acquire.subprocess, "run", fake_run)
     with pytest.raises(AcquisitionError, match="exited with code 1"):

@@ -37,7 +37,9 @@ def run_module(name: str, config: TranceConfig, kwargs: dict) -> ModuleResult:
         return ModuleResult(module=name, status="error", message=f"import failed: {exc}")
     run = getattr(module, "run", None)
     if run is None:
-        return ModuleResult(module=name, status="not_implemented", message="module defines no run()")
+        return ModuleResult(
+            module=name, status="not_implemented", message="module defines no run()"
+        )
     try:
         return run(config, **kwargs)
     except Exception as exc:
@@ -46,19 +48,32 @@ def run_module(name: str, config: TranceConfig, kwargs: dict) -> ModuleResult:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the TRANCE pipeline end to end for one case.")
-    parser.add_argument("--case", required=True, help="Case name; outputs go to <output-dir>/<case>/")
-    parser.add_argument("--output-dir", type=Path, default=Path("output"), help="Default: %(default)s")
-    parser.add_argument("--evidence-dir", type=Path, help="Recorded in findings.json for provenance")
-    parser.add_argument("--verbose", action="store_true", help="Also print each module's full text summary")
+    parser.add_argument(
+        "--case", required=True, help="Case name; outputs go to <output-dir>/<case>/"
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("output"), help="Default: %(default)s"
+    )
+    parser.add_argument(
+        "--evidence-dir", type=Path, help="Recorded in findings.json for provenance"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Also print each module's full text summary"
+    )
 
     registry = parser.add_argument_group("module_a_registry")
-    registry.add_argument("--ntuser", type=Path, help="Acquired NTUSER.DAT hive (feeds UserAssist and RecentDocs)")
-    registry.add_argument("--system", type=Path, help="Acquired SYSTEM hive (feeds ShimCache/AppCompatCache)")
+    registry.add_argument(
+        "--ntuser", type=Path, help="Acquired NTUSER.DAT hive (feeds UserAssist and RecentDocs)"
+    )
+    registry.add_argument(
+        "--system", type=Path, help="Acquired SYSTEM hive (feeds ShimCache/AppCompatCache)"
+    )
     registry.add_argument("--amcache", type=Path, help="Acquired Amcache.hve hive")
 
     disk = parser.add_argument_group("module_b_disk")
     disk.add_argument(
-        "--disk-profile", type=Path,
+        "--disk-profile",
+        type=Path,
         help="Static extracted Tor Browser profile containing SQLite databases",
     )
     disk.add_argument("--tor-dir", type=Path, help="Static extracted TorBrowser/Data/Tor directory")
@@ -67,10 +82,16 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     memory = parser.add_argument_group("module_c_memory")
-    memory.add_argument("--dump", type=Path, help="Memory image to analyze: a dumper.py process dump (.bin) or a winpmem_acquire.py full-memory image (.raw)")
+    memory.add_argument(
+        "--dump",
+        type=Path,
+        help="Memory image to analyze: a dumper.py process dump (.bin) or a winpmem_acquire.py full-memory image (.raw)",
+    )
     memory.add_argument("--onion", help="Target .onion address to anchor URL matching to")
     memory.add_argument("--host", help="Target host[:port] to anchor URL matching to")
-    memory.add_argument("--username", help="Known username to highlight in recovered search queries")
+    memory.add_argument(
+        "--username", help="Known username to highlight in recovered search queries"
+    )
     memory.add_argument(
         "--source-type",
         choices=("process", "full-memory"),
@@ -111,17 +132,25 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--case must be a single directory name without path separators")
 
     if args.dump and not (args.onion or args.host):
-        print("[!] --dump given without --onion/--host: memory targeted-URL section will be empty", file=sys.stderr)
+        print(
+            "[!] --dump given without --onion/--host: memory targeted-URL section will be empty",
+            file=sys.stderr,
+        )
 
     output_dir = args.output_dir / args.case
     for evidence_root in (args.disk_profile, args.tor_dir):
         if evidence_root and output_dir.resolve().is_relative_to(evidence_root.resolve()):
             parser.error(f"case output directory must be outside disk evidence: {evidence_root}")
-    existing_outputs = [output_dir / name for name in ("findings.json", "report.html", CUSTODY_FILENAME)]
+    existing_outputs = [
+        output_dir / name for name in ("findings.json", "report.html", CUSTODY_FILENAME)
+    ]
     if any(path.exists() for path in existing_outputs):
         parser.error(f"case outputs already exist; choose a new --case: {output_dir}")
     config = TranceConfig(
-        case_name=args.case, output_dir=output_dir, evidence_dir=args.evidence_dir, verbose=args.verbose
+        case_name=args.case,
+        output_dir=output_dir,
+        evidence_dir=args.evidence_dir,
+        verbose=args.verbose,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
                     notes="SHA-256 calculated during the sequential raw-byte scan",
                 )
             )
-    memory_result = next((r for r in results if r.module == "module_c_memory" and r.status == "ok"), None)
+    memory_result = next(
+        (r for r in results if r.module == "module_c_memory" and r.status == "ok"), None
+    )
     if memory_result:
         dump = memory_result.details["dump"]
         custody.record(
@@ -198,7 +229,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     for path in (findings_path, report_path):
-        custody.record(CustodyEntry(artifact_path=str(path), sha256=hash_file(path), action="generated"))
+        custody.record(
+            CustodyEntry(artifact_path=str(path), sha256=hash_file(path), action="generated")
+        )
     custody.save()
 
     if args.verbose and memory_result:

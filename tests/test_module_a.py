@@ -29,7 +29,6 @@ from modules.module_a_registry.constants import (
 from modules.module_a_registry.normalize import normalize_entry
 from modules.module_a_registry.pipeline import run_module_a, write_output
 
-
 # ---------------------------------------------------------------------------
 # is_tor_related() — pure, no file I/O
 # ---------------------------------------------------------------------------
@@ -71,7 +70,10 @@ class TestIsTorRelated:
 class TestCandidatePath:
     def test_user_assist_uses_name_field(self):
         entry = {"name": r"C:\Tor Browser\Browser\firefox.exe", "run_counter": 3}
-        assert candidate_path(ARTIFACT_TYPE_USER_ASSIST, entry) == r"C:\Tor Browser\Browser\firefox.exe"
+        assert (
+            candidate_path(ARTIFACT_TYPE_USER_ASSIST, entry)
+            == r"C:\Tor Browser\Browser\firefox.exe"
+        )
 
     def test_amcache_falls_back_across_field_names(self):
         entry = {"lower_case_long_path": r"c:\tor browser\browser\firefox.exe"}
@@ -106,7 +108,10 @@ class TestNormalizeEntry:
         assert "run_count=14" in artifact.description
 
     def test_shimcache_is_medium_confidence_and_says_not_confirmed_execution(self):
-        entry = {"path": r"C:\Tor Browser\Browser\firefox.exe", "last_mod_date": "2026-07-14T00:00:00+00:00"}
+        entry = {
+            "path": r"C:\Tor Browser\Browser\firefox.exe",
+            "last_mod_date": "2026-07-14T00:00:00+00:00",
+        }
         artifact = normalize_entry(ARTIFACT_TYPE_SHIMCACHE, entry, "SYSTEM")
 
         assert "MEDIUM" in artifact.description
@@ -126,7 +131,11 @@ class TestNormalizeEntry:
         assert artifact.timestamp == "2026-07-10T09:01:47+00:00"
 
     def test_recentdocs_is_low_confidence(self):
-        entry = {"name": "secret-notes.txt", "extension": ".txt", "last_write": "2026-07-11T00:00:00+00:00"}
+        entry = {
+            "name": "secret-notes.txt",
+            "extension": ".txt",
+            "last_write": "2026-07-11T00:00:00+00:00",
+        }
         artifact = normalize_entry(ARTIFACT_TYPE_RECENTDOCS, entry, "NTUSER.DAT")
 
         assert "LOW" in artifact.description
@@ -161,7 +170,10 @@ _MOCK_USER_ASSIST_ENTRIES = [
 _MOCK_RECENTDOCS_ENTRIES: list[dict] = []
 
 _MOCK_SHIMCACHE_ENTRIES = [
-    {"path": r"C:\Users\bob\Desktop\Tor Browser\Browser\firefox.exe", "last_mod_date": "2026-07-14T00:00:00+00:00"},
+    {
+        "path": r"C:\Users\bob\Desktop\Tor Browser\Browser\firefox.exe",
+        "last_mod_date": "2026-07-14T00:00:00+00:00",
+    },
 ]
 
 _MOCK_AMCACHE_ENTRIES = [
@@ -177,10 +189,21 @@ _MOCK_AMCACHE_ENTRIES = [
 def _patch_extractors():
     """Patch every extractor at its point of use inside pipeline.py."""
     return (
-        patch("modules.module_a_registry.pipeline.extract_user_assist", return_value=_MOCK_USER_ASSIST_ENTRIES),
-        patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=_MOCK_RECENTDOCS_ENTRIES),
-        patch("modules.module_a_registry.pipeline.extract_shimcache", return_value=_MOCK_SHIMCACHE_ENTRIES),
-        patch("modules.module_a_registry.pipeline.extract_amcache", return_value=_MOCK_AMCACHE_ENTRIES),
+        patch(
+            "modules.module_a_registry.pipeline.extract_user_assist",
+            return_value=_MOCK_USER_ASSIST_ENTRIES,
+        ),
+        patch(
+            "modules.module_a_registry.pipeline.extract_recentdocs",
+            return_value=_MOCK_RECENTDOCS_ENTRIES,
+        ),
+        patch(
+            "modules.module_a_registry.pipeline.extract_shimcache",
+            return_value=_MOCK_SHIMCACHE_ENTRIES,
+        ),
+        patch(
+            "modules.module_a_registry.pipeline.extract_amcache", return_value=_MOCK_AMCACHE_ENTRIES
+        ),
     )
 
 
@@ -224,9 +247,9 @@ class TestPipelineIntegrity:
             actions = {e["action"]: e["sha256"] for e in hive_entries}
             assert "ingest_pre_parse" in actions
             assert "post_parse_verify" in actions
-            assert actions["ingest_pre_parse"] == actions["post_parse_verify"], (
-                f"Hash changed across parsing for {path} — read-only violation."
-            )
+            assert (
+                actions["ingest_pre_parse"] == actions["post_parse_verify"]
+            ), f"Hash changed across parsing for {path} — read-only violation."
 
     def test_only_tor_related_entries_survive_filtering(self, tmp_path):
         output_dir = tmp_path / "out"
@@ -236,7 +259,11 @@ class TestPipelineIntegrity:
         # Tor Browser must survive, across all three artifact types provided.
         assert len(result.findings) == 3
         artifact_types = {f.artifact_type for f in result.findings}
-        assert artifact_types == {ARTIFACT_TYPE_USER_ASSIST, ARTIFACT_TYPE_SHIMCACHE, ARTIFACT_TYPE_AMCACHE}
+        assert artifact_types == {
+            ARTIFACT_TYPE_USER_ASSIST,
+            ARTIFACT_TYPE_SHIMCACHE,
+            ARTIFACT_TYPE_AMCACHE,
+        }
         assert all("notepad" not in f.description.lower() for f in result.findings)
 
     def test_integrity_error_raised_on_hash_mismatch(self, tmp_path):
@@ -250,12 +277,15 @@ class TestPipelineIntegrity:
             Path(path).write_bytes(b"mutated-content")
             return []
 
-        with patch(
-            "modules.module_a_registry.pipeline.extract_user_assist",
-            side_effect=_mutating_extract_user_assist,
-        ), patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]):
-            with pytest.raises(IntegrityError):
-                run_module_a(config, ntuser=ntuser)
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                side_effect=_mutating_extract_user_assist,
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            pytest.raises(IntegrityError),
+        ):
+            run_module_a(config, ntuser=ntuser)
 
     def test_missing_hives_do_not_raise_and_are_noted_in_summary(self, tmp_path):
         output_dir = tmp_path / "out"
@@ -275,10 +305,13 @@ class TestPipelineIntegrity:
         output_dir = tmp_path / "out"
         config = TranceConfig(case_name="test-case", output_dir=output_dir)
 
-        with patch(
-            "modules.module_a_registry.pipeline.extract_user_assist",
-            side_effect=ParsingError("boom"),
-        ), patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]):
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                side_effect=ParsingError("boom"),
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
             result = run_module_a(config, ntuser=ntuser)
 
         assert any("boom" in e for e in result.errors)
