@@ -18,6 +18,19 @@ image is bigger and noisier than one process's memory, so it also raises the per
 result cap — see analyzer.SOURCE_TYPE_RECORD_CAPS) and never invokes dumper.py or
 winpmem_acquire.py itself. Likewise --vol3-path only ever *analyzes* the given --dump; it
 never triggers acquisition.
+
+--vol3-extract-process (e.g. "firefox.exe") is a third, optional thing --vol3-path can do,
+on top of the five-plugin structural pass: before string-carving, use Volatility3 to find
+that process's PID (windows.pslist) and pull just its resident pages out of the full image
+(windows.memmap --dump) via volatility_analyze.extract_target_process(), then run
+analyzer.analyze() against that far smaller, far less noisy extract instead of the whole
+image. This is what actually fixes full-memory's "every process in scope" noise problem
+for extraction, as opposed to analyzer.py's host_anchoring, which papers over it after the
+fact by requiring proximity to a target-host mention. Best-effort and reversible: if
+discovery/extraction fails for any reason (most commonly: the process already exited by
+capture time, so pslist can't see it -- see volatility_analyze.find_process_pid's
+docstring), this silently falls back to analyzing the original full image, which is
+already known to work.
 """
 
 from __future__ import annotations
@@ -47,6 +60,20 @@ def _run_volatility3(image: Path, vol3_path: str | None) -> dict:
     return {"status": "ok", "message": None, **result}
 
 
+def _extract_process(
+    image: Path, output_dir: Path, vol3_path: str, process_name: str, pid: int | None
+) -> dict:
+    """Best-effort process-scoped extraction; never raises for the module — a genuine
+    Volatility3 invocation failure here still degrades to a status the caller falls back
+    on, same contract as extract_target_process() itself."""
+    from modules.module_c_memory.volatility_analyze import extract_target_process
+
+    try:
+        return extract_target_process(vol3_path, image, output_dir, process_name=process_name, pid=pid)
+    except AnalysisError as exc:
+        return {"status": "error", "message": str(exc), "discovery": None, "source_image": str(image), "dump_path": None}
+
+
 def run(
     config: TranceConfig,
     dump: Path | None = None,
@@ -55,6 +82,8 @@ def run(
     username: str | None = None,
     source_type: str = "process",
     vol3_path: str | None = None,
+    vol3_extract_process: str | None = None,
+    vol3_extract_pid: int | None = None,
     **_: object,
 ) -> ModuleResult:
     if dump is None:
@@ -62,12 +91,31 @@ def run(
 
     from modules.module_c_memory.analyzer import analyze
 
+    dump_path = Path(dump)
+    analyzer_dump_path, analyzer_source_type = dump_path, source_type
+    process_extraction: dict | None = None
+
+    if vol3_path and vol3_extract_process and source_type == "full-memory":
+        process_extraction = _extract_process(
+            dump_path,
+            config.output_dir / MODULE_NAME / "extracted",
+            vol3_path,
+            vol3_extract_process,
+            vol3_extract_pid,
+        )
+        if process_extraction["status"] == "ok":
+            # Narrowed to one process's pages now -- back to process-scoped thresholds.
+            analyzer_dump_path = Path(process_extraction["dump_path"])
+            analyzer_source_type = "process"
+
     try:
-        details = analyze(Path(dump), onion, host, username, source_type=source_type)
+        details = analyze(analyzer_dump_path, onion, host, username, source_type=analyzer_source_type)
     except TranceError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))
 
-    details["volatility3"] = _run_volatility3(Path(dump), vol3_path)
+    if process_extraction is not None:
+        details["process_extraction"] = process_extraction
+    details["volatility3"] = _run_volatility3(dump_path, vol3_path)
 
     # Artifacts go to the cross-module list; everything else stays as this module's details.
     artifacts = [Artifact(**a) for a in details.pop("artifacts")]
