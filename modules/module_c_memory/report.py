@@ -97,8 +97,26 @@ def _match_download_to_site_map(download_value: str, site_map: list[str]) -> str
     return None
 
 
-def _annotate_downloads(downloads: list[str], site_map: list[str]) -> list[dict]:
-    return [{"value": v, "matched_endpoint": _match_download_to_site_map(v, site_map)} for v in downloads]
+def _annotate_downloads(downloads: list[str], site_map: list[str], source_type: str) -> dict:
+    """Split into matched (correlates to a recovered target-site path -- real evidence
+    the target's downloads came from this investigation) vs unmatched.
+
+    Only split for source_type="full-memory": a full-memory image's Downloads-shaped
+    paths span every user account on the machine (verified on a real capture: SumatraPDF
+    under one user, a WinPMEM binary and a Tor Browser installer under another, an
+    apparently-malicious "*.virus.exe" under a third -- 22 machine-wide downloads for one
+    target site), so presenting all of them as equally "confirmed" evidence for this
+    investigation is misleading. A single-process dump is already scoped to the browser
+    that (presumably) did the downloading, so nothing is demoted there -- matches
+    key_findings' own "high-confidence" framing rather than adding a second, narrower bar.
+    """
+    annotated = [{"value": v, "matched_endpoint": _match_download_to_site_map(v, site_map)} for v in downloads]
+    if source_type != "full-memory":
+        return {"matched": annotated, "unmatched": []}
+    return {
+        "matched": [d for d in annotated if d["matched_endpoint"]],
+        "unmatched": [d for d in annotated if not d["matched_endpoint"]],
+    }
 
 
 def _search_term_frequencies(search_queries: list[dict], username: str | None) -> list[dict]:
@@ -250,7 +268,9 @@ def build_context(details: dict) -> dict:
         "near_duplicates": _flag_near_duplicate_paths(site_map, assets),
         "events": events,
         "session_cookies": _annotate_session_cookies(details["key_findings"]["session_cookies"]),
-        "downloads": _annotate_downloads(details["key_findings"]["downloads"], site_map),
+        "downloads": _annotate_downloads(
+            details["key_findings"]["downloads"], site_map, details["dump"]["source_type"]
+        ),
         "search_terms": _search_term_frequencies(
             details["targeted"]["search_queries"], details["targeting"]["username"]
         ),

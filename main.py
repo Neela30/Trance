@@ -82,6 +82,20 @@ def main(argv: list[str] | None = None) -> int:
         "hivelist) against --dump as a second, independent pass alongside string carving. "
         "Omit to skip Volatility3 entirely (default: skipped)",
     )
+    memory.add_argument(
+        "--vol3-extract-process",
+        help="Process image name (e.g. firefox.exe) to isolate before string-carving: uses "
+        "Volatility3 to find its PID (windows.pslist) and extract just its resident pages "
+        "(windows.memmap --dump), then runs analyzer.py against that smaller extract instead "
+        "of the whole image. Requires --vol3-path and --source-type full-memory; best-effort "
+        "-- falls back to analyzing the full image if the process already exited by capture "
+        "time or extraction otherwise fails. Omit to always analyze the full image (default)",
+    )
+    memory.add_argument(
+        "--vol3-extract-pid",
+        type=int,
+        help="Skip --vol3-extract-process's PID discovery and extract this exact PID instead",
+    )
     args = parser.parse_args(argv)
 
     if (
@@ -119,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
             "username": args.username,
             "source_type": args.source_type,
             "vol3_path": args.vol3_path,
+            "vol3_extract_process": args.vol3_extract_process,
+            "vol3_extract_pid": args.vol3_extract_pid,
         },
     }
 
