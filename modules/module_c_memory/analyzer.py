@@ -21,6 +21,16 @@ OVERLAP = 4096
 DEFAULT_MIN_LEN = 6
 SAMPLE_CAP = 20
 SUGGESTION_MIN_HITS = 3
+# A full-memory image carries every process's memory, not just one browser's -- Tor
+# Browser's own bundled default services (search engine, connectivity checks) rack up
+# more incidental hits there than in a single-process dump simply because there's more
+# total scanned content, not because they're more significant. Same reasoning as
+# SOURCE_TYPE_RECORD_CAPS below: same detection logic, source-type-scaled threshold for
+# what counts as worth flagging.
+SOURCE_TYPE_SUGGESTION_MIN_HITS = {
+    "process": SUGGESTION_MIN_HITS,
+    "full-memory": 6,
+}
 # Past process-dump scale (whole-system RAM images, pagefiles), an unbounded
 # per-category list is the memory risk, not iter_strings() itself — cap each
 # and record that it happened rather than let analyze() OOM silently.
@@ -422,10 +432,11 @@ def analyze(
     # anything — those show up here too and are expected background noise,
     # not evidence of user action. Capped and left unlabeled rather than
     # guessing which specific v3 addresses are "default" (those can rotate).
+    suggestion_min_hits = SOURCE_TYPE_SUGGESTION_MIN_HITS.get(source_type, SUGGESTION_MIN_HITS)
     targeting_suggestions = [
         {"onion": domain, "hit_count": count}
         for domain, count in onion_domain_hits.most_common(10)
-        if count >= SUGGESTION_MIN_HITS and not any(domain in t for t in targets)
+        if count >= suggestion_min_hits and not any(domain in t for t in targets)
     ]
 
     def _dedup_high_confidence(items: list[dict], value_key: str) -> list[dict]:
@@ -455,6 +466,7 @@ def analyze(
             "source_type": source_type,
         },
         "record_cap": record_cap,
+        "suggestion_min_hits": suggestion_min_hits,
         "targeting": {"onion": onion, "host": host, "username": username},
         "targeting_suggestions": targeting_suggestions,
         "key_findings": {
