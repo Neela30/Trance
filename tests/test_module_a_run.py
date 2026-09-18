@@ -4,6 +4,7 @@ from core.config import TranceConfig
 from core.exceptions import IntegrityError
 from core.schema import Artifact
 from modules import module_a_registry
+from modules.module_a_registry import pipeline
 from modules.module_a_registry.pipeline import ModuleAResult
 
 
@@ -29,7 +30,7 @@ def test_run_ok_with_findings_and_no_errors(tmp_path, monkeypatch):
     def fake_run_module_a(config, ntuser=None, system=None, amcache=None):
         return ModuleAResult(findings=[artifact], summary="Tor Browser executed 3 times.", errors=[])
 
-    monkeypatch.setattr(module_a_registry, "run_module_a", fake_run_module_a)
+    monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)
     result = module_a_registry.run(make_config(tmp_path), ntuser=tmp_path / "NTUSER.DAT")
 
     assert result.status == "ok"
@@ -47,7 +48,7 @@ def test_run_error_status_when_pipeline_reports_extraction_errors(tmp_path, monk
             errors=["ShimCache (SYSTEM): not recognized as a SYSTEM hive."],
         )
 
-    monkeypatch.setattr(module_a_registry, "run_module_a", fake_run_module_a)
+    monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)
     result = module_a_registry.run(make_config(tmp_path), system=tmp_path / "SYSTEM")
 
     assert result.status == "error"
@@ -59,7 +60,7 @@ def test_run_error_status_on_integrity_mismatch(tmp_path, monkeypatch):
     def fake_run_module_a(config, ntuser=None, system=None, amcache=None):
         raise IntegrityError("Hash mismatch for NTUSER.DAT")
 
-    monkeypatch.setattr(module_a_registry, "run_module_a", fake_run_module_a)
+    monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)
     result = module_a_registry.run(make_config(tmp_path), ntuser=tmp_path / "NTUSER.DAT")
 
     assert result.status == "error"
