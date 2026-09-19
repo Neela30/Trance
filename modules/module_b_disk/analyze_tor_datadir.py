@@ -97,13 +97,15 @@ def parse_state(path: Path) -> dict:
             }
         )
 
-    # The build-time histogram should sum to TotalBuildTimes; a mismatch means
-    # the file was truncated or tampered with.
+    # TotalBuildTimes counts binned builds plus abandoned (timed-out) ones, which
+    # tor records only as CircuitBuildAbandonedCount; a mismatch after adding
+    # those back means the file was truncated or tampered with.
     bins = [
         (int(a), int(b))
         for a, b in re.findall(r"^CircuitBuildTimeBin (\d+) (\d+)$", text, re.MULTILINE)
     ]
     hist_total = sum(n for _, n in bins)
+    abandoned = int(_kv(text, "CircuitBuildAbandonedCount") or 0)
     total_builds = _kv(text, "TotalBuildTimes")
 
     last_written = _kv(text, "LastWritten")
@@ -130,7 +132,10 @@ def parse_state(path: Path) -> dict:
         "minutes_since_user_activity": mins_idle,
         "total_circuits_built": total_builds,
         "build_time_histogram_total": hist_total,
-        "histogram_consistent": (str(hist_total) == total_builds if total_builds else None),
+        "circuits_abandoned": abandoned,
+        "histogram_consistent": (
+            str(hist_total + abandoned) == total_builds if total_builds else None
+        ),
         "build_time_ms_range": [bins[0][0], bins[-1][0]] if bins else None,
         "guards_sampled": len(guards),
         "guards_used": [g for g in guards if g["actually_used"]],
