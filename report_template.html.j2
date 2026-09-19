@@ -91,8 +91,8 @@
   .appendix-row .val { font-family: ui-monospace, monospace; color: var(--ink-muted); overflow-wrap: anywhere; }
   .appendix-row .why { color: var(--ink-muted); text-align: right; flex-shrink: 0; max-width: 40%; }
   .reco-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
-  .reco-list li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; font-size: 13.5px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
-  .reco-list li::before { content: "→"; color: var(--accent); font-weight: 600; }
+  .reco-list li { position: relative; font-size: 13.5px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px 12px 44px; }
+  .reco-list li::before { content: "→"; position: absolute; left: 14px; top: 12px; color: var(--accent); font-weight: 600; }
   footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
@@ -231,6 +231,255 @@
     <p class="note">No Tor-related registry artifacts found in the provided hives.</p>
     {% endif %}
   </section>
+  {% endif %}
+
+  {% if disk %}
+  <div class="band">
+    <div class="eyebrow">Module B</div>
+    <h2>Disk — Tor Browser profile, Tor daemon &amp; downloaded files</h2>
+    <dl class="meta-grid" style="margin-bottom:32px;">
+      <dt>Sources analyzed</dt><dd>{{ disk.supplied|join(", ") }}</dd>
+      {% if disk.profile %}
+      <dt>Profile integrity</dt>
+      <dd>{% if disk.profile.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.profile.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest — {{ disk.profile.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.profile.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
+      {% endif %}
+      {% if disk.daemon %}
+      <dt>Daemon dir integrity</dt>
+      <dd>{% if disk.daemon.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.daemon.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest — {{ disk.daemon.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.daemon.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
+      {% endif %}
+      {% if disk.downloads %}
+      <dt>Volume scanned</dt><dd>{{ disk.downloads.volume_root }} — {{ "{:,}".format(disk.downloads.files_walked) }} files walked in {{ disk.downloads.scan_seconds }}s</dd>
+      {% endif %}
+    </dl>
+  </div>
+
+  {% if disk.errors %}
+  <section>
+    <div class="callout">
+      <strong>Sections that failed:</strong> everything below comes from the sources that parsed cleanly.
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        {% for name, err in disk.errors.items() %}
+        <li class="mono" style="font-size:12px;">{{ name }}: {{ err }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </section>
+  {% endif %}
+
+  <section>
+    <div class="section-head"><h2>Summary</h2></div>
+    <div class="tiles">
+      {% if disk.daemon %}
+      <div class="tile{{ '' if disk.daemon.daemon_start else ' gap' }}">
+        <h3>Tor daemon session</h3>
+        {% if disk.daemon.daemon_start %}
+        <p>Daemon running from <span class="mono">{{ disk.daemon.daemon_start }}</span> to at least <span class="mono">{{ disk.daemon.state_written or disk.daemon.daemon_start }}</span>. {{ disk.daemon.guards_used|length }} guard{{ "s" if disk.daemon.guards_used|length != 1 }} actually routed traffic; {{ disk.daemon.circuits_built or "?" }} circuits built over the daemon's life.</p>
+        {% else %}
+        <p>No <span class="mono">lock</span> file — daemon start time unknown.</p>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if disk.downloads %}
+      <div class="tile{{ '' if disk.downloads.inside else ' gap' }}">
+        <h3>Internet-origin files</h3>
+        <p>{{ disk.downloads.hits|length }} file{{ "s" if disk.downloads.hits|length != 1 }} on the whole volume carr{{ "ies" if disk.downloads.hits|length == 1 else "y" }} a <span class="mono">Zone.Identifier</span> stream{% if disk.downloads.window %}; {{ disk.downloads.inside }} created while the Tor daemon was running, {{ disk.downloads.outside }} outside that window{% else %}; no daemon window to correlate against{% endif %}.</p>
+      </div>
+      {% endif %}
+      {% if disk.profile %}
+      <div class="tile{{ ' gap' if disk.profile.inert }}">
+        <h3>Browser profile</h3>
+        {% if disk.profile.inert %}
+        <p>No history, cookies or bookmarks beyond Tor Browser's {{ disk.profile.default_entries }} shipped defaults. Expected: permanent private browsing never writes them. This is not evidence of no activity.</p>
+        {% else %}
+        <p>{{ disk.profile.history|length }} visited page{{ "s" if disk.profile.history|length != 1 }}, {{ disk.profile.cookies|length }} cookie{{ "s" if disk.profile.cookies|length != 1 }}, {{ disk.profile.bookmarks|length }} user bookmark{{ "s" if disk.profile.bookmarks|length != 1 }} — unusual for Tor Browser; check whether private browsing was disabled.</p>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if disk.daemon and disk.daemon.credentials %}
+      <div class="tile">
+        <h3>Configured hidden services</h3>
+        <p>{{ disk.daemon.credentials|length }} client-auth credential{{ "s" if disk.daemon.credentials|length != 1 }} name{{ "s" if disk.daemon.credentials|length == 1 }} a specific onion service in plaintext.</p>
+        {% for c in disk.daemon.credentials %}<span class="tile-value">{{ c.onion_address }}</span>{% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if disk.daemon %}
+  <section>
+    <div class="section-head"><h2>Tor daemon activity</h2><span class="count">from <span class="mono">Data/Tor</span> — persisted across restarts, outside private-browsing scope</span></div>
+    <dl class="meta-grid" style="margin-bottom:18px;">
+      <dt>Tor version</dt><dd>{{ disk.daemon.tor_version or "—" }}</dd>
+      <dt>Daemon started</dt><dd>{{ disk.daemon.daemon_start or "— (no lock file)" }}</dd>
+      <dt>State last written</dt><dd>{{ disk.daemon.state_written or "—" }}{% if disk.daemon.guest_local_written %} <span style="color:var(--ink-muted)">(guest clock: {{ disk.daemon.guest_local_written }}{% if disk.daemon.guest_utc_offset_hours is not none %}, UTC{{ "%+g"|format(disk.daemon.guest_utc_offset_hours) }}h{% endif %})</span>{% endif %}</dd>
+      {% if disk.daemon.minutes_since_user_activity is not none %}
+      <dt>Idle at last write</dt><dd>{{ disk.daemon.minutes_since_user_activity }} min since user activity{% if disk.daemon.dormant %} · dormant={{ disk.daemon.dormant }}{% endif %}</dd>
+      {% endif %}
+      <dt>Circuits built</dt><dd>{{ disk.daemon.circuits_built or "—" }}{% if disk.daemon.histogram_consistent is false %} <span class="flag-warn">⚠ build-time histogram does not sum to this — state file truncated or edited</span>{% endif %}</dd>
+      {% if disk.daemon.consensus %}
+      <dt>Consensus</dt><dd>valid {{ disk.daemon.consensus.valid_after }} → {{ disk.daemon.consensus.valid_until }} <span style="color:var(--ink-muted)">(authority-signed; independent of the guest clock)</span></dd>
+      {% endif %}
+    </dl>
+    <div class="section-head"><h3 style="font-size:15px; font-weight:600;">Entry guards that carried traffic</h3><span class="count">{{ disk.daemon.guards_used|length }} of {{ disk.daemon.guards_sampled }} sampled</span></div>
+    {% if disk.daemon.guards_used %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Nickname</th><th>RSA id</th><th>Confirmed</th><th>Uses ok/tried</th><th>Circuits ok/tried</th></tr></thead>
+        <tbody>
+          {% for g in disk.daemon.guards_used %}
+          <tr><td class="val">{{ g.nickname }}</td><td class="off">{{ g.rsa_id }}</td><td class="off">{{ g.confirmed_on or "—" }}</td><td class="mono">{{ g.use }}</td><td class="mono">{{ g.circuits }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="note">No guard has a recorded use — the daemon may never have built a working circuit.</p>
+    {% endif %}
+    {% if disk.daemon.credentials %}
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Client-auth credentials</h3><span class="count">configuration, not proof of a visit</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Onion address</th><th>File</th><th>Modified</th><th>SHA-256</th></tr></thead>
+        <tbody>
+          {% for c in disk.daemon.credentials %}
+          <tr><td class="val">{{ c.onion_address }}</td><td class="val">{{ c.filename }}</td><td class="off">{{ c.modified or "—" }}</td><td class="off">{{ c.sha256[:12] ~ "…" if c.sha256 else "—" }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if disk.daemon.ignored_auth_files %}
+    <p class="note" style="margin-top:8px;">Ignored by tor (wrong extension): <span class="mono">{{ disk.daemon.ignored_auth_files|join(", ") }}</span></p>
+    {% endif %}
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if disk.downloads %}
+  <section>
+    <div class="section-head"><h2>Internet-origin files</h2><span class="count">{{ disk.downloads.hits|length }} on the whole volume, no folder assumed</span></div>
+    <div class="ribbon">
+      <strong>Network origin and timing, not the source site.</strong> Windows tags every file a browser saves from the network with a <span class="mono">Zone.Identifier</span> stream; locally created or USB/ISO-copied files never carry one. Tor Browser deliberately omits the <span class="mono">HostUrl</span>/<span class="mono">ReferrerUrl</span> fields other browsers write there, so the originating address is not recoverable from the file. Only the last Tor session's window is reconstructable from daemon artifacts.
+    </div>
+    {% if disk.downloads.window %}
+    <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>.</p>
+    {% elif 'tor_daemon' in disk.supplied %}
+    <p class="note" style="margin-bottom:12px;">No daemon window could be derived (missing <span class="mono">lock</span> or <span class="mono">state</span>) — files are listed without correlation.</p>
+    {% else %}
+    <p class="note" style="margin-bottom:12px;">Supply <span class="mono">--tor-dir</span> alongside <span class="mono">--disk-root</span> to correlate these against the Tor daemon's session window.</p>
+    {% endif %}
+    {% if disk.downloads.hits %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Path on volume</th><th>Created (NTFS)</th><th>Tor running?</th><th>Zone</th><th>Size</th><th>SHA-256</th></tr></thead>
+        <tbody>
+          {% for h in disk.downloads.hits %}
+          <tr>
+            <td class="val">{{ h.path }}{% if h.host_url or h.referrer_url %}<br><span class="off">host={{ h.host_url or "—" }} referrer={{ h.referrer_url or "—" }}</span>{% endif %}</td>
+            <td class="off">{{ h.created or h.modified or "—" }}{% if h.timestamp_source != 'ntfs' %}<br>(mtime; no NTFS times){% endif %}</td>
+            <td>{% if h.within_window is true %}<span class="chip high">yes</span>{% elif h.within_window is false %}<span class="chip low">no</span>{% else %}<span class="chip">unknown</span>{% endif %}</td>
+            <td class="mono">{{ h.zone_id if h.zone_id is not none else "—" }}</td>
+            <td class="off">{{ "{:,}".format(h.size) }}</td>
+            <td class="off">{{ h.sha256[:12] }}…</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if disk.downloads.xattr_support is false %}
+    <p class="note" style="margin-top:8px;"><span class="flag-warn">⚠</span> Volume not mounted through ntfs-3g — NTFS creation times unavailable, modification times shown instead.</p>
+    {% endif %}
+    {% else %}
+    <p class="note">No file on the volume carries a <span class="mono">Zone.Identifier</span> stream.{% if disk.downloads.xattr_support is none %} If the volume was not mounted through ntfs-3g the stream is invisible to this scan, so this is not proof that nothing was downloaded.{% endif %}</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if disk.profile %}
+  <section>
+    <div class="section-head"><h2>Browser profile</h2><span class="count">{{ disk.profile.places_rows }} places rows, {{ disk.profile.default_entries }} shipped defaults, {{ disk.profile.history_visits }} recorded visits</span></div>
+    {% if disk.profile.errors %}
+    <div class="callout"><strong>Unreadable:</strong> {% for name, err in disk.profile.errors.items() %}<span class="mono">{{ name }}</span> — {{ err }}{{ "; " if not loop.last }}{% endfor %}. Absence below is not established for these files.</div>
+    {% endif %}
+    {% if disk.profile.inert %}
+    <div class="callout"><strong>Expected inert profile.</strong> Tor Browser runs in permanent private browsing: <span class="mono">places.sqlite</span> keeps only the shipped Tor Project bookmarks and never records visits, downloads or cookies. An empty table here is the normal state after real use — the daemon and volume sections above carry the activity evidence.</div>
+    {% endif %}
+    {% if disk.profile.history %}
+    <div class="section-head"><h3 style="font-size:15px; font-weight:600;">Visited pages</h3><span class="count">excluding shipped defaults</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>URL</th><th>Title</th><th>Visits</th><th>Typed</th><th>Last visit</th></tr></thead>
+        <tbody>
+          {% for h in disk.profile.history %}
+          <tr><td class="val">{{ h.url }}</td><td class="val">{{ h.title or "—" }}</td><td class="mono">{{ h.visit_count }}</td><td class="mono">{{ "yes" if h.typed else "—" }}</td><td class="off">{{ h.last_visit or "—" }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if disk.profile.download_records %}
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Download records</h3><span class="count">from places.sqlite annotations</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Source URL</th><th>Saved to</th><th>Added</th></tr></thead>
+        <tbody>
+          {% for d in disk.profile.download_records %}
+          <tr><td class="val">{{ d.source_url }}</td><td class="val">{{ d.destination }}</td><td class="off">{{ d.added or "—" }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if disk.profile.cookies %}
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Cookies</h3><span class="count">{{ disk.profile.cookies|length }}</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Host</th><th>Name</th><th>Created</th><th>Last accessed</th><th>Expires</th></tr></thead>
+        <tbody>
+          {% for c in disk.profile.cookies %}
+          <tr><td class="val">{{ c.host }}</td><td class="val">{{ c.name }}</td><td class="off">{{ c.created or "—" }}</td><td class="off">{{ c.last_accessed or "—" }}</td><td class="off">{{ c.expires or "—" }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if disk.profile.bookmarks %}
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">User bookmarks</h3><span class="count">from bookmark backups, excluding shipped defaults</span></div>
+    <div class="path-list">
+      {% for b in disk.profile.bookmarks %}<span class="path-pill">{{ b.uri }}{% if b.title %} <span style="color:var(--ink-muted)">— {{ b.title }}</span>{% endif %}</span>{% endfor %}
+    </div>
+    {% endif %}
+    {% if disk.profile.favicon_pages %}
+    <p class="note" style="margin-top:14px;">Favicon cache also references: <span class="mono">{{ disk.profile.favicon_pages|join(", ") }}</span></p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if disk.carve %}
+  <section>
+    <div class="section-head"><h2>Raw image carve</h2><span class="count">byte-level scan incl. unallocated space</span></div>
+    <dl class="meta-grid" style="margin-bottom:14px;">
+      <dt>Image</dt><dd>{{ disk.carve.image }}</dd>
+      <dt>SHA-256</dt><dd>{{ disk.carve.image_sha256 }}</dd>
+    </dl>
+    {% if disk.carve.addresses %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Onion address</th><th>Occurrences</th><th>First offsets</th></tr></thead>
+        <tbody>
+          {% for a in disk.carve.addresses %}
+          <tr><td class="val">{{ a.address }}</td><td class="mono">{{ a.occurrences }}</td><td class="off">{{ a.first_offsets|join(", ") }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="note">No onion addresses carved from the image.</p>
+    {% endif %}
+    {% if disk.carve.credentials %}
+    <p class="note" style="margin-top:8px;">Client-auth credential bytes found for: <span class="mono">{{ disk.carve.credentials|join(", ") }}</span> — presence alone does not prove a visit.</p>
+    {% endif %}
+  </section>
+  {% endif %}
   {% endif %}
 
   {% if memory %}
@@ -569,6 +818,20 @@
       {% endif %}
       <li>If the source machine is still available, pull real filesystem MACB timestamps on the confirmed downloads — actual time data this memory-only view can't provide.</li>
       <li>Treat every ‡/† flag in the activity sequence as an investigative lead worth checking against another source, not as settled fact.</li>
+      {% endif %}
+      {% if disk %}
+      {% if disk.downloads and disk.downloads.hits and not disk.downloads.window %}
+      <li>Re-run with <span class="mono">--tor-dir</span> so the {{ disk.downloads.hits|length }} internet-origin file{{ "s" if disk.downloads.hits|length != 1 }} can be placed inside or outside the Tor daemon's session window.</li>
+      {% endif %}
+      {% if disk.downloads and disk.downloads.inside %}
+      <li>{{ disk.downloads.inside }} internet-origin file{{ "s were" if disk.downloads.inside != 1 else " was" }} created while Tor was running. The file itself cannot name its source; confirm the originating site from memory (Module C download/site-map correlation) or server-side logs.</li>
+      {% endif %}
+      {% if disk.profile and disk.profile.inert and not disk.downloads %}
+      <li>The profile is inert by design. Run with <span class="mono">--disk-root</span> on the mounted volume to find downloaded files anywhere on disk, and rely on the daemon section for session timing.</li>
+      {% endif %}
+      {% if not disk.daemon %}
+      <li>Supply <span class="mono">--tor-dir</span> (<span class="mono">TorBrowser/Data/Tor</span>): the daemon directory is the one disk source that persists guard usage and session timing outside private-browsing scope.</li>
+      {% endif %}
       {% endif %}
       {% for g in generic_modules if g.status != 'ok' %}
       <li><span class="mono">{{ g.name }}</span> did not contribute ({{ g.status.replace('_', ' ') }}){% if g.message %}: {{ g.message }}{% endif %}. Cross-layer correlation is incomplete until it does.</li>
