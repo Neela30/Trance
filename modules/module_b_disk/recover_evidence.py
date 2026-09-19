@@ -99,6 +99,24 @@ def analyze_places(db_path: Path) -> dict:
         cur.execute("SELECT COUNT(*) FROM moz_inputhistory")
         inputhistory_count = cur.fetchone()[0]
 
+        cur.execute(
+            "SELECT a.place_id, p.url, attr.name, a.content, a.dateAdded, a.lastModified "
+            "FROM moz_annos a "
+            "JOIN moz_anno_attributes attr ON attr.id = a.anno_attribute_id "
+            "JOIN moz_places p ON p.id = a.place_id"
+        )
+        downloads = []
+        for place_id, url, attr_name, content, date_added, last_modified in cur.fetchall():
+            if attr_name == "downloads/destinationFileURI":
+                downloads.append(
+                    {
+                        "place_id": place_id,
+                        "source_url": url,
+                        "destination_file_uri": content,
+                        "date_added": date_added,
+                        "last_modified": last_modified,
+                    }
+                )
         cur.execute("SELECT COUNT(*) FROM moz_annos")
         annos_count = cur.fetchone()[0]
 
@@ -112,6 +130,7 @@ def analyze_places(db_path: Path) -> dict:
         "moz_historyvisits_rows": historyvisits_count,
         "moz_inputhistory_rows": inputhistory_count,
         "moz_annos_rows": annos_count,
+        "downloads": downloads,
         "moz_keywords_rows": keywords_count,
     }
 
