@@ -312,11 +312,6 @@ def test_onion_checksum_rejects_lookalike_filenames(tmp_path):
     report = analyze_ntfs_journal.analyze_mft_records(records)
     assert report["onion_filenames"] == []
     assert report["resident_onion_strings"] == []
-    residue = (
-        analyze_memory_residue.carve_residue.__wrapped__
-        if hasattr(analyze_memory_residue.carve_residue, "__wrapped__")
-        else None
-    )
     (tmp_path / "pagefile.sys").write_bytes(b"a" * 56 + b".onion " + ONION.encode() + b".onion")
     result = analyze_memory_residue.carve_residue(tmp_path)
     assert list(result["onion_addresses"]) == [ONION + ".onion"]

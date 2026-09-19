@@ -1,8 +1,8 @@
 import json
 
-from findings import build_findings
 from core.config import TranceConfig
 from core.schema import ModuleResult
+from findings import build_findings
 from modules.module_b_disk.analyze_tor_datadir import parse_state
 from modules.module_b_disk.report import build_context
 from report import render_report
