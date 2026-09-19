@@ -251,3 +251,130 @@ def test_findings_json_round_trip_preserves_presenter_input(tmp_path):
     result = ModuleResult(module="module_b_disk", status="ok", artifacts=[], details=_details())
     findings = json.loads(json.dumps(build_findings(config, [result])))
     assert "Users/u/Downloads/a.txt" in render_report(findings)
+
+
+def _residue_and_ntfs_details():
+    details = _details()
+    details["memory_residue"] = {
+        "volume_root": "/mnt/vol",
+        "hibernation_present": True,
+        "onion_addresses": {"b" * 56 + ".onion": {"occurrences": 4, "files": ["hiberfil.sys"]}},
+        "files": [
+            {
+                "kind": "pagefile",
+                "path": "pagefile.sys",
+                "size": 10,
+                "modified_utc": "2026-09-02T02:30:00+00:00",
+                "compressed": False,
+                "onion_addresses": {},
+                "client_auth_credentials": [],
+                "tor_markers": {},
+            },
+            {
+                "kind": "hibernation",
+                "path": "hiberfil.sys",
+                "size": 20,
+                "modified_utc": "2026-09-19T08:40:00+00:00",
+                "compressed": True,
+                "onion_addresses": {"b" * 56 + ".onion": {"occurrences": 4}},
+                "client_auth_credentials": [{"onion_address": "c" * 56 + ".onion"}],
+                "tor_markers": {"tor_state": {"occurrences": 2}},
+            },
+        ],
+    }
+    details["ntfs"] = {
+        "sources": {"mft": "/mnt/vol/$MFT", "usnjrnl": "/mnt/vol/$Extend/$UsnJrnl:$J"},
+        "mft": {
+            "records": 1000,
+            "in_use": 900,
+            "onion_filenames": [],
+            "zone_identifier_streams": [
+                {
+                    "path": "Users\\u\\Downloads\\gone.txt",
+                    "record": 81,
+                    "deleted": True,
+                    "created_utc": "2026-09-19T08:12:00+00:00",
+                    "zone_identifier": {"zone_id": 3},
+                },
+                {
+                    "path": "Users\\u\\Downloads\\live.txt",
+                    "record": 82,
+                    "deleted": False,
+                    "created_utc": "2026-09-19T08:13:00+00:00",
+                    "zone_identifier": {"zone_id": 3},
+                },
+            ],
+            "resident_onion_strings": [
+                {"path": "ONION_IN.TXT", "deleted": False, "onion_addresses": ["d" * 56 + ".onion"]}
+            ],
+            "deleted_tor_files": [{"path": "Tor Browser\\state", "modified_utc": None}],
+        },
+        "usnjrnl": {
+            "records": 5000,
+            "journal_first_utc": "2026-09-01T00:00:00+00:00",
+            "journal_last_utc": "2026-09-19T09:00:00+00:00",
+            "tor_activity_window": {
+                "first_utc": "2026-09-19T07:44:00+00:00",
+                "last_utc": "2026-09-19T08:31:00+00:00",
+                "events": 2,
+            },
+            "tor_events": [
+                {
+                    "time_utc": "2026-09-19T07:44:00+00:00",
+                    "path": "Tor Browser\\state",
+                    "reasons": ["DATA_EXTEND", "CLOSE"],
+                }
+            ],
+            "downloads": [],
+        },
+        "onion_addresses": {"a" * 56 + ".onion": {"sources": ["mft", "usnjrnl"], "deleted": True}},
+    }
+    return details
+
+
+def test_residue_and_ntfs_context():
+    ctx = build_context(_residue_and_ntfs_details())
+    assert ctx["supplied"] == ["profile", "tor_daemon", "downloads", "memory_residue", "ntfs"]
+    residue = ctx["residue"]
+    assert residue["any_hits"] is True and residue["hibernation_present"] is True
+    assert residue["files"][1]["compressed"] is True
+    assert residue["files"][1]["markers"] == ["tor_state"]
+    assert residue["addresses"][0]["files"] == ["hiberfil.sys"]
+    ntfs = ctx["ntfs"]
+    assert ntfs["mft_records"] == 1000 and ntfs["usn_records"] == 5000
+    assert [d["path"] for d in ntfs["deleted_downloads"]] == ["Users\\u\\Downloads\\gone.txt"]
+    assert ntfs["addresses"][0]["deleted"] is True
+    assert ntfs["window"]["events"] == 2
+    assert ntfs["events"][0]["reasons"] == "data extend, close"
+
+
+def test_ntfs_unavailable_is_a_note_not_an_error():
+    details = _details()
+    details["ntfs"] = {"error": "no $MFT or $UsnJrnl:$J found; mount with show_sys_files"}
+    ctx = build_context(details)
+    assert ctx["errors"] == {}
+    assert "show_sys_files" in ctx["notes"]["ntfs"]
+    assert ctx["ntfs"] is None
+
+
+def test_report_renders_residue_and_ntfs_sections(tmp_path):
+    config = TranceConfig("case", tmp_path)
+    result = ModuleResult(
+        module="module_b_disk", status="ok", artifacts=[], details=_residue_and_ntfs_details()
+    )
+    html = render_report(build_findings(config, [result]))
+    assert "Memory residue on disk" in html
+    assert "hiberfil.sys" in html and "compressed — lower bound" in html
+    assert "NTFS metadata" in html
+    assert "Deleted internet-origin files" in html
+    assert "gone.txt" in html and "live.txt" not in html
+    assert "examiner's own transfer files" in html
+    details = _details()
+    details["ntfs"] = {"error": "no $MFT or $UsnJrnl:$J found; mount with show_sys_files"}
+    html = render_report(
+        build_findings(
+            config,
+            [ModuleResult(module="module_b_disk", status="ok", artifacts=[], details=details)],
+        )
+    )
+    assert "Not analyzed" in html and "Remount the volume" in html

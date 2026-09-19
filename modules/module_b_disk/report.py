@@ -237,30 +237,138 @@ def _carve_context(carve: dict) -> dict:
     }
 
 
+def _residue_context(residue: dict) -> dict:
+    files = [
+        {
+            "kind": f["kind"],
+            "path": f["path"],
+            "size": f["size"],
+            "modified": _iso(f.get("modified_utc")),
+            "compressed": f.get("compressed", False),
+            "error": f.get("error"),
+            "onion_count": len(f.get("onion_addresses", {})),
+            "credential_count": len(f.get("client_auth_credentials", [])),
+            "markers": sorted(f.get("tor_markers", {})),
+        }
+        for f in residue.get("files", [])
+    ]
+    return {
+        "files": files,
+        "addresses": [
+            {"address": a, "occurrences": h["occurrences"], "files": h["files"]}
+            for a, h in residue.get("onion_addresses", {}).items()
+        ],
+        "hibernation_present": residue.get("hibernation_present", False),
+        "any_hits": any(f["onion_count"] or f["credential_count"] for f in files),
+    }
+
+
+def _ntfs_context(ntfs: dict) -> dict:
+    mft = ntfs.get("mft") or {}
+    usn = ntfs.get("usnjrnl") or {}
+    window = usn.get("tor_activity_window")
+    return {
+        "mft_available": "mft" in ntfs,
+        "usn_available": "usnjrnl" in ntfs,
+        "mft_records": mft.get("records", 0),
+        "usn_records": usn.get("records", 0),
+        "journal_first": _iso(usn.get("journal_first_utc")),
+        "journal_last": _iso(usn.get("journal_last_utc")),
+        "addresses": [
+            {
+                "address": a,
+                "sources": v["sources"],
+                "deleted": v["deleted"],
+                "paths": v.get("paths", []),
+                "filename_evidence": bool(set(v["sources"]) & {"mft", "usnjrnl"}),
+            }
+            for a, v in ntfs.get("onion_addresses", {}).items()
+        ],
+        "deleted_downloads": [
+            {
+                "path": s["path"],
+                "created": _iso(s.get("created_utc")),
+                "zone_id": s["zone_identifier"].get("zone_id"),
+                "record": s["record"],
+            }
+            for s in mft.get("zone_identifier_streams", [])
+            if s["deleted"]
+        ],
+        "resident_onion_files": [
+            {"path": r["path"], "deleted": r["deleted"], "addresses": r["onion_addresses"]}
+            for r in mft.get("resident_onion_strings", [])
+        ],
+        "deleted_tor_files": [
+            {"path": d["path"], "modified": _iso(d.get("modified_utc"))}
+            for d in mft.get("deleted_tor_files", [])
+        ],
+        "window": (
+            {
+                "first": _iso(window["first_utc"]),
+                "last": _iso(window["last_utc"]),
+                "events": window["events"],
+            }
+            if window
+            else None
+        ),
+        "events": [
+            {
+                "time": _iso(e.get("time_utc")),
+                "path": e["path"],
+                "reasons": ", ".join(e["reasons"]).replace("_", " ").lower(),
+            }
+            for e in usn.get("tor_events", [])
+        ],
+        "downloads": [
+            {
+                "path": d["path"],
+                "started": _iso(d.get("started_utc")),
+                "completed": _iso(d.get("completed_utc")),
+                "browser_family": d["browser_family"],
+                "temp_name": d["temp_name"],
+                "zone_stamped": bool(d.get("zone_identifier_written_utc")),
+                "deleted": _iso(d.get("deleted_utc")),
+                "within_window": d.get("within_tor_daemon_window"),
+            }
+            for d in usn.get("downloads", [])
+        ],
+    }
+
+
+SECTIONS = (
+    ("profile", _profile_context),
+    ("tor_daemon", _daemon_context),
+    ("downloads", _downloads_context),
+    ("raw_carve", _carve_context),
+    ("memory_residue", _residue_context),
+    ("ntfs", _ntfs_context),
+)
+
+
 def build_context(details: dict) -> dict:
     sections = {}
     errors = {}
-    for name, builder in (
-        ("profile", _profile_context),
-        ("tor_daemon", _daemon_context),
-        ("downloads", _downloads_context),
-        ("raw_carve", _carve_context),
-    ):
+    notes = {}
+    for name, builder in SECTIONS:
         section = details.get(name)
         if section is None:
             continue
         if section.get("error"):
-            errors[name] = section["error"]
+            # NTFS metafiles being invisible is a mount option, not a failure.
+            if name == "ntfs" and "show_sys_files" in section["error"]:
+                notes[name] = section["error"]
+            else:
+                errors[name] = section["error"]
             continue
         sections[name] = builder(section)
-    supplied = [
-        name for name in ("profile", "tor_daemon", "downloads", "raw_carve") if name in details
-    ]
     return {
-        "supplied": supplied,
+        "supplied": [name for name, _ in SECTIONS if name in details],
         "errors": errors,
+        "notes": notes,
         "profile": sections.get("profile"),
         "daemon": sections.get("tor_daemon"),
         "downloads": sections.get("downloads"),
         "carve": sections.get("raw_carve"),
+        "residue": sections.get("memory_residue"),
+        "ntfs": sections.get("ntfs"),
     }

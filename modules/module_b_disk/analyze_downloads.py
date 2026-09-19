@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.hashing import hash_file
 
-ZONE_STREAM_XATTR = "user.Zone.Identifier"
+ZONE_STREAM = "Zone.Identifier"
 NTFS_TIMES_XATTR = "system.ntfs_times"
 _FILETIME_EPOCH = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc)
 
@@ -44,6 +44,23 @@ _FILETIME_EPOCH = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc)
 def _read_xattr(path: str, name: str) -> bytes | None:
     try:
         return os.getxattr(path, name, follow_symlinks=False)
+    except OSError:
+        return None
+
+
+def _read_stream(path: str, stream: str) -> bytes | None:
+    """Read a named NTFS stream under either ntfs-3g interface.
+
+    streams_interface=xattr (the default) maps streams to `user.<name>` xattrs;
+    streams_interface=windows exposes them as `<file>:<name>` paths instead and
+    drops the xattr view, so both are tried.
+    """
+    value = _read_xattr(path, f"user.{stream}")
+    if value is not None:
+        return value
+    try:
+        with open(f"{path}:{stream}", "rb") as fh:
+            return fh.read(65536)
     except OSError:
         return None
 
@@ -108,7 +125,7 @@ def scan_volume(root: Path) -> dict:
             if os.path.islink(path):
                 continue
             files_walked += 1
-            stream = _read_xattr(path, ZONE_STREAM_XATTR)
+            stream = _read_stream(path, ZONE_STREAM)
             if stream is None:
                 continue
             try:

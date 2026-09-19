@@ -183,6 +183,107 @@ def _download_artifacts(scan: dict) -> list[Artifact]:
     return artifacts
 
 
+def _residue_artifacts(residue: dict) -> list[Artifact]:
+    source = residue["volume_root"]
+    artifacts = []
+    for address, hit in residue["onion_addresses"].items():
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "memory_residue_onion",
+                source,
+                f"{address}; {hit['occurrences']} occurrence(s) in {', '.join(hit['files'])}; "
+                "was in RAM at some point, process and time unknown",
+            )
+        )
+    for record in residue["files"]:
+        for credential in record.get("client_auth_credentials", []):
+            artifacts.append(
+                Artifact(
+                    MODULE_NAME,
+                    "memory_residue_client_auth",
+                    source,
+                    f"Credential bytes for {credential['onion_address']} in {record['path']}; "
+                    "presence alone does not prove a visit",
+                    sha256=record.get("sha256"),
+                )
+            )
+    return artifacts
+
+
+def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
+    source = ntfs["sources"].get("mft") or ntfs["sources"].get("usnjrnl")
+    artifacts = []
+    for address, info in ntfs.get("onion_addresses", {}).items():
+        sources = set(info["sources"])
+        if sources & {"mft", "usnjrnl"}:
+            deleted = "; file since deleted" if info["deleted"] else ""
+            description = (
+                f"{address}; client-auth credential filename recorded by NTFS via "
+                f"{', '.join(sorted(sources & {'mft', 'usnjrnl'}))}{deleted}; "
+                "configuration, not proof of a visit"
+            )
+        else:
+            description = (
+                f"{address}; inside MFT-resident content of {', '.join(info['paths'])}; "
+                "verify this is not an examiner transfer file before treating it as evidence"
+            )
+        artifacts.append(Artifact(MODULE_NAME, "ntfs_onion_address", source, description))
+    for stream in ntfs.get("mft", {}).get("zone_identifier_streams", []):
+        if not stream["deleted"]:
+            continue
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "ntfs_deleted_download",
+                source,
+                f"{stream['path']}; deleted file whose Zone.Identifier "
+                f"(ZoneId={stream['zone_identifier']['zone_id']}) survives in $MFT record "
+                f"{stream['record']}",
+                timestamp=stream.get("created_utc"),
+            )
+        )
+    start = _parse_utc(window["start_utc"]) if window else None
+    end = _parse_utc(window["end_utc"]) if window else None
+    for download in ntfs.get("usnjrnl", {}).get("downloads", []):
+        completed = _parse_utc(download["completed_utc"])
+        within = start <= completed <= end if (start and end and completed) else None
+        download["within_tor_daemon_window"] = within
+        timing = (
+            "while the Tor daemon was running"
+            if within
+            else (
+                "outside the last Tor daemon window" if within is False else "daemon window unknown"
+            )
+        )
+        deleted = f"; deleted {download['deleted_utc']}" if download.get("deleted_utc") else ""
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "ntfs_download_event",
+                source,
+                f"{download['path']}; saved by a {download['browser_family']}-family browser "
+                f"(temp file {download['temp_name']}) {timing}"
+                f"{'; Zone.Identifier stamped' if download.get('zone_identifier_written_utc') else ''}"
+                f"{deleted}",
+                timestamp=download["completed_utc"],
+            )
+        )
+    tor_window = ntfs.get("usnjrnl", {}).get("tor_activity_window")
+    if tor_window:
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "ntfs_tor_activity_window",
+                source,
+                f"{tor_window['events']} journal event(s) on Tor Browser/daemon files from "
+                f"{tor_window['first_utc']} to {tor_window['last_utc']}",
+                timestamp=tor_window["first_utc"],
+            )
+        )
+    return artifacts
+
+
 def run(
     config: TranceConfig,
     profile_dir: Path | None = None,
@@ -244,6 +345,25 @@ def run(
         except Exception as exc:
             details["downloads"] = {"error": f"{type(exc).__name__}: {exc}"}
             errors.append("volume download scan failed")
+        try:
+            from modules.module_b_disk.analyze_memory_residue import carve_residue
+
+            details["memory_residue"] = carve_residue(Path(disk_root))
+            artifacts.extend(_residue_artifacts(details["memory_residue"]))
+        except Exception as exc:
+            details["memory_residue"] = {"error": f"{type(exc).__name__}: {exc}"}
+            errors.append("memory residue carve failed")
+        try:
+            from modules.module_b_disk.analyze_ntfs_journal import analyze_ntfs
+
+            details["ntfs"] = analyze_ntfs(Path(disk_root))
+            if not details["ntfs"].get("error"):
+                daemon = details.get("tor_daemon", {})
+                window = daemon_window(daemon) if not daemon.get("error") else None
+                artifacts.extend(_ntfs_artifacts(details["ntfs"], window))
+        except Exception as exc:
+            details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
+            errors.append("NTFS metadata analysis failed")
     return ModuleResult(
         module=MODULE_NAME,
         status="error" if errors else "ok",
