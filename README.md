@@ -79,6 +79,26 @@ python main.py --case disk-run-1 --output-dir output \
 
 # Add this only when a full raw-byte scan is intended:
 #   --disk-image /path/to/disk.vdi
+
+# Add this to analyze the whole mounted volume. Mount it read-only through
+# ntfs-3g with the metafiles and named streams exposed:
+#   sudo mount -t ntfs-3g -o ro,show_sys_files,streams_interface=windows /dev/nbd0p2 /mnt/evidence-volume
+#   --disk-root /mnt/evidence-volume
+# It then runs three passes:
+#   1. Internet-origin files: every file carrying a Zone.Identifier stream,
+#      anywhere on the volume, with its NTFS creation time, flagged inside/
+#      outside the Tor daemon's last active window when --tor-dir is given.
+#      Tor Browser strips the source URL from that stream by design.
+#   2. Memory residue: pagefile.sys, swapfile.sys, hiberfil.sys and crash dumps
+#      carved for onion addresses -- the only disk route to a visited public
+#      onion service, and only if Windows paged or hibernated during the session.
+#   3. NTFS metadata: $MFT (deleted files' names, resident content and
+#      Zone.Identifier streams) and the $UsnJrnl change journal (client-auth
+#      credential filenames, a Tor file-activity timeline, and downloads
+#      reconstructed from the browser's temp-file rename -- Firefox/Tor Browser's
+#      "<8 chars>.<ext>.part" naming attributes the download to that browser
+#      family even after the file is deleted). Without show_sys_files this pass
+#      reports itself unavailable instead of failing the module.
 ```
 
 All supplied Module B results are stored under

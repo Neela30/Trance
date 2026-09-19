@@ -1,13 +1,16 @@
+import datetime as dt
 import hashlib
 import json
+import os
 import sqlite3
+import struct
 
 import pytest
 
 from core.config import TranceConfig
 from core.exceptions import IntegrityError
 from main import main as pipeline_main
-from modules.module_b_disk import carve_onion_strings
+from modules.module_b_disk import analyze_downloads, carve_onion_strings, daemon_window
 from modules.module_b_disk import run as run_disk_module
 from modules.module_b_disk.evidence import external_output, inventory, verify_hashes, working_copy
 from modules.module_b_disk.recover_evidence import _open_ro, analyze_profile, main
@@ -132,10 +135,18 @@ def _create_profile(profile):
         );
         CREATE TABLE moz_historyvisits(id INTEGER);
         CREATE TABLE moz_inputhistory(id INTEGER);
-        CREATE TABLE moz_annos(id INTEGER);
+        CREATE TABLE moz_anno_attributes(id INTEGER, name TEXT);
+        CREATE TABLE moz_annos(
+            id INTEGER, place_id INTEGER, anno_attribute_id INTEGER,
+            content TEXT, dateAdded INTEGER, lastModified INTEGER
+        );
         CREATE TABLE moz_keywords(id INTEGER);
         INSERT INTO moz_places VALUES (
             1, 'http://exampleexample.onion/page', 'Test', 1, 0, 1, 123456
+        );
+        INSERT INTO moz_anno_attributes VALUES (1, 'downloads/destinationFileURI');
+        INSERT INTO moz_annos VALUES (
+            1, 1, 1, 'file:///C:/Users/Anonymous/Downloads/secret.txt', 123456, 123456
         );
     """)
     db.close()
@@ -226,6 +237,7 @@ def test_module_b_orchestrates_profile_and_daemon(tmp_path):
     types = {artifact.artifact_type for artifact in result.artifacts}
     assert types == {
         "browser_history",
+        "browser_download",
         "browser_cookie",
         "favicon_page",
         "tor_guard_usage",
@@ -237,6 +249,19 @@ def test_module_b_orchestrates_profile_and_daemon(tmp_path):
     )
     assert "does not prove a visit" in auth_artifact.description
     assert "B" * 52 not in auth_artifact.description
+    download_artifact = next(a for a in result.artifacts if a.artifact_type == "browser_download")
+    assert "exampleexample.onion/page" in download_artifact.description
+    assert "Downloads/secret.txt" in download_artifact.description
+    downloads = result.details["profile"]["places"]["downloads"]
+    assert downloads == [
+        {
+            "place_id": 1,
+            "source_url": "http://exampleexample.onion/page",
+            "destination_file_uri": "file:///C:/Users/Anonymous/Downloads/secret.txt",
+            "date_added": 123456,
+            "last_modified": 123456,
+        }
+    ]
 
 
 def test_module_b_skips_without_input(tmp_path):
@@ -263,7 +288,7 @@ def test_main_runs_module_b_and_refuses_case_overwrite(tmp_path):
     assert pipeline_main(arguments) == 0
     findings = json.loads((output / "disk-case" / "findings.json").read_text())
     assert findings["modules"]["module_b_disk"]["status"] == "ok"
-    assert findings["modules"]["module_b_disk"]["artifact_count"] == 6
+    assert findings["modules"]["module_b_disk"]["artifact_count"] == 7
     assert (output / "disk-case" / "report.html").is_file()
     with pytest.raises(SystemExit) as error:
         pipeline_main(arguments)
@@ -305,3 +330,175 @@ def test_raw_carve_hashes_image_and_deduplicates_overlap(tmp_path, monkeypatch):
     assert finding["occurrences"] == 2
     assert finding["first_offsets"] == [10, 100]
     assert report["image_sha256"] == hashlib.sha256(image.read_bytes()).hexdigest()
+
+
+def _filetime(moment: dt.datetime) -> int:
+    epoch = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc)
+    return int((moment - epoch).total_seconds() * 10_000_000)
+
+
+def _ntfs_times(created: dt.datetime) -> bytes:
+    later = created + dt.timedelta(seconds=1)
+    return struct.pack("<4Q", _filetime(created), _filetime(later), _filetime(later), 0)
+
+
+def _fake_xattrs(monkeypatch, streams: dict):
+    def read(path, name):
+        return streams.get((os.path.realpath(path), name))
+
+    monkeypatch.setattr(analyze_downloads, "_read_xattr", read)
+
+
+def test_zone_identifier_parsing():
+    tor_style = analyze_downloads.parse_zone_identifier(b"[ZoneTransfer]\r\nZoneId=3\r\n")
+    assert tor_style["zone_id"] == 3
+    assert tor_style["host_url"] is None and tor_style["referrer_url"] is None
+    other = analyze_downloads.parse_zone_identifier(
+        b"[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=http://x.onion/\r\nHostUrl=http://x.onion/f\r\n"
+    )
+    assert other["host_url"] == "http://x.onion/f"
+    assert other["referrer_url"] == "http://x.onion/"
+    assert analyze_downloads.parse_zone_identifier(b"garbage")["zone_id"] is None
+
+
+def test_scan_volume_keeps_only_marked_files(tmp_path, monkeypatch):
+    volume = tmp_path / "volume"
+    (volume / "Users" / "x" / "Desktop").mkdir(parents=True)
+    (volume / "Windows").mkdir()
+    marked = volume / "Users" / "x" / "Desktop" / "loot.txt"
+    marked.write_bytes(b"downloaded")
+    (volume / "Windows" / "system.dll").write_bytes(b"local")
+    (volume / "link").symlink_to(marked)
+    created = dt.datetime(2026, 9, 19, 8, 14, 44, tzinfo=dt.timezone.utc)
+    _fake_xattrs(
+        monkeypatch,
+        {
+            (str(marked), "user.Zone.Identifier"): b"[ZoneTransfer]\r\nZoneId=3\r\n",
+            (str(marked), "system.ntfs_times"): _ntfs_times(created),
+        },
+    )
+    report = analyze_downloads.scan_volume(volume)
+    assert report["files_walked"] == 2
+    assert report["xattr_support"] is True
+    [hit] = report["internet_origin_files"]
+    assert hit["path"] == os.path.join("Users", "x", "Desktop", "loot.txt")
+    assert hit["sha256"] == hashlib.sha256(b"downloaded").hexdigest()
+    assert hit["zone_identifier"]["zone_id"] == 3
+    assert hit["timestamps"]["source"] == "ntfs"
+    assert hit["timestamps"]["created_utc"] == "2026-09-19T08:14:44+00:00"
+    assert hit["timestamps"]["modified_utc"] == "2026-09-19T08:14:45+00:00"
+    assert hit["timestamps"]["accessed_utc"] is None
+
+
+def test_scan_volume_falls_back_to_stat_without_ntfs_times(tmp_path, monkeypatch):
+    marked = tmp_path / "f.bin"
+    marked.write_bytes(b"x")
+    _fake_xattrs(
+        monkeypatch, {(str(marked), "user.Zone.Identifier"): b"[ZoneTransfer]\r\nZoneId=3"}
+    )
+    [hit] = analyze_downloads.scan_volume(tmp_path)["internet_origin_files"]
+    assert hit["timestamps"]["source"] == "stat"
+    assert hit["timestamps"]["created_utc"] is None
+    assert hit["timestamps"]["modified_utc"]
+
+
+def test_daemon_window_uses_lock_and_newest_write():
+    assert daemon_window({"daemon_start_utc": None, "file_mtimes_utc": {}, "state": {}}) is None
+    window = daemon_window(
+        {
+            "daemon_start_utc": "2026-09-02T19:00:00+00:00",
+            "file_mtimes_utc": {
+                "lock": "2026-09-02T19:00:00+00:00",
+                "state": "2026-09-02T20:30:00+00:00",
+            },
+            "state": {"last_written_utc": "2026-09-02 20:00:00"},
+        }
+    )
+    assert window == {
+        "start_utc": "2026-09-02T19:00:00+00:00",
+        "end_utc": "2026-09-02T20:30:00+00:00",
+    }
+
+
+def test_module_b_correlates_downloads_with_daemon_window(tmp_path, monkeypatch):
+    tor_dir = tmp_path / "tor"
+    _create_tor_dir(tor_dir)
+    start = dt.datetime(2026, 9, 2, 19, 0, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2026, 9, 2, 20, 30, tzinfo=dt.timezone.utc)
+    for path in tor_dir.rglob("*"):
+        os.utime(path, (start.timestamp(), start.timestamp()))
+    os.utime(tor_dir / "state", (end.timestamp(), end.timestamp()))
+
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    inside, outside, local = volume / "a.txt", volume / "b.txt", volume / "c.txt"
+    for path in (inside, outside, local):
+        path.write_bytes(path.name.encode())
+    zone = b"[ZoneTransfer]\r\nZoneId=3\r\n"
+    _fake_xattrs(
+        monkeypatch,
+        {
+            (str(inside), "user.Zone.Identifier"): zone,
+            (str(inside), "system.ntfs_times"): _ntfs_times(start + dt.timedelta(minutes=45)),
+            (str(outside), "user.Zone.Identifier"): zone,
+            (str(outside), "system.ntfs_times"): _ntfs_times(end + dt.timedelta(days=1)),
+        },
+    )
+    result = run_disk_module(
+        TranceConfig("test", tmp_path / "out"), tor_dir=tor_dir, disk_root=volume
+    )
+    assert result.status == "ok"
+    downloads = result.details["downloads"]
+    assert downloads["tor_daemon_window"] == {
+        "start_utc": start.isoformat(),
+        "end_utc": end.isoformat(),
+    }
+    flags = {h["path"]: h["within_tor_daemon_window"] for h in downloads["internet_origin_files"]}
+    assert flags == {"a.txt": True, "b.txt": False}
+    files = {
+        a.description.split(";")[0]: a
+        for a in result.artifacts
+        if a.artifact_type == "internet_origin_file"
+    }
+    assert "while the Tor daemon was running" in files["a.txt"].description
+    assert "source URL not recoverable" in files["a.txt"].description
+    assert "outside the last recorded Tor daemon window" in files["b.txt"].description
+    assert files["a.txt"].sha256 == hashlib.sha256(b"a.txt").hexdigest()
+
+
+def test_module_b_download_scan_without_daemon(tmp_path, monkeypatch):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    marked = volume / "f.txt"
+    marked.write_bytes(b"f")
+    _fake_xattrs(
+        monkeypatch, {(str(marked), "user.Zone.Identifier"): b"[ZoneTransfer]\r\nZoneId=3"}
+    )
+    result = run_disk_module(TranceConfig("test", tmp_path / "out"), disk_root=volume)
+    assert result.status == "ok"
+    [hit] = result.details["downloads"]["internet_origin_files"]
+    assert hit["within_tor_daemon_window"] is None
+    assert "no Tor daemon window available" in result.artifacts[0].description
+
+
+def test_main_runs_download_scan_and_records_custody(tmp_path, monkeypatch):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    marked = volume / "f.txt"
+    marked.write_bytes(b"f")
+    _fake_xattrs(
+        monkeypatch, {(str(marked), "user.Zone.Identifier"): b"[ZoneTransfer]\r\nZoneId=3"}
+    )
+    output = tmp_path / "output"
+    assert (
+        pipeline_main(["--case", "dl", "--output-dir", str(output), "--disk-root", str(volume)])
+        == 0
+    )
+    findings = json.loads((output / "dl" / "findings.json").read_text())
+    assert findings["modules"]["module_b_disk"]["artifact_count"] == 1
+    custody = json.loads((output / "dl" / "custody.json").read_text())
+    entry = next(e for e in custody if e["action"] == "hashed_in_place")
+    assert entry["artifact_path"] == str(marked.resolve())
+    assert entry["sha256"] == hashlib.sha256(b"f").hexdigest()
+    with pytest.raises(SystemExit):
+        pipeline_main(["--case", "x", "--output-dir", str(volume), "--disk-root", str(volume)])
