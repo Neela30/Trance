@@ -79,6 +79,14 @@ python main.py --case disk-run-1 --output-dir output \
 
 # Add this only when a full raw-byte scan is intended:
 #   --disk-image /path/to/disk.vdi
+
+# Add this to find downloaded files anywhere on the volume (mounted read-only
+# via ntfs-3g, e.g. qemu-nbd + mount -o ro). Every file carrying a
+# Zone.Identifier stream is reported with its NTFS creation time and flagged
+# as inside/outside the Tor daemon's last active window when --tor-dir is
+# also given. Tor Browser strips the source URL from that stream by design,
+# so this establishes network origin and timing, never the originating site:
+#   --disk-root /mnt/evidence-volume
 ```
 
 All supplied Module B results are stored under
