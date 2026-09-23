@@ -178,6 +178,65 @@ target machine. Note: `--onefile` binaries are commonly flagged by AV as
 suspicious (self-extracting, unsigned) — expect to allowlist it or sign it
 for use in a live environment.
 
+## Packaging for deployment: one acquire exe, one analyze exe
+
+`dumper.py`/`winpmem_acquire.py`/`module_a_registry/acquire.py` above can
+each be packaged standalone, but for a full case `acquire_all.py` and
+`analyze_evidence.py` wrap all three modules' acquisition steps into a
+single exe per side, sharing one evidence folder:
+
+```
+evidence/
+  registry/   SYSTEM_*, NTUSER_*.DAT, Amcache_*.hve
+  memory/     firefox_<pid>_*.bin and/or fullmem_*.raw
+  disk/
+    profile/  places.sqlite, cookies.sqlite, favicons.sqlite, bookmarkbackups/
+    tor_dir/  state, cached-microdesc-consensus, ...
+  acquire_manifest.json
+```
+
+**On the target (Windows, as Administrator):**
+
+```
+pyinstaller --onefile --name trance-acquire acquire_all.py
+trance-acquire.exe --output-dir evidence --tor-browser-dir "C:\path\to\Tor Browser"
+```
+
+Close Tor Browser first if possible — the disk copy is a plain file copy,
+not a Volume Shadow Copy like Amcache.hve, so a still-running browser can
+leave a sqlite db mid-write. Registry and memory acquisition need
+elevation; each of the three categories (registry/memory/disk) is
+independent, so one failing doesn't block the others or the manifest.
+
+Copy the whole `evidence/` folder to the examiner's machine.
+
+**On the examiner's machine:**
+
+```
+pyinstaller --onefile --name trance-analyze analyze_evidence.py \
+    --hidden-import modules.module_a_registry \
+    --hidden-import modules.module_b_disk \
+    --hidden-import modules.module_c_memory \
+    --add-data "report_template.html.j2:." \
+    --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
+
+trance-analyze.exe --case demo --evidence-dir evidence \
+    --onion <address>.onion --host 127.0.0.1:5000 --username alice
+```
+
+`trance-analyze` reads `acquire_manifest.json` to resolve each artifact's
+path automatically; any explicit flag (`--ntuser`, `--dump`, ...) always
+overrides auto-discovery. `--disk-image`/`--disk-root` are never
+auto-discovered (a raw image or a mounted volume isn't something
+`acquire_all.py` produces) — pass them explicitly, same as with `main.py`.
+It's a thin wrapper around `main.py` — same
+`findings.json`/`report.html`/`custody.json` output, same targeting/
+`--vol3-*` flags. `--vol3-path` still needs Volatility3 installed
+separately on the examiner's `PATH` (it's shelled out to, never bundled —
+avoids Volatility3's dynamic plugin-loading being a PyInstaller risk).
+Neither exe needs a Python install on its machine; both are still
+`--onefile` binaries and may need AV allowlisting as noted above.
+
 ### Limitation: process memory dies with the process
 
 Live acquisition must happen while `firefox.exe` is still running —

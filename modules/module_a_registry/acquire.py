@@ -51,21 +51,7 @@ from pathlib import Path
 from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import AcquisitionError
 from core.hashing import hash_file
-
-if sys.platform == "win32":
-    import ctypes
-
-    def _is_admin() -> bool:
-        try:
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())
-        except Exception:
-            return False
-
-else:
-
-    def _is_admin() -> bool:
-        return False
-
+from core.winadmin import is_admin as _is_admin
 
 ACQUIRE_TIMEOUT_SECONDS = 300
 _SHADOW_ID_LINE_RE = re.compile(r"^ShadowID=(\S+)", re.MULTILINE)
