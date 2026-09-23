@@ -80,6 +80,12 @@ def main(argv: list[str] | None = None) -> int:
     disk.add_argument(
         "--disk-image", type=Path, help="Raw image to carve (optional and potentially slow)"
     )
+    disk.add_argument(
+        "--disk-root",
+        type=Path,
+        help="Root of the read-only mounted Windows volume (ntfs-3g); walked in full for "
+        "files carrying a Zone.Identifier stream and correlated against the Tor daemon window",
+    )
 
     memory = parser.add_argument_group("module_c_memory")
     memory.add_argument(
@@ -138,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     output_dir = args.output_dir / args.case
-    for evidence_root in (args.disk_profile, args.tor_dir):
+    for evidence_root in (args.disk_profile, args.tor_dir, args.disk_root):
         if evidence_root and output_dir.resolve().is_relative_to(evidence_root.resolve()):
             parser.error(f"case output directory must be outside disk evidence: {evidence_root}")
     existing_outputs = [
@@ -164,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
             "profile_dir": args.disk_profile,
             "tor_dir": args.tor_dir,
             "disk_image": args.disk_image,
+            "disk_root": args.disk_root,
         },
         "module_c_memory": {
             "dump": args.dump,
@@ -205,6 +212,16 @@ def main(argv: list[str] | None = None) -> int:
                         notes=f"module_b_disk {section}; disposable-copy analysis",
                     )
                 )
+        downloads = disk_result.details.get("downloads", {})
+        for hit in downloads.get("internet_origin_files", []):
+            custody.record(
+                CustodyEntry(
+                    artifact_path=str(Path(downloads["volume_root"]) / hit["path"]),
+                    sha256=hit["sha256"],
+                    action="hashed_in_place",
+                    notes="module_b_disk downloads; Zone.Identifier stream present on read-only mount",
+                )
+            )
         raw_carve = disk_result.details.get("raw_carve", {})
         if raw_carve.get("image_sha256"):
             custody.record(
