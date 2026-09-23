@@ -24,21 +24,7 @@ from pathlib import Path
 from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import AcquisitionError
 from core.hashing import hash_file
-
-if sys.platform == "win32":
-    import ctypes
-
-    def _is_admin() -> bool:
-        try:
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())
-        except Exception:
-            return False
-
-else:
-
-    def _is_admin() -> bool:
-        return False
-
+from core.winadmin import is_admin as _is_admin
 
 # A full physical-RAM image can legitimately take a long time on a large-memory
 # machine; bounded rather than unbounded so a hung driver/process doesn't block forever.
