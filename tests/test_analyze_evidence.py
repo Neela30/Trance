@@ -15,6 +15,7 @@ def _base_args(**overrides):
         "disk_profile": None,
         "tor_dir": None,
         "disk_image": None,
+        "disk_root": None,
         "dump": None,
         "source_type": None,
         "onion": None,
@@ -111,6 +112,15 @@ def test_build_argv_uses_resolved_paths(tmp_path):
     assert "--source-type" in argv
     assert "--onion" in argv
     assert argv[argv.index("--onion") + 1] == "abc.onion"
+
+
+def test_build_argv_passes_through_disk_root(tmp_path):
+    args = _base_args(evidence_dir=tmp_path, disk_root=tmp_path / "mnt" / "evidence-volume")
+
+    argv = analyze_evidence.build_argv(args, {})
+
+    assert "--disk-root" in argv
+    assert argv[argv.index("--disk-root") + 1] == str(tmp_path / "mnt" / "evidence-volume")
 
 
 def test_build_argv_explicit_flag_overrides_resolved_path(tmp_path):

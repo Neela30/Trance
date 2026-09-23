@@ -226,7 +226,10 @@ trance-analyze.exe --case demo --evidence-dir evidence \
 
 `trance-analyze` reads `acquire_manifest.json` to resolve each artifact's
 path automatically; any explicit flag (`--ntuser`, `--dump`, ...) always
-overrides auto-discovery. It's a thin wrapper around `main.py` — same
+overrides auto-discovery. `--disk-image`/`--disk-root` are never
+auto-discovered (a raw image or a mounted volume isn't something
+`acquire_all.py` produces) — pass them explicitly, same as with `main.py`.
+It's a thin wrapper around `main.py` — same
 `findings.json`/`report.html`/`custody.json` output, same targeting/
 `--vol3-*` flags. `--vol3-path` still needs Volatility3 installed
 separately on the examiner's `PATH` (it's shelled out to, never bundled —

@@ -135,6 +135,8 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
 
     if args.disk_image:
         argv += ["--disk-image", str(args.disk_image)]
+    if args.disk_root:
+        argv += ["--disk-root", str(args.disk_root)]
     for flag, value in (
         ("--onion", args.onion),
         ("--host", args.host),
@@ -169,6 +171,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--disk-profile", type=Path, help="Override auto-discovery")
     parser.add_argument("--tor-dir", type=Path, help="Override auto-discovery")
     parser.add_argument("--disk-image", type=Path, help="Raw image to carve (not auto-discovered)")
+    parser.add_argument(
+        "--disk-root",
+        type=Path,
+        help="Root of a read-only mounted Windows volume for Zone.Identifier/NTFS-journal "
+        "carving (not auto-discovered)",
+    )
     parser.add_argument("--dump", type=Path, help="Override auto-discovery")
     parser.add_argument("--source-type", choices=("process", "full-memory"), default=None)
 
