@@ -10,15 +10,31 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
 
+from gui.theme import apply_eyebrow_style, apply_heading_style
+
 
 class ReportTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._view = QWebEngineView(self)
-        self._placeholder = QLabel(
-            "No report loaded yet. Run an analysis, or open one from History.", self
-        )
-        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        placeholder_eyebrow = QLabel("Trance · Case Report", self)
+        apply_eyebrow_style(placeholder_eyebrow)
+        placeholder_eyebrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder_heading = QLabel("No report loaded yet", self)
+        apply_heading_style(placeholder_heading)
+        placeholder_heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder_note = QLabel("Run an analysis, or open one from History.", self)
+        placeholder_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder_note.setStyleSheet("color: #8b969c;")
+
+        self._placeholder = QWidget(self)
+        placeholder_layout = QVBoxLayout(self._placeholder)
+        placeholder_layout.addStretch(1)
+        placeholder_layout.addWidget(placeholder_eyebrow)
+        placeholder_layout.addWidget(placeholder_heading)
+        placeholder_layout.addWidget(placeholder_note)
+        placeholder_layout.addStretch(1)
 
         self._stack = QStackedWidget(self)
         self._stack.addWidget(self._placeholder)

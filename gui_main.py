@@ -13,6 +13,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
+from gui.theme import load_stylesheet
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,6 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
+    app.setStyleSheet(load_stylesheet())
     window = MainWindow(output_dir=args.output_dir)
     window.show()
     return app.exec()

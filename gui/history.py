@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 FINDINGS_FILENAME = "findings.json"
@@ -74,3 +75,37 @@ def scan_history(output_dir: Path) -> list[CaseSummary]:
 
     summaries.sort(key=lambda s: s.generated_at or "", reverse=True)
     return summaries
+
+
+_RELATIVE_UNITS = (
+    ("year", 31536000),
+    ("month", 2592000),
+    ("week", 604800),
+    ("day", 86400),
+    ("hour", 3600),
+    ("minute", 60),
+)
+
+
+def format_relative_time(iso_timestamp: str | None, *, now: datetime | None = None) -> str:
+    """ "2 hours ago" style, for a compact History column -- the full ISO timestamp
+    stays available separately (as a tooltip) for anyone who wants the exact time."""
+    if not iso_timestamp:
+        return "—"
+    try:
+        then = datetime.fromisoformat(iso_timestamp)
+    except ValueError:
+        return iso_timestamp
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    seconds = (now - then).total_seconds()
+    if seconds < 0:
+        return "just now"
+    if seconds < 60:
+        return "just now"
+    for unit, unit_seconds in _RELATIVE_UNITS:
+        count = int(seconds // unit_seconds)
+        if count >= 1:
+            return f"{count} {unit}{'s' if count != 1 else ''} ago"
+    return "just now"
