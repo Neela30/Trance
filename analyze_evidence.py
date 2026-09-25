@@ -61,29 +61,35 @@ def _resolve_from_manifest(evidence_dir: Path, manifest: dict) -> dict:
 
 
 def _resolve_by_globbing(evidence_dir: Path) -> dict:
+    """acquire_all.py's registry/memory/disk subfolder layout is preferred; falls back
+    to evidence_dir itself for a flat folder (e.g. registry/memory acquire scripts run
+    directly and copied off a VM as-is, predating acquire_all.py, or hand-assembled) --
+    same filename patterns, just not sorted into subfolders."""
     resolved: dict[str, str] = {}
 
     registry_dir = evidence_dir / "registry"
-    if registry_dir.is_dir():
-        for pattern, flag in (
-            ("SYSTEM_*", "system"),
-            ("NTUSER_*.DAT", "ntuser"),
-            ("Amcache_*.hve", "amcache"),
-        ):
-            match = _latest(list(registry_dir.glob(pattern)))
-            if match:
-                resolved[flag] = str(match)
+    if not registry_dir.is_dir():
+        registry_dir = evidence_dir
+    for pattern, flag in (
+        ("SYSTEM_*", "system"),
+        ("NTUSER_*.DAT", "ntuser"),
+        ("Amcache_*.hve", "amcache"),
+    ):
+        match = _latest([p for p in registry_dir.glob(pattern) if p.suffix != ".sha256"])
+        if match:
+            resolved[flag] = str(match)
 
     memory_dir = evidence_dir / "memory"
-    if memory_dir.is_dir():
-        full_image = _latest(list(memory_dir.glob("fullmem_*.raw")))
-        live_dump = _latest(list(memory_dir.glob("firefox_*.bin")))
-        if full_image:
-            resolved["dump"] = str(full_image)
-            resolved["source_type"] = "full-memory"
-        elif live_dump:
-            resolved["dump"] = str(live_dump)
-            resolved["source_type"] = _DEFAULT_SOURCE_TYPE
+    if not memory_dir.is_dir():
+        memory_dir = evidence_dir
+    full_image = _latest(list(memory_dir.glob("fullmem_*.raw")))
+    live_dump = _latest(list(memory_dir.glob("firefox_*.bin")))
+    if full_image:
+        resolved["dump"] = str(full_image)
+        resolved["source_type"] = "full-memory"
+    elif live_dump:
+        resolved["dump"] = str(live_dump)
+        resolved["source_type"] = _DEFAULT_SOURCE_TYPE
 
     disk_profile = evidence_dir / "disk" / "profile"
     if disk_profile.is_dir():

@@ -28,5 +28,8 @@ class ReportTab(QWidget):
         layout.addWidget(self._stack)
 
     def load_report(self, report_path: Path) -> None:
-        self._view.load(QUrl.fromLocalFile(str(report_path)))
+        # QUrl.fromLocalFile needs an absolute path -- report_path can be relative when
+        # --output-dir was given as one (e.g. the "output" default), which otherwise
+        # produces a malformed file:// URL and ERR_FILE_NOT_FOUND.
+        self._view.load(QUrl.fromLocalFile(str(Path(report_path).resolve())))
         self._stack.setCurrentWidget(self._view)
