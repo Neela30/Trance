@@ -27,6 +27,7 @@ class MainWindow(QMainWindow):
 
         self._analyse_tab.analysis_finished.connect(self._on_analysis_finished)
         self._history_tab.report_requested.connect(self._on_report_requested)
+        self._history_tab.case_deleted.connect(self._on_case_deleted)
 
     def _on_analysis_finished(self, result) -> None:
         self._report_tab.load_report(result.report_path)
@@ -36,3 +37,7 @@ class MainWindow(QMainWindow):
     def _on_report_requested(self, report_path: Path) -> None:
         self._report_tab.load_report(report_path)
         self._tabs.setCurrentWidget(self._report_tab)
+
+    def _on_case_deleted(self, case_dir: Path) -> None:
+        self._report_tab.clear_if_showing(case_dir)
+        self._analyse_tab.refresh_recent_cases()

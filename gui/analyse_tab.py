@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -16,8 +16,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +35,8 @@ from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style,
 FORM_MAX_WIDTH = 720
 RUN_BUTTON_WIDTH = 240
 RECENT_CASES_SHOWN = 3
+PROGRESS_TICK_MS = 60
+PROGRESS_STARTUP_TARGET = 6  # nominal early crawl before the first real checkpoint
 
 
 class _EvidenceDropField(QLineEdit):
@@ -92,7 +96,13 @@ class AnalyseTab(QWidget):
         content_layout.addWidget(self._progress)
         content_layout.addWidget(self._status_label)
         content_layout.addSpacing(20)
-        content_layout.addWidget(self._build_recent_cases_box())
+
+        self._recent_cases_box = self._build_recent_cases_box()
+        self._log_box = self._build_log_box()
+        self._bottom_stack = QStackedWidget(self)
+        self._bottom_stack.addWidget(self._recent_cases_box)
+        self._bottom_stack.addWidget(self._log_box)
+        content_layout.addWidget(self._bottom_stack)
         content_layout.addStretch(1)
 
         outer = QHBoxLayout(self)
@@ -100,7 +110,7 @@ class AnalyseTab(QWidget):
         outer.addWidget(content)
         outer.addStretch(1)
 
-        self._refresh_recent_cases()
+        self.refresh_recent_cases()
 
     # -- construction -----------------------------------------------------------
 
@@ -197,8 +207,12 @@ class AnalyseTab(QWidget):
         self._run_button.clicked.connect(self._run)
 
         self._progress = QProgressBar(self)
-        self._progress.setRange(0, 4)
+        self._progress.setRange(0, 100)
         self._progress.setValue(0)
+        self._progress_target = 0
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(PROGRESS_TICK_MS)
+        self._progress_timer.timeout.connect(self._animate_progress)
         self._status_label = QLabel("", self)
         apply_eyebrow_style(self._status_label, "")
 
@@ -219,6 +233,26 @@ class AnalyseTab(QWidget):
 
         box = QGroupBox(self)
         box.setLayout(self._recent_cases_layout)
+        return box
+
+    def _build_log_box(self) -> QGroupBox:
+        eyebrow = QLabel("Live log", self)
+        apply_eyebrow_style(eyebrow)
+
+        self._log_view = QPlainTextEdit(self)
+        self._log_view.setReadOnly(True)
+        self._log_view.setMaximumBlockCount(500)
+        self._log_view.setStyleSheet(
+            "QPlainTextEdit { font-family: 'Cascadia Code', Consolas, monospace; "
+            "font-size: 11.5px; background: #14181b; border: none; color: #8b969c; }"
+        )
+
+        layout = QVBoxLayout()
+        layout.addWidget(eyebrow)
+        layout.addWidget(self._log_view)
+
+        box = QGroupBox(self)
+        box.setLayout(layout)
         return box
 
     # -- behavior -----------------------------------------------------------
@@ -242,7 +276,7 @@ class AnalyseTab(QWidget):
         if folder:
             self._set_evidence_folder(folder)
 
-    def _refresh_recent_cases(self) -> None:
+    def refresh_recent_cases(self) -> None:
         while self._recent_cases_layout.count() > 1:
             item = self._recent_cases_layout.takeAt(1)
             if item.widget():
@@ -303,32 +337,55 @@ class AnalyseTab(QWidget):
 
         self._run_button.setEnabled(False)
         self._progress.setValue(0)
+        self._progress_target = PROGRESS_STARTUP_TARGET
+        self._progress_timer.start()
         self._stamp.set_status("skipped")
         self._stamp.set_text("Running")
         apply_eyebrow_style(self._status_label, "Starting…")
+        self._log_view.clear()
+        self._bottom_stack.setCurrentWidget(self._log_box)
 
         self._worker = PipelineWorker(config, module_kwargs)
         self._worker.progress.connect(self._on_progress)
+        self._worker.log.connect(self._on_log_line)
         self._worker.finished_ok.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
+    def _animate_progress(self) -> None:
+        """Eases the displayed value toward the last confirmed checkpoint instead of
+        snapping straight to it -- main.run_pipeline only reports 4 real checkpoints
+        (3 modules + finalize), so this is a visual smoothing of those, not finer-
+        grained data the pipeline doesn't actually have."""
+        current = self._progress.value()
+        if current >= self._progress_target:
+            return
+        step = max(1, int((self._progress_target - current) * 0.15))
+        self._progress.setValue(min(self._progress_target, current + step))
+
     def _on_progress(self, name: str, step: int, total: int) -> None:
-        self._progress.setMaximum(total)
-        self._progress.setValue(step)
+        self._progress_target = int(step / total * 100)
         apply_eyebrow_style(self._status_label, f"{name} ({step}/{total})")
 
+    def _on_log_line(self, line: str) -> None:
+        self._log_view.appendPlainText(line)
+
     def _on_finished(self, result: main.PipelineResult) -> None:
+        self._progress_timer.stop()
+        self._progress.setValue(100)
         self._run_button.setEnabled(True)
         self._stamp.set_status("error" if result.has_error else "ok")
         self._stamp.set_text("Errors" if result.has_error else "Done")
         apply_eyebrow_style(self._status_label, "Done.")
-        self._refresh_recent_cases()
+        self.refresh_recent_cases()
+        self._bottom_stack.setCurrentWidget(self._recent_cases_box)
         self.analysis_finished.emit(result)
 
     def _on_failed(self, message: str) -> None:
+        self._progress_timer.stop()
         self._run_button.setEnabled(True)
         self._stamp.set_status("error")
         self._stamp.set_text("Failed")
         apply_eyebrow_style(self._status_label, "Failed.")
+        self._bottom_stack.setCurrentWidget(self._recent_cases_box)
         QMessageBox.critical(self, "Analysis failed", message)
