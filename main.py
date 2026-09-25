@@ -16,6 +16,8 @@ from __future__ import annotations
 import argparse
 import importlib
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
 from core.config import TranceConfig
@@ -44,6 +46,112 @@ def run_module(name: str, config: TranceConfig, kwargs: dict) -> ModuleResult:
         return run(config, **kwargs)
     except Exception as exc:
         return ModuleResult(module=name, status="error", message=f"{type(exc).__name__}: {exc}")
+
+
+@dataclass
+class PipelineResult:
+    results: list[ModuleResult]
+    findings: dict
+    findings_path: Path
+    report_path: Path
+    custody_path: Path
+
+    @property
+    def has_error(self) -> bool:
+        return any(r.status == "error" for r in self.results)
+
+
+def run_pipeline(
+    config: TranceConfig,
+    module_kwargs: dict[str, dict],
+    progress_cb: Callable[[str, int, int], None] | None = None,
+) -> PipelineResult:
+    """Run every module, merge into findings.json, render report.html, write custody.json.
+
+    Shared by main()'s CLI and the GUI (modules/... callers already resolve their own
+    module_kwargs). progress_cb, if given, is called (step_name, step, total_steps) after
+    each module and once more after writing outputs -- total_steps is len(MODULES) + 1.
+    """
+    total_steps = len(MODULES) + 1
+    results: list[ModuleResult] = []
+    for step, name in enumerate(MODULES, start=1):
+        result = run_module(name, config, module_kwargs.get(name, {}))
+        results.append(result)
+        suffix = f" — {result.message}" if result.message else ""
+        print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
+        if progress_cb:
+            progress_cb(name, step, total_steps)
+
+    findings = build_findings(config, results)
+    findings_path = write_findings(findings, config.output_dir)
+    report_path = write_report(findings, config.output_dir)
+
+    custody = CustodyLog(config.output_dir / CUSTODY_FILENAME)
+    disk_result = next((r for r in results if r.module == "module_b_disk"), None)
+    if disk_result:
+        for section in ("profile", "tor_daemon"):
+            detail = disk_result.details.get(section, {})
+            source = detail.get("evidence_dir") or detail.get("tor_data_dir")
+            if not source:
+                continue
+            for relative, digest in detail.get("integrity", {}).get("source_sha256", {}).items():
+                custody.record(
+                    CustodyEntry(
+                        artifact_path=str(Path(source) / relative),
+                        sha256=digest,
+                        action="verified_and_analyzed",
+                        notes=f"module_b_disk {section}; disposable-copy analysis",
+                    )
+                )
+        downloads = disk_result.details.get("downloads", {})
+        for hit in downloads.get("internet_origin_files", []):
+            custody.record(
+                CustodyEntry(
+                    artifact_path=str(Path(downloads["volume_root"]) / hit["path"]),
+                    sha256=hit["sha256"],
+                    action="hashed_in_place",
+                    notes="module_b_disk downloads; Zone.Identifier stream present on read-only mount",
+                )
+            )
+        raw_carve = disk_result.details.get("raw_carve", {})
+        if raw_carve.get("image_sha256"):
+            custody.record(
+                CustodyEntry(
+                    artifact_path=raw_carve["image"],
+                    sha256=raw_carve["image_sha256"],
+                    action="hashed_and_carved",
+                    notes="SHA-256 calculated during the sequential raw-byte scan",
+                )
+            )
+    memory_result = next(
+        (r for r in results if r.module == "module_c_memory" and r.status == "ok"), None
+    )
+    if memory_result:
+        dump = memory_result.details["dump"]
+        custody.record(
+            CustodyEntry(
+                artifact_path=dump["path"],
+                sha256=dump["sha256"],
+                action="analyzed",
+                notes=f"integrity_verified={dump['integrity_verified']}",
+            )
+        )
+    for path in (findings_path, report_path):
+        custody.record(
+            CustodyEntry(artifact_path=str(path), sha256=hash_file(path), action="generated")
+        )
+    custody.save()
+
+    if progress_cb:
+        progress_cb("finalize", total_steps, total_steps)
+
+    return PipelineResult(
+        results=results,
+        findings=findings,
+        findings_path=findings_path,
+        report_path=report_path,
+        custody_path=custody.log_path,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -184,83 +292,21 @@ def main(argv: list[str] | None = None) -> int:
         },
     }
 
-    results: list[ModuleResult] = []
-    for name in MODULES:
-        result = run_module(name, config, module_kwargs.get(name, {}))
-        results.append(result)
-        suffix = f" — {result.message}" if result.message else ""
-        print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
+    pipeline = run_pipeline(config, module_kwargs)
 
-    findings = build_findings(config, results)
-    findings_path = write_findings(findings, output_dir)
-    report_path = write_report(findings, output_dir)
-
-    custody = CustodyLog(output_dir / CUSTODY_FILENAME)
-    disk_result = next((r for r in results if r.module == "module_b_disk"), None)
-    if disk_result:
-        for section in ("profile", "tor_daemon"):
-            detail = disk_result.details.get(section, {})
-            source = detail.get("evidence_dir") or detail.get("tor_data_dir")
-            if not source:
-                continue
-            for relative, digest in detail.get("integrity", {}).get("source_sha256", {}).items():
-                custody.record(
-                    CustodyEntry(
-                        artifact_path=str(Path(source) / relative),
-                        sha256=digest,
-                        action="verified_and_analyzed",
-                        notes=f"module_b_disk {section}; disposable-copy analysis",
-                    )
-                )
-        downloads = disk_result.details.get("downloads", {})
-        for hit in downloads.get("internet_origin_files", []):
-            custody.record(
-                CustodyEntry(
-                    artifact_path=str(Path(downloads["volume_root"]) / hit["path"]),
-                    sha256=hit["sha256"],
-                    action="hashed_in_place",
-                    notes="module_b_disk downloads; Zone.Identifier stream present on read-only mount",
-                )
-            )
-        raw_carve = disk_result.details.get("raw_carve", {})
-        if raw_carve.get("image_sha256"):
-            custody.record(
-                CustodyEntry(
-                    artifact_path=raw_carve["image"],
-                    sha256=raw_carve["image_sha256"],
-                    action="hashed_and_carved",
-                    notes="SHA-256 calculated during the sequential raw-byte scan",
-                )
-            )
     memory_result = next(
-        (r for r in results if r.module == "module_c_memory" and r.status == "ok"), None
+        (r for r in pipeline.results if r.module == "module_c_memory" and r.status == "ok"), None
     )
-    if memory_result:
-        dump = memory_result.details["dump"]
-        custody.record(
-            CustodyEntry(
-                artifact_path=dump["path"],
-                sha256=dump["sha256"],
-                action="analyzed",
-                notes=f"integrity_verified={dump['integrity_verified']}",
-            )
-        )
-    for path in (findings_path, report_path):
-        custody.record(
-            CustodyEntry(artifact_path=str(path), sha256=hash_file(path), action="generated")
-        )
-    custody.save()
-
     if args.verbose and memory_result:
         from modules.module_c_memory.analyzer import format_summary
 
         print()
         print(format_summary(memory_result.details))
 
-    print(f"\n[*] findings: {findings_path}")
-    print(f"[*] report:   {report_path}")
-    print(f"[*] custody:  {custody.log_path}")
-    return 2 if any(r.status == "error" for r in results) else 0
+    print(f"\n[*] findings: {pipeline.findings_path}")
+    print(f"[*] report:   {pipeline.report_path}")
+    print(f"[*] custody:  {pipeline.custody_path}")
+    return 2 if pipeline.has_error else 0
 
 
 if __name__ == "__main__":

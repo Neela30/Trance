@@ -237,6 +237,42 @@ avoids Volatility3's dynamic plugin-loading being a PyInstaller risk).
 Neither exe needs a Python install on its machine; both are still
 `--onefile` binaries and may need AV allowlisting as noted above.
 
+### Desktop GUI (`trance-gui`)
+
+`gui_main.py` is a PySide6 desktop app over the same backend — Analyse
+(pick an evidence folder, run, progress bar), Report (embeds the same
+`report.html` the CLI produces, in a `QWebEngineView` — no separate
+presentation logic to maintain), History (lists past cases by scanning
+`<output-dir>/*/findings.json`, same "filesystem is the source of
+truth" convention `analyze_evidence.py` already uses, not a second
+store to keep in sync). It's an additional way to drive `main.py`'s
+pipeline, not a replacement for `trance-analyze` — both stay available.
+
+Kept out of `requirements.txt` on purpose — `requirements-gui.txt`
+(`PySide6`) is separate so `trance-acquire`/`trance-analyze` builds stay
+exactly as lean as before:
+
+```
+pip install -r requirements-gui.txt pyinstaller
+pyinstaller --onefile --name trance-gui gui_main.py \
+    --hidden-import modules.module_a_registry \
+    --hidden-import modules.module_b_disk \
+    --hidden-import modules.module_c_memory \
+    --collect-all PySide6 \
+    --add-data "report_template.html.j2:." \
+    --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
+
+trance-gui.exe --output-dir output
+```
+
+(`;` instead of `:` for `--add-data` on Windows, same as `trance-analyze`.)
+`--collect-all PySide6` is needed for `QtWebEngine`'s own resources/
+plugins. Expect a noticeably larger binary than the other two exes —
+QtWebEngine bundles a Chromium build (built and smoke-tested in this
+repo at ~290MB `--onefile`, vs. ~15MB for `trance-analyze`); this is the
+tradeoff of embedding the report view instead of a lighter web
+framework. Same AV-allowlisting note as the other `--onefile` exes.
+
 ### Limitation: process memory dies with the process
 
 Live acquisition must happen while `firefox.exe` is still running —

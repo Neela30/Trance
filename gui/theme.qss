@@ -1,0 +1,268 @@
+/* TRANCE desktop UI theme -- mirrors report_template.html.j2's CSS custom properties
+   (dark theme) so the native app and the embedded report read as one system. See
+   gui/theme.py for the color tokens and for what Qt Style Sheets can't express
+   (letter-spacing, CSS transforms) -- those are applied there via QFont/QPainter. */
+
+QMainWindow, QWidget {
+    background: #14181b;
+    color: #dce2e6;
+    font-family: "Segoe UI", -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 13px;
+}
+
+QLabel {
+    background: transparent;
+}
+
+QLabel[class="eyebrow"] {
+    color: #8b969c;
+}
+
+QLabel[class="heading"] {
+    color: #dce2e6;
+}
+
+QLabel[class="status-ok"] { color: #4fae84; }
+QLabel[class="status-warn"] { color: #c9a552; }
+QLabel[class="status-error"] { color: #e2694f; }
+
+/* ---- Tab bar ---- */
+
+QTabWidget::pane {
+    border: 1px solid #313a40;
+    border-radius: 6px;
+    top: -1px;
+    background: #14181b;
+}
+
+QTabBar::tab {
+    background: transparent;
+    color: #8b969c;
+    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    font-size: 11px;
+    padding: 10px 20px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-right: 4px;
+}
+
+QTabBar::tab:selected {
+    color: #e2694f;
+    border-bottom: 2px solid #e2694f;
+}
+
+QTabBar::tab:hover:!selected {
+    color: #dce2e6;
+}
+
+/* ---- Cards (group boxes) ---- */
+
+QGroupBox {
+    background: #1b2126;
+    border: 1px solid #313a40;
+    border-radius: 6px;
+    margin-top: 14px;
+    padding: 18px 14px 14px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+    color: #8b969c;
+    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    font-size: 10.5px;
+    font-style: normal;
+    background: #14181b;
+}
+
+/* ---- Inputs ---- */
+
+QLineEdit {
+    background: #1b2126;
+    color: #dce2e6;
+    border: 1px solid #313a40;
+    border-radius: 6px;
+    padding: 7px 10px;
+    selection-background-color: #e2694f;
+    selection-color: #14181b;
+}
+
+QLineEdit:focus {
+    border: 1px solid #e2694f;
+}
+
+QLineEdit:disabled, QLineEdit:read-only {
+    color: #8b969c;
+    background: #232a2f;
+}
+
+/* Evidence-folder drop field, before anything is picked -- dashed like an upload
+   dropzone; solid again the moment it holds a real path or gets focus. */
+QLineEdit[empty="true"] {
+    border: 1px dashed #313a40;
+    background: #1b2126;
+}
+
+QLineEdit[empty="true"]:focus {
+    border: 1px solid #e2694f;
+}
+
+/* ---- Buttons ---- */
+
+QPushButton {
+    background: #1b2126;
+    color: #dce2e6;
+    border: 1px solid #313a40;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+}
+
+QPushButton:hover {
+    background: #232a2f;
+    border-color: #3d474e;
+}
+
+QPushButton:pressed {
+    background: #14181b;
+}
+
+QPushButton:disabled {
+    background: #232a2f;
+    color: #8b969c;
+    border-color: #232a2f;
+}
+
+QPushButton[class="primary"] {
+    background: #e2694f;
+    color: #14181b;
+    border: 1px solid #e2694f;
+    font-weight: 600;
+}
+
+QPushButton[class="primary"]:hover {
+    background: #ea7b63;
+    border-color: #ea7b63;
+}
+
+QPushButton[class="primary"]:pressed {
+    background: #c85639;
+    border-color: #c85639;
+}
+
+QPushButton[class="primary"]:disabled {
+    background: #232a2f;
+    color: #8b969c;
+    border-color: #232a2f;
+}
+
+/* Flat toggle, e.g. the Targeting section's expand/collapse control */
+QPushButton[class="link"] {
+    background: transparent;
+    color: #e2694f;
+    border: none;
+    padding: 4px 0;
+    text-align: left;
+    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    font-size: 11px;
+}
+
+QPushButton[class="link"]:hover {
+    color: #ea7b63;
+}
+
+QPushButton[class="link"]:pressed {
+    color: #c85639;
+}
+
+/* ---- Progress bar ---- */
+
+QProgressBar {
+    background: #232a2f;
+    border: 1px solid #313a40;
+    border-radius: 6px;
+    text-align: center;
+    color: #dce2e6;
+    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    font-size: 10.5px;
+    min-height: 20px;
+}
+
+QProgressBar::chunk {
+    background: #e2694f;
+    border-radius: 5px;
+}
+
+/* ---- Table (History tab) ---- */
+
+QTableWidget {
+    background: #1b2126;
+    alternate-background-color: #1b2126;
+    color: #dce2e6;
+    border: 1px solid #313a40;
+    border-radius: 6px;
+    gridline-color: #313a40;
+    selection-background-color: #33211c;
+    selection-color: #e2694f;
+    outline: none;
+}
+
+QHeaderView::section {
+    background: #232a2f;
+    color: #8b969c;
+    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    font-size: 10.5px;
+    padding: 8px 10px;
+    border: none;
+    border-bottom: 1px solid #313a40;
+}
+
+QTableWidget::item {
+    padding: 6px 10px 6px 13px;
+    border-bottom: 1px solid #232a2f;
+    border-left: 3px solid transparent;
+}
+
+/* Qt draws a per-cell "current item" focus box independent of selection -- without
+   this it shows as a stray highlight around whatever cell was last current, even with
+   nothing actually selected. */
+QTableWidget::item:focus {
+    outline: none;
+    border-left: 3px solid transparent;
+}
+
+QTableWidget::item:selected,
+QTableWidget::item:selected:!active {
+    background: #33211c;
+    border-left: 3px solid #e2694f;
+    color: #e2694f;
+}
+
+/* ---- Scrollbars ---- */
+
+QScrollBar:vertical {
+    background: #14181b;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #313a40;
+    border-radius: 5px;
+    min-height: 24px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #3d474e;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+/* ---- Message boxes ---- */
+
+QMessageBox {
+    background: #1b2126;
+}

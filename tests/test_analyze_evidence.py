@@ -90,6 +90,37 @@ def test_resolve_by_globbing_picks_latest_and_prefers_full_image(tmp_path):
     assert resolved["source_type"] == "full-memory"
 
 
+def test_resolve_by_globbing_falls_back_to_flat_layout(tmp_path):
+    # No registry/ or memory/ subfolders -- e.g. the individual acquire scripts run
+    # directly and their output copied off a VM as one flat folder, predating
+    # acquire_all.py's subfolder layout.
+    (tmp_path / "SYSTEM_20260918T170509Z").write_bytes(b"hive bytes")
+    (tmp_path / "NTUSER_20260918T170509Z.DAT").write_bytes(b"hive bytes")
+    (tmp_path / "Amcache_20260918T170509Z.hve").write_bytes(b"hive bytes")
+    (tmp_path / "firefox_5368_20260904T050334Z.bin").write_bytes(b"dump bytes")
+
+    resolved = analyze_evidence.resolve_evidence(tmp_path)
+
+    assert resolved["system"].endswith("SYSTEM_20260918T170509Z")
+    assert resolved["ntuser"].endswith("NTUSER_20260918T170509Z.DAT")
+    assert resolved["amcache"].endswith("Amcache_20260918T170509Z.hve")
+    assert resolved["dump"].endswith("firefox_5368_20260904T050334Z.bin")
+    assert resolved["source_type"] == "process"
+
+
+def test_resolve_by_globbing_does_not_mistake_sha256_sidecar_for_the_system_hive(tmp_path):
+    # "SYSTEM_*" (no extension on the hive itself) also matches its own "SYSTEM_x.sha256"
+    # sidecar, which is usually the more-recently-written file -- _latest() must not
+    # hand back the sidecar text file as if it were the hive.
+    hive = tmp_path / "SYSTEM_20260918T170509Z"
+    hive.write_bytes(b"hive bytes")
+    (tmp_path / "SYSTEM_20260918T170509Z.sha256").write_text("deadbeef  SYSTEM_x\n")
+
+    resolved = analyze_evidence.resolve_evidence(tmp_path)
+
+    assert resolved["system"] == str(hive)
+
+
 def test_resolve_by_globbing_finds_disk_dirs(tmp_path):
     (tmp_path / "disk" / "profile").mkdir(parents=True)
     (tmp_path / "disk" / "tor_dir").mkdir(parents=True)
