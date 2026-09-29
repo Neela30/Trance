@@ -1,8 +1,13 @@
 """TRANCE combined acquire entry point: run every acquisition step into one
 evidence folder on a live Windows target (elevated).
 
-    python acquire_all.py --output-dir evidence \\
-        --tor-browser-dir "C:\\Users\\investigator\\Desktop\\Tor Browser"
+    python acquire_all.py --output-dir evidence
+
+Disk evidence doesn't need --tor-browser-dir pointed at it -- omit it and
+this auto-discovers a Tor Browser install by scanning the filesystem (home
+directory/Desktop/Downloads/Documents, then every drive) for its install
+signature. Pass --tor-browser-dir explicitly to skip the scan when you
+already know where it is.
 
 Writes <output-dir>/{registry,memory,disk}/... and <output-dir>/
 acquire_manifest.json -- the contract analyze_evidence.py reads to resolve
@@ -66,11 +71,10 @@ def _acquire_disk(
     disk_profile_src: Path | None,
     tor_dir_src: Path | None,
 ) -> dict:
-    if tor_browser_dir is None and disk_profile_src is None and tor_dir_src is None:
-        return {
-            "profile": {"status": "skipped", "message": "no --tor-browser-dir/--disk-profile-src"},
-            "tor_dir": {"status": "skipped", "message": "no --tor-browser-dir/--tor-dir-src"},
-        }
+    """No path given at all isn't treated as "nothing to do" -- disk_acquire.acquire_all()
+    auto-discovers a Tor Browser install by scanning the filesystem in that case (see
+    modules/module_b_disk/acquire.py), so this always attempts the step and only reports
+    "error" if that scan genuinely finds nothing."""
     try:
         return disk_acquire.acquire_all(
             tor_browser_dir=tor_browser_dir,
@@ -80,6 +84,24 @@ def _acquire_disk(
         )
     except AcquisitionError as exc:
         return {"status": "error", "message": str(exc)}
+
+
+def _print_category(name: str, result: dict) -> None:
+    """registry_acquire.acquire_all() already prints its own per-hive lines as it goes
+    (see modules/module_a_registry/acquire.py); memory/disk's helpers here only return
+    a result dict, so without this the console shows registry's progress and nothing
+    else -- silent, but not actually skipped: a real failure (e.g. no firefox.exe
+    running, no --tor-browser-dir given) with zero console feedback looks identical to
+    the step never having been attempted at all."""
+    if result.get("status") == "error":
+        print(f"[!] {name}: {result.get('message')}", file=sys.stderr)
+        return
+    for key, entry in result.items():
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status", "?")
+        detail = entry.get("path") or entry.get("message") or ""
+        print(f"[*] {name}.{key}: {status}{' — ' + detail if detail else ''}")
 
 
 def acquire(
@@ -111,10 +133,21 @@ def acquire(
 
     if include_registry:
         manifest["registry"] = _acquire_registry(output_dir, ntuser_user)
+        # registry_acquire.acquire_all() already prints its own per-hive lines
+    else:
+        print("[*] registry: skipped (--skip-registry)")
+
     if include_memory:
         manifest["memory"] = _acquire_memory(output_dir, winpmem_path)
+        _print_category("memory", manifest["memory"])
+    else:
+        print("[*] memory: skipped (--skip-memory)")
+
     if include_disk:
         manifest["disk"] = _acquire_disk(output_dir, tor_browser_dir, disk_profile_src, tor_dir_src)
+        _print_category("disk", manifest["disk"])
+    else:
+        print("[*] disk: skipped (--skip-disk)")
 
     manifest_path = output_dir / "acquire_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -142,7 +175,11 @@ def main(argv: list[str] | None = None) -> int:
         "this examiner-supplied WinPMEM binary",
     )
     parser.add_argument(
-        "--tor-browser-dir", type=Path, help="Root of a portable Tor Browser install"
+        "--tor-browser-dir",
+        type=Path,
+        help="Root of a portable Tor Browser install. Omit to auto-discover instead: "
+        "scans the home directory/Desktop/Downloads/Documents, then every drive, for "
+        "one",
     )
     parser.add_argument("--disk-profile-src", type=Path, help="Explicit profile source dir")
     parser.add_argument("--tor-dir-src", type=Path, help="Explicit Tor daemon data dir source")

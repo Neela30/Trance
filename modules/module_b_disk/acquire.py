@@ -19,15 +19,20 @@ path>`) -- this is exactly what modules/module_b_disk/evidence.py's
 verify_hashes() already parses, so a folder this module produces is usable
 by main.py's --disk-profile/--tor-dir immediately, no separate manifest step.
 
-Tor Browser is portable (no fixed install path), so profile/data-dir
-discovery is a glob under an examiner-supplied --tor-browser-dir rather than
-a hardcoded path.
+Tor Browser is portable (no fixed install path). --tor-browser-dir still
+works if you already know where it is (faster, no scan); if none of
+--tor-browser-dir/--disk-profile-src/--tor-dir-src are given, acquire_all()
+instead walks the filesystem looking for Tor Browser's own install
+signature (Browser/TorBrowser/Data/Tor/torrc) -- see
+find_tor_browser_installations().
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import string
 import sys
 import time
 from pathlib import Path
@@ -35,6 +40,21 @@ from pathlib import Path
 from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import AcquisitionError
 from core.hashing import hash_file
+
+# The one file that's unique and constant across every real Tor Browser install --
+# present the moment the daemon has ever started, portable installs included.
+_TOR_MARKER = Path("Browser") / "TorBrowser" / "Data" / "Tor" / "torrc"
+# Skip these by name, anywhere in the tree -- system-internal or reliably huge/
+# irrelevant on a Windows target, not worth walking into during a scan.
+_SKIP_DIR_NAMES = {
+    "$Recycle.Bin",
+    "System Volume Information",
+    "Windows",
+    "WindowsApps",
+    "Config.Msi",
+    "$WinREAgent",
+}
+_SCAN_MAX_DEPTH = 8
 
 PROFILE_FILENAMES: tuple[str, ...] = (
     "places.sqlite",
@@ -55,6 +75,67 @@ TOR_DATADIR_FILENAMES: tuple[str, ...] = (
     "torrc",
     "lock",
 )
+
+
+def _default_search_roots() -> list[Path]:
+    """Fast, likely locations first (a real portable install is almost always in one of
+    these) -- checked before ever falling back to a full drive walk."""
+    home = Path.home()
+    fast = [home / "Desktop", home / "Downloads", home / "Documents", home]
+    return [p for p in fast if p.is_dir()]
+
+
+def _all_drive_roots() -> list[Path]:
+    if sys.platform != "win32":
+        return []
+    roots = []
+    for letter in string.ascii_uppercase:
+        drive = Path(f"{letter}:/")
+        if drive.is_dir():
+            roots.append(drive)
+    return roots
+
+
+def _scan_for_marker(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> list[Path]:
+    """Walk root looking for Browser/TorBrowser/Data/Tor/torrc; returns each match's
+    Tor Browser root directory (the folder containing Browser/), never descending into
+    a found install itself or into a skip-listed directory name."""
+    found = []
+    root = root.resolve()
+    base_depth = len(root.parts)
+    for dirpath, dirnames, _filenames in os.walk(root):
+        current = Path(dirpath)
+        if len(current.parts) - base_depth >= max_depth:
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+        if (current / _TOR_MARKER).is_file():
+            found.append(current)
+            dirnames[:] = []  # nothing relevant further down a found install
+    return found
+
+
+def find_tor_browser_installations(search_roots: list[Path] | None = None) -> list[Path]:
+    """Auto-discovery for when the examiner doesn't already know where Tor Browser
+    lives on this target: walks likely locations (home dir, Desktop, Downloads,
+    Documents) first, and only falls back to a full per-drive scan if those come up
+    empty -- a real install is almost always in the fast set, and a full C:\\ walk is
+    slow enough to want to avoid when it's not needed."""
+    if search_roots is not None:
+        found = []
+        for root in search_roots:
+            found.extend(_scan_for_marker(root))
+        return found
+
+    found = []
+    for root in _default_search_roots():
+        found.extend(_scan_for_marker(root))
+    if found:
+        return found
+
+    for root in _all_drive_roots():
+        found.extend(_scan_for_marker(root))
+    return found
 
 
 def discover_tor_browser_paths(tor_browser_dir: Path) -> tuple[Path, Path]:
@@ -182,6 +263,13 @@ def _manifest_entries(manifest_path: Path) -> list[tuple[str, str]]:
     return entries
 
 
+def _most_recently_active(installations: list[Path]) -> Path:
+    """When auto-discovery finds more than one install, the one whose torrc was
+    written to most recently is the best guess at "the one actually in use" --
+    torrc's mtime tracks whenever that daemon last started."""
+    return max(installations, key=lambda p: (p / _TOR_MARKER).stat().st_mtime)
+
+
 def acquire_all(
     tor_browser_dir: Path | None = None,
     profile_src: Path | None = None,
@@ -190,19 +278,37 @@ def acquire_all(
 ) -> dict:
     """Best-effort: profile and Tor data dir are attempted independently, same
     isolation philosophy as module_a_registry.acquire.acquire_all(). Explicit
-    profile_src/tor_dir_src override tor_browser_dir discovery."""
+    profile_src/tor_dir_src override tor_browser_dir discovery, which in turn
+    overrides auto-discovery (find_tor_browser_installations()) -- so this still
+    works with no path given at all, not just as a fallback."""
+    other_installations: list[str] = []
     if profile_src is None or tor_dir_src is None:
-        if tor_browser_dir is None:
-            raise AcquisitionError(
-                "Pass --tor-browser-dir, or both --disk-profile-src and --tor-dir-src"
-            )
-        discovered_profile, discovered_tor_dir = discover_tor_browser_paths(tor_browser_dir)
+        if tor_browser_dir is not None:
+            chosen = tor_browser_dir
+        else:
+            installations = find_tor_browser_installations()
+            if not installations:
+                raise AcquisitionError(
+                    "No Tor Browser installation found (searched the home directory, "
+                    "Desktop, Downloads, Documents, then every drive). Pass "
+                    "--tor-browser-dir, or both --disk-profile-src and --tor-dir-src, "
+                    "explicitly if it's somewhere this scan wouldn't find it."
+                )
+            chosen = _most_recently_active(installations)
+            other_installations = [str(p) for p in installations if p != chosen]
+        discovered_profile, discovered_tor_dir = discover_tor_browser_paths(chosen)
         profile_src = profile_src or discovered_profile
         tor_dir_src = tor_dir_src or discovered_tor_dir
 
     output_dir.mkdir(parents=True, exist_ok=True)
     custody = CustodyLog(output_dir / f"disk_acquire_{_timestamp()}.custody.json")
     results: dict[str, dict] = {}
+    if other_installations:
+        results["other_installations_found"] = other_installations
+        print(
+            f"[*] found {len(other_installations)} other Tor Browser install(s), "
+            f"not acquired (used the most recently active one): {other_installations}"
+        )
 
     try:
         results["profile"] = {
@@ -242,7 +348,9 @@ def main() -> None:
         "--tor-browser-dir",
         type=Path,
         help="Root of a portable Tor Browser install; profile and Tor data dir are "
-        "discovered under it",
+        "discovered under it. Omit entirely to auto-discover: scans the home "
+        "directory/Desktop/Downloads/Documents, then every drive, for a Tor Browser "
+        "install; picks the most recently active one if it finds several",
     )
     parser.add_argument(
         "--disk-profile-src", type=Path, help="Explicit profile source dir (overrides discovery)"

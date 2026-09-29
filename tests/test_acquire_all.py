@@ -74,10 +74,16 @@ def test_acquire_isolates_one_category_failure_from_the_others(tmp_path, monkeyp
     assert manifest["memory"]["live_dump"]["status"] == "ok"
 
 
-def test_acquire_disk_skipped_without_any_disk_source(tmp_path):
+def test_acquire_disk_reports_error_when_auto_discovery_finds_nothing(tmp_path, monkeypatch):
+    # No path given at all now means "auto-discover" (see modules/module_b_disk/acquire.py),
+    # not "skip" -- only a scan that genuinely finds nothing is reported as an error, and
+    # the scan itself must never touch the real filesystem in a test.
+    monkeypatch.setattr(acquire_all.disk_acquire, "find_tor_browser_installations", list)
+
     result = acquire_all._acquire_disk(tmp_path, None, None, None)
-    assert result["profile"]["status"] == "skipped"
-    assert result["tor_dir"]["status"] == "skipped"
+
+    assert result["status"] == "error"
+    assert "No Tor Browser installation found" in result["message"]
 
 
 def test_acquire_memory_skips_full_image_without_winpmem_path(tmp_path, monkeypatch):
