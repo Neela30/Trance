@@ -51,6 +51,43 @@ def test_acquire_writes_manifest_with_one_section_per_category(tmp_path, monkeyp
     assert written["registry"]["SYSTEM"]["path"] == "registry/SYSTEM_x"
 
 
+def test_acquire_writes_paths_relative_to_the_evidence_folder(tmp_path, monkeypatch):
+    # Real run: --output-dir evidence, relative to the acquire-time CWD, so submodules hand
+    # back "evidence/registry/..." -- meaningless once the folder is copied elsewhere.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(acquire_all, "is_admin", lambda: True)
+    monkeypatch.setattr(
+        acquire_all,
+        "_acquire_registry",
+        lambda output_dir, ntuser_user: {
+            "SYSTEM": {"status": "ok", "path": str(output_dir / "registry" / "SYSTEM_x")},
+            "custody_log_path": str(output_dir / "registry" / "custody.json"),
+        },
+    )
+    monkeypatch.setattr(
+        acquire_all,
+        "_acquire_memory",
+        lambda output_dir, winpmem_path: {
+            "full_image": {
+                "status": "ok",
+                "path": str(output_dir / "memory" / "fullmem.raw"),
+                "winpmem_path": "C:\\tools\\winpmem.exe",
+            }
+        },
+    )
+    monkeypatch.setattr(acquire_all, "_acquire_disk", lambda output_dir, tbd, ps, tds: {})
+
+    acquire_all.acquire(acquire_all.Path("evidence"))
+
+    written = json.loads((tmp_path / "evidence" / "acquire_manifest.json").read_text())
+    assert written["registry"]["SYSTEM"]["path"] == "registry/SYSTEM_x"
+    assert written["registry"]["custody_log_path"] == "registry/custody.json"
+    assert written["memory"]["full_image"]["path"] == "memory/fullmem.raw"
+    # a source location on the target is provenance, not an evidence output -- untouched
+    assert written["memory"]["full_image"]["winpmem_path"] == "C:\\tools\\winpmem.exe"
+
+
 def test_acquire_isolates_one_category_failure_from_the_others(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(acquire_all, "is_admin", lambda: True)

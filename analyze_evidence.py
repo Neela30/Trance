@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import main as main_module
 
@@ -30,32 +30,56 @@ def _latest(paths: list[Path]) -> Path | None:
     return max(paths, key=lambda p: p.stat().st_mtime) if paths else None
 
 
+def _rebase_onto(evidence_dir: Path, recorded: str) -> str:
+    """Map a manifest path onto wherever the evidence folder lives *now*.
+
+    The manifest was written on the target, so a recorded path may be relative to the
+    acquire-time working directory ("evidence\\registry\\SYSTEM_..."), absolute on the
+    target ("C:\\forensics\\...\\evidence\\registry\\SYSTEM_..."), or already relative to
+    the evidence folder ("registry/SYSTEM_..."), and use Windows separators either way.
+    None of those resolve as-is once the folder is copied to the examiner's machine, so
+    take the longest trailing run of components that exists under evidence_dir. If
+    nothing exists, fall back to the full relative form so main.py reports a clear
+    file-not-found against the evidence folder rather than some unrelated CWD.
+    """
+    parts = [p for p in PureWindowsPath(recorded).parts if p not in ("\\", "/")]
+    parts = [p for p in parts if not PureWindowsPath(p).drive]
+    for start in range(len(parts)):
+        candidate = evidence_dir.joinpath(*parts[start:])
+        if candidate.exists():
+            return str(candidate)
+    return str(evidence_dir.joinpath(*parts)) if parts else str(evidence_dir)
+
+
 def _resolve_from_manifest(evidence_dir: Path, manifest: dict) -> dict:
     resolved: dict[str, str] = {}
 
+    def ok_path(entry: object) -> str | None:
+        if isinstance(entry, dict) and entry.get("status") == "ok" and entry.get("path"):
+            return _rebase_onto(evidence_dir, entry["path"])
+        return None
+
     registry = manifest.get("registry", {})
     for key, flag in (("SYSTEM", "system"), ("NTUSER.DAT", "ntuser"), ("Amcache.hve", "amcache")):
-        entry = registry.get(key)
-        if isinstance(entry, dict) and entry.get("status") == "ok" and entry.get("path"):
-            resolved[flag] = entry["path"]
+        path = ok_path(registry.get(key))
+        if path:
+            resolved[flag] = path
 
     memory = manifest.get("memory", {})
     full_image = memory.get("full_image", {})
     live_dump = memory.get("live_dump", {})
-    if isinstance(full_image, dict) and full_image.get("status") == "ok":
-        resolved["dump"] = full_image["path"]
+    if path := ok_path(full_image):
+        resolved["dump"] = path
         resolved["source_type"] = full_image.get("source_type", "full-memory")
-    elif isinstance(live_dump, dict) and live_dump.get("status") == "ok":
-        resolved["dump"] = live_dump["path"]
+    elif path := ok_path(live_dump):
+        resolved["dump"] = path
         resolved["source_type"] = live_dump.get("source_type", _DEFAULT_SOURCE_TYPE)
 
     disk = manifest.get("disk", {})
-    profile = disk.get("profile", {})
-    tor_dir = disk.get("tor_dir", {})
-    if isinstance(profile, dict) and profile.get("status") == "ok" and profile.get("path"):
-        resolved["disk_profile"] = profile["path"]
-    if isinstance(tor_dir, dict) and tor_dir.get("status") == "ok" and tor_dir.get("path"):
-        resolved["tor_dir"] = tor_dir["path"]
+    if path := ok_path(disk.get("profile")):
+        resolved["disk_profile"] = path
+    if path := ok_path(disk.get("tor_dir")):
+        resolved["tor_dir"] = path
 
     return resolved
 

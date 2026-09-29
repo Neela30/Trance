@@ -170,10 +170,41 @@ def acquire(
     else:
         print("[*] disk: skipped (--skip-disk)")
 
+    _make_paths_portable(manifest, output_dir)
     manifest_path = output_dir / "acquire_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
     manifest["manifest_path"] = str(manifest_path)
     return manifest
+
+
+_EVIDENCE_PATH_KEYS = ("path", "custody_log_path")
+
+
+def _make_paths_portable(node: object, output_dir: Path) -> None:
+    """Rewrite evidence paths in place as relative to output_dir with "/" separators.
+
+    The folder gets copied off the target to the examiner's machine (usually a
+    different OS and location), so a path relative to the acquire-time CWD, or absolute
+    on the target, is meaningless there. Only evidence *outputs* are rewritten
+    (path/custody_log_path); source locations on the target like winpmem_path or
+    other_installations_found are provenance and stay as recorded.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _EVIDENCE_PATH_KEYS and isinstance(value, str):
+                node[key] = _relative_to_output(value, output_dir)
+            else:
+                _make_paths_portable(value, output_dir)
+    elif isinstance(node, list):
+        for item in node:
+            _make_paths_portable(item, output_dir)
+
+
+def _relative_to_output(value: str, output_dir: Path) -> str:
+    try:
+        return Path(value).resolve().relative_to(output_dir.resolve()).as_posix()
+    except ValueError:
+        return value
 
 
 def main(argv: list[str] | None = None) -> int:

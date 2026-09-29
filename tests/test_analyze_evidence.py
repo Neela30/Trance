@@ -42,10 +42,10 @@ def test_resolve_from_manifest_prefers_full_image_over_live_dump(tmp_path):
 
     resolved = analyze_evidence.resolve_evidence(tmp_path)
 
-    assert resolved["system"] == "registry/SYSTEM_x"
-    assert resolved["dump"] == "memory/fullmem_x.raw"
+    assert resolved["system"] == str(tmp_path / "registry" / "SYSTEM_x")
+    assert resolved["dump"] == str(tmp_path / "memory" / "fullmem_x.raw")
     assert resolved["source_type"] == "full-memory"
-    assert resolved["disk_profile"] == "disk/profile"
+    assert resolved["disk_profile"] == str(tmp_path / "disk" / "profile")
 
 
 def test_resolve_from_manifest_falls_back_to_live_dump(tmp_path):
@@ -58,8 +58,61 @@ def test_resolve_from_manifest_falls_back_to_live_dump(tmp_path):
 
     resolved = analyze_evidence.resolve_evidence(tmp_path)
 
-    assert resolved["dump"] == "memory/firefox_1_x.bin"
+    assert resolved["dump"] == str(tmp_path / "memory" / "firefox_1_x.bin")
     assert resolved["source_type"] == "process"
+
+
+def _make_real_evidence(evidence_dir):
+    (evidence_dir / "registry").mkdir(parents=True)
+    (evidence_dir / "registry" / "SYSTEM_20260929T051427Z").write_bytes(b"hive")
+    (evidence_dir / "disk" / "profile").mkdir(parents=True)
+
+
+def test_resolve_from_manifest_rebases_windows_paths_from_the_acquire_cwd(tmp_path):
+    # Exact shape acquire_all.py wrote before paths were made portable: relative to the
+    # acquire-time CWD on the target (so prefixed with the output folder's own name),
+    # Windows separators -- and the folder has since been copied and renamed.
+    evidence_dir = tmp_path / "copied-to-examiner" / "case01-evidence"
+    _make_real_evidence(evidence_dir)
+    manifest = {
+        "registry": {
+            "SYSTEM": {"status": "ok", "path": "evidence\\registry\\SYSTEM_20260929T051427Z"}
+        },
+        "disk": {"profile": {"status": "ok", "path": "evidence\\disk\\profile"}},
+    }
+    (evidence_dir / "acquire_manifest.json").write_text(json.dumps(manifest))
+
+    resolved = analyze_evidence.resolve_evidence(evidence_dir)
+
+    assert resolved["system"] == str(evidence_dir / "registry" / "SYSTEM_20260929T051427Z")
+    assert resolved["disk_profile"] == str(evidence_dir / "disk" / "profile")
+
+
+def test_resolve_from_manifest_rebases_absolute_target_paths(tmp_path):
+    evidence_dir = tmp_path / "evidence"
+    _make_real_evidence(evidence_dir)
+    manifest = {
+        "registry": {
+            "SYSTEM": {
+                "status": "ok",
+                "path": "C:\\forensics\\TRANCE-new\\evidence\\registry\\SYSTEM_20260929T051427Z",
+            }
+        },
+    }
+    (evidence_dir / "acquire_manifest.json").write_text(json.dumps(manifest))
+
+    resolved = analyze_evidence.resolve_evidence(evidence_dir)
+
+    assert resolved["system"] == str(evidence_dir / "registry" / "SYSTEM_20260929T051427Z")
+
+
+def test_resolve_from_manifest_missing_file_still_points_inside_evidence_dir(tmp_path):
+    manifest = {"registry": {"SYSTEM": {"status": "ok", "path": "evidence\\registry\\GONE"}}}
+    (tmp_path / "acquire_manifest.json").write_text(json.dumps(manifest))
+
+    resolved = analyze_evidence.resolve_evidence(tmp_path)
+
+    assert resolved["system"].startswith(str(tmp_path))
 
 
 def test_resolve_from_manifest_skips_failed_categories(tmp_path):
