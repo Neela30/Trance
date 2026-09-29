@@ -9,6 +9,12 @@ directory/Desktop/Downloads/Documents, then every drive) for its install
 signature. Pass --tor-browser-dir explicitly to skip the scan when you
 already know where it is.
 
+Full-memory capture works the same way: omit --winpmem-path and this scans
+for a WinPMEM binary instead of requiring it up front, and always attempts
+the full-image capture alongside the live process dump -- the live dump
+only ever captures a *running* firefox.exe, so it's not a substitute for
+the full-image path when Tor Browser has already exited.
+
 Writes <output-dir>/{registry,memory,disk}/... and <output-dir>/
 acquire_manifest.json -- the contract analyze_evidence.py reads to resolve
 each artifact's path without the examiner having to type them all by hand.
@@ -43,12 +49,23 @@ def _acquire_registry(output_dir: Path, ntuser_user: str | None) -> dict:
 
 
 def _acquire_memory(output_dir: Path, winpmem_path: Path | None) -> dict:
+    """Both paths are always attempted, independently -- the live dump only ever
+    captures a *running* firefox.exe, so it tells you nothing about whether Tor
+    Browser already exited; the full-image capture is the one that still works either
+    way, so it isn't gated on the live dump's outcome."""
     result: dict = {}
     try:
         dump_path = memory_dumper.acquire(output_dir / "memory")
         result["live_dump"] = {"status": "ok", "path": str(dump_path), "source_type": "process"}
     except AcquisitionError as exc:
         result["live_dump"] = {"status": "error", "message": str(exc)}
+
+    if winpmem_path is None:
+        candidates = winpmem_acquire.find_winpmem_binaries()
+        if candidates:
+            winpmem_path = candidates[0]
+            if len(candidates) > 1:
+                result["other_winpmem_binaries_found"] = [str(p) for p in candidates[1:]]
 
     if winpmem_path is not None:
         try:
@@ -57,11 +74,15 @@ def _acquire_memory(output_dir: Path, winpmem_path: Path | None) -> dict:
                 "status": "ok",
                 "path": str(image_path),
                 "source_type": "full-memory",
+                "winpmem_path": str(winpmem_path),
             }
         except AcquisitionError as exc:
             result["full_image"] = {"status": "error", "message": str(exc)}
     else:
-        result["full_image"] = {"status": "skipped", "message": "no --winpmem-path supplied"}
+        result["full_image"] = {
+            "status": "skipped",
+            "message": "no --winpmem-path supplied and none found automatically",
+        }
     return result
 
 
@@ -171,8 +192,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--winpmem-path",
         type=Path,
-        help="Also (or instead of the live dump) acquire a full physical-memory image via "
-        "this examiner-supplied WinPMEM binary",
+        help="Full physical-memory image via this examiner-supplied WinPMEM binary, "
+        "always attempted alongside the live dump (not just when the live dump fails). "
+        "Omit to auto-discover instead: scans the home directory/Desktop/Downloads/"
+        "Documents, then every drive, for one",
     )
     parser.add_argument(
         "--tor-browser-dir",

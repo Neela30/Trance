@@ -30,13 +30,12 @@ find_tor_browser_installations().
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
-import string
 import sys
 import time
 from pathlib import Path
 
+from core import fs_scan
 from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import AcquisitionError
 from core.hashing import hash_file
@@ -44,17 +43,7 @@ from core.hashing import hash_file
 # The one file that's unique and constant across every real Tor Browser install --
 # present the moment the daemon has ever started, portable installs included.
 _TOR_MARKER = Path("Browser") / "TorBrowser" / "Data" / "Tor" / "torrc"
-# Skip these by name, anywhere in the tree -- system-internal or reliably huge/
-# irrelevant on a Windows target, not worth walking into during a scan.
-_SKIP_DIR_NAMES = {
-    "$Recycle.Bin",
-    "System Volume Information",
-    "Windows",
-    "WindowsApps",
-    "Config.Msi",
-    "$WinREAgent",
-}
-_SCAN_MAX_DEPTH = 8
+_SCAN_MAX_DEPTH = fs_scan.DEFAULT_MAX_DEPTH
 
 PROFILE_FILENAMES: tuple[str, ...] = (
     "places.sqlite",
@@ -77,38 +66,12 @@ TOR_DATADIR_FILENAMES: tuple[str, ...] = (
 )
 
 
-def _default_search_roots() -> list[Path]:
-    """Fast, likely locations first (a real portable install is almost always in one of
-    these) -- checked before ever falling back to a full drive walk."""
-    home = Path.home()
-    fast = [home / "Desktop", home / "Downloads", home / "Documents", home]
-    return [p for p in fast if p.is_dir()]
-
-
-def _all_drive_roots() -> list[Path]:
-    if sys.platform != "win32":
-        return []
-    roots = []
-    for letter in string.ascii_uppercase:
-        drive = Path(f"{letter}:/")
-        if drive.is_dir():
-            roots.append(drive)
-    return roots
-
-
 def _scan_for_marker(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> list[Path]:
     """Walk root looking for Browser/TorBrowser/Data/Tor/torrc; returns each match's
     Tor Browser root directory (the folder containing Browser/), never descending into
-    a found install itself or into a skip-listed directory name."""
+    a found install itself."""
     found = []
-    root = root.resolve()
-    base_depth = len(root.parts)
-    for dirpath, dirnames, _filenames in os.walk(root):
-        current = Path(dirpath)
-        if len(current.parts) - base_depth >= max_depth:
-            dirnames[:] = []
-            continue
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
+    for current, dirnames, _filenames in fs_scan.walk_pruned(root, max_depth):
         if (current / _TOR_MARKER).is_file():
             found.append(current)
             dirnames[:] = []  # nothing relevant further down a found install
@@ -117,25 +80,9 @@ def _scan_for_marker(root: Path, max_depth: int = _SCAN_MAX_DEPTH) -> list[Path]
 
 def find_tor_browser_installations(search_roots: list[Path] | None = None) -> list[Path]:
     """Auto-discovery for when the examiner doesn't already know where Tor Browser
-    lives on this target: walks likely locations (home dir, Desktop, Downloads,
-    Documents) first, and only falls back to a full per-drive scan if those come up
-    empty -- a real install is almost always in the fast set, and a full C:\\ walk is
-    slow enough to want to avoid when it's not needed."""
-    if search_roots is not None:
-        found = []
-        for root in search_roots:
-            found.extend(_scan_for_marker(root))
-        return found
-
-    found = []
-    for root in _default_search_roots():
-        found.extend(_scan_for_marker(root))
-    if found:
-        return found
-
-    for root in _all_drive_roots():
-        found.extend(_scan_for_marker(root))
-    return found
+    lives on this target -- see core.fs_scan.staged_scan for the fast-locations-first,
+    full-drive-fallback search order."""
+    return fs_scan.staged_scan(_scan_for_marker, search_roots)
 
 
 def discover_tor_browser_paths(tor_browser_dir: Path) -> tuple[Path, Path]:

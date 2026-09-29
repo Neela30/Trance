@@ -86,15 +86,41 @@ def test_acquire_disk_reports_error_when_auto_discovery_finds_nothing(tmp_path, 
     assert "No Tor Browser installation found" in result["message"]
 
 
-def test_acquire_memory_skips_full_image_without_winpmem_path(tmp_path, monkeypatch):
+def test_acquire_memory_skips_full_image_when_no_winpmem_found(tmp_path, monkeypatch):
     monkeypatch.setattr(
         acquire_all.memory_dumper,
         "acquire",
         lambda output_dir: (_ for _ in ()).throw(AcquisitionError("no firefox.exe running")),
     )
+    # find_winpmem_binaries() must never touch the real filesystem in a test -- same
+    # class of bug already hit once with Tor Browser auto-discovery.
+    monkeypatch.setattr(acquire_all.winpmem_acquire, "find_winpmem_binaries", list)
+
     result = acquire_all._acquire_memory(tmp_path, None)
+
     assert result["live_dump"]["status"] == "error"
     assert result["full_image"]["status"] == "skipped"
+
+
+def test_acquire_memory_auto_discovers_winpmem_and_still_tries_full_image_after_live_dump_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        acquire_all.memory_dumper,
+        "acquire",
+        lambda output_dir: (_ for _ in ()).throw(AcquisitionError("no firefox.exe running")),
+    )
+    found = tmp_path / "winpmem.exe"
+    monkeypatch.setattr(acquire_all.winpmem_acquire, "find_winpmem_binaries", lambda: [found])
+    monkeypatch.setattr(
+        acquire_all.winpmem_acquire, "acquire", lambda path, output_dir: tmp_path / "fullmem.raw"
+    )
+
+    result = acquire_all._acquire_memory(tmp_path, None)
+
+    assert result["live_dump"]["status"] == "error"
+    assert result["full_image"]["status"] == "ok"
+    assert result["full_image"]["winpmem_path"] == str(found)
 
 
 def test_cli_fails_cleanly_off_windows(monkeypatch, tmp_path):

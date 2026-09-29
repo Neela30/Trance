@@ -119,11 +119,6 @@ def test_acquire_all_isolates_a_real_profile_failure_from_tor_dir(tmp_path):
     assert results["tor_dir"]["status"] == "ok"
 
 
-def test_acquire_all_requires_a_source(tmp_path):
-    with pytest.raises(AcquisitionError, match="Pass --tor-browser-dir"):
-        acquire.acquire_all(output_dir=tmp_path / "out")
-
-
 def _make_installation(root, marker_mtime=None):
     marker = root / acquire._TOR_MARKER
     marker.parent.mkdir(parents=True)
