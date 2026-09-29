@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import QRect, Qt, Signal
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QStyle,
     QStyledItemDelegate,
@@ -102,6 +104,7 @@ class _StatusChipDelegate(QStyledItemDelegate):
 
 class HistoryTab(QWidget):
     report_requested = Signal(Path)
+    case_deleted = Signal(Path)  # the deleted case's directory
 
     def __init__(self, output_dir: Path, parent=None):
         super().__init__(parent)
@@ -136,9 +139,15 @@ class HistoryTab(QWidget):
         self._open_button.setEnabled(False)
         self._open_button.clicked.connect(self._open_selected_report)
 
+        self._delete_button = QPushButton("Delete", self)
+        self._delete_button.setProperty("class", "danger")
+        self._delete_button.setEnabled(False)
+        self._delete_button.clicked.connect(self._delete_selected_case)
+
         button_row = QHBoxLayout()
         button_row.addWidget(refresh_button)
         button_row.addWidget(self._open_button)
+        button_row.addWidget(self._delete_button)
         button_row.addStretch(1)
 
         self._footer_label = QLabel("", self)
@@ -203,15 +212,46 @@ class HistoryTab(QWidget):
             self._table.setRowHidden(row, bool(needle) and not match)
 
     def _update_open_button_state(self) -> None:
-        self._open_button.setEnabled(bool(self._table.selectedItems()))
+        selected = bool(self._table.selectedItems())
+        self._open_button.setEnabled(selected)
+        self._delete_button.setEnabled(selected)
 
-    def _open_selected_report(self) -> None:
+    def _selected_summary(self) -> CaseSummary | None:
         row = self._table.currentRow()
         if row < 0:
-            return
+            return None
         case_item = self._table.item(row, _CASE_COLUMN)
         if case_item is None:
-            return
-        summary: CaseSummary = case_item.data(Qt.ItemDataRole.UserRole)
+            return None
+        return case_item.data(Qt.ItemDataRole.UserRole)
+
+    def _open_selected_report(self) -> None:
+        summary = self._selected_summary()
         if summary is not None and summary.report_path is not None:
             self.report_requested.emit(summary.report_path)
+
+    def _delete_selected_case(self) -> None:
+        summary = self._selected_summary()
+        if summary is None:
+            return
+
+        confirmed = QMessageBox.question(
+            self,
+            "Delete case",
+            f"Permanently delete '{summary.case_name}'?\n\n{summary.case_dir}\n\n"
+            "This removes findings.json, report.html and custody.json for this case. "
+            "It cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            shutil.rmtree(summary.case_dir)
+        except OSError as exc:
+            QMessageBox.critical(self, "Delete failed", f"Could not delete case: {exc}")
+            return
+
+        self.refresh()
+        self.case_deleted.emit(summary.case_dir)

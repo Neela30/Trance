@@ -107,7 +107,44 @@ def test_run_winpmem_missing_binary_raises_acquisition_error(tmp_path):
         winpmem_acquire.run_winpmem(tmp_path / "nope.exe", tmp_path / "img.raw")
 
 
-def test_cli_requires_winpmem_path(monkeypatch):
+def test_looks_like_winpmem_matches_known_naming_variants(tmp_path):
+    assert winpmem_acquire._looks_like_winpmem(tmp_path / "winpmem_mini_x64_rc2.exe")
+    assert winpmem_acquire._looks_like_winpmem(tmp_path / "WinPMEM.exe")
+    assert not winpmem_acquire._looks_like_winpmem(tmp_path / "notepad.exe")
+    assert not winpmem_acquire._looks_like_winpmem(tmp_path / "winpmem_readme.txt")
+
+
+def test_find_winpmem_binaries_with_explicit_roots(tmp_path):
+    match = tmp_path / "tools" / "winpmem_mini_x64_rc2.exe"
+    match.parent.mkdir(parents=True)
+    match.write_bytes(b"fake binary")
+    (tmp_path / "tools" / "unrelated.exe").write_bytes(b"x")
+
+    found = winpmem_acquire.find_winpmem_binaries(search_roots=[tmp_path])
+
+    assert found == [match]
+
+
+def test_cli_auto_discovers_winpmem_when_no_path_given(tmp_path, monkeypatch):
+    found = tmp_path / "winpmem.exe"
+    monkeypatch.setattr(winpmem_acquire, "find_winpmem_binaries", lambda: [found])
+    captured = {}
+    monkeypatch.setattr(
+        winpmem_acquire,
+        "acquire",
+        lambda path, output_dir, extra_args: captured.setdefault("path", path),
+    )
     monkeypatch.setattr(sys, "argv", ["winpmem_acquire.py"])
-    with pytest.raises(SystemExit):
+
+    winpmem_acquire.main()
+
+    assert captured["path"] == found
+
+
+def test_cli_exits_cleanly_when_no_path_given_and_none_found(monkeypatch):
+    monkeypatch.setattr(winpmem_acquire, "find_winpmem_binaries", list)
+    monkeypatch.setattr(sys, "argv", ["winpmem_acquire.py"])
+
+    with pytest.raises(SystemExit) as exc_info:
         winpmem_acquire.main()
+    assert exc_info.value.code == 1
