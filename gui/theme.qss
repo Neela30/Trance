@@ -157,6 +157,29 @@ QPushButton[class="primary"]:disabled {
     border-color: #232a2f;
 }
 
+/* Destructive actions, e.g. History's Delete -- outlined, not filled, so it doesn't
+   compete with "primary" for attention; fills on hover as a deliberate-click cue. */
+QPushButton[class="danger"] {
+    background: transparent;
+    color: #e2694f;
+    border: 1px solid #e2694f;
+}
+
+QPushButton[class="danger"]:hover {
+    background: #33211c;
+}
+
+QPushButton[class="danger"]:pressed {
+    background: #e2694f;
+    color: #14181b;
+}
+
+QPushButton[class="danger"]:disabled {
+    background: transparent;
+    color: #8b969c;
+    border-color: #313a40;
+}
+
 /* Flat toggle, e.g. the Targeting section's expand/collapse control */
 QPushButton[class="link"] {
     background: transparent;

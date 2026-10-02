@@ -43,9 +43,23 @@ class ReportTab(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(self._stack)
 
+        self._current_report_path: Path | None = None
+
     def load_report(self, report_path: Path) -> None:
         # QUrl.fromLocalFile needs an absolute path -- report_path can be relative when
         # --output-dir was given as one (e.g. the "output" default), which otherwise
         # produces a malformed file:// URL and ERR_FILE_NOT_FOUND.
-        self._view.load(QUrl.fromLocalFile(str(Path(report_path).resolve())))
+        self._current_report_path = Path(report_path).resolve()
+        self._view.load(QUrl.fromLocalFile(str(self._current_report_path)))
         self._stack.setCurrentWidget(self._view)
+
+    def clear_if_showing(self, case_dir: Path) -> None:
+        """Reset to the empty state if the report currently on screen belonged to
+        case_dir -- called after a History deletion so a stale, now-nonexistent report
+        doesn't sit there looking current."""
+        if (
+            self._current_report_path is not None
+            and case_dir.resolve() in self._current_report_path.parents
+        ):
+            self._current_report_path = None
+            self._stack.setCurrentWidget(self._placeholder)
