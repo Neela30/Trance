@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QMainWindow, QTabWidget
 
 from gui.analyse_tab import AnalyseTab
+from gui.build_tab import BuildTab
 from gui.history_tab import HistoryTab
 from gui.report_tab import ReportTab
 
@@ -18,11 +19,13 @@ class MainWindow(QMainWindow):
         self._analyse_tab = AnalyseTab(output_dir, self)
         self._report_tab = ReportTab(self)
         self._history_tab = HistoryTab(output_dir, self)
+        self._build_tab = BuildTab(self)
 
         self._tabs = QTabWidget(self)
         self._tabs.addTab(self._analyse_tab, "Analyse")
         self._tabs.addTab(self._report_tab, "Report")
         self._tabs.addTab(self._history_tab, "History")
+        self._tabs.addTab(self._build_tab, "Build EXE")
         self.setCentralWidget(self._tabs)
 
         self._analyse_tab.analysis_finished.connect(self._on_analysis_finished)

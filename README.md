@@ -273,6 +273,37 @@ repo at ~290MB `--onefile`, vs. ~15MB for `trance-analyze`); this is the
 tradeoff of embedding the report view instead of a lighter web
 framework. Same AV-allowlisting note as the other `--onefile` exes.
 
+### Building the acquisition EXE from the GUI
+
+The desktop app's **Build EXE** tab automates the manual
+`pyinstaller --onefile --name trance-acquire acquire_all.py` step from
+above, so you don't need a terminal to produce the file you carry to the
+target machine:
+
+1. Open the GUI (`python gui_main.py`) and switch to the **Build EXE** tab.
+2. Click **Generate acquisition EXE**. If PyInstaller isn't installed, or
+   the interpreter running the GUI isn't 64-bit, you'll get a clear message
+   instead of a broken build — install it with
+   `pip install -r requirements-dev.txt` and retry.
+3. Choose where to save the resulting `.exe` in the save dialog.
+4. Watch the live build log; **Cancel** stops the build at any point.
+5. On success, the tab shows the saved path and an **Open folder** button.
+
+The build runs entirely inside a temporary directory (never inside the
+repo) and embeds a UAC manifest (`--uac-admin`), so the exe itself
+prompts for Administrator elevation when launched on the target — no
+manual "Run as Administrator" step is required. Copy the single `.exe` to
+the target machine (USB stick, network share) and run it there, e.g.:
+
+```powershell
+E:\trance-acquire.exe --output-dir E:\evidence
+```
+
+WinPMEM is **not** bundled into the exe — it's deliberately kept
+examiner-supplied, same as a manually built `trance-acquire.exe`: pass
+`--winpmem-path`, or let `winpmem_acquire.py`'s auto-discovery find a
+`*winpmem*.exe` already on the target machine.
+
 ### Limitation: process memory dies with the process
 
 Live acquisition must happen while `firefox.exe` is still running —
