@@ -212,3 +212,79 @@ def validate(request: AnalysisRequest, inputs: dict) -> Issues:
             "No onion address or host set: the memory section's targeted URLs will be empty."
         )
     return issues
+
+
+@dataclass(frozen=True)
+class SummaryRow:
+    label: str
+    state: str  # "found" | "missing" | "off" (optional and not in use)
+    detail: str
+    tooltip: str = ""
+
+
+def display_path(path: str, evidence_dir: str | None) -> str:
+    """A path as the examiner thinks of it: relative to the evidence folder when it's
+    inside it, otherwise just the file or folder name (the tooltip has the full path)."""
+    if evidence_dir:
+        try:
+            return Path(path).resolve().relative_to(Path(evidence_dir).resolve()).as_posix()
+        except (OSError, ValueError):
+            pass
+    return Path(path).name or path
+
+
+def summary_rows(request: AnalysisRequest, inputs: dict) -> list[SummaryRow]:
+    """The 'Evidence found' checklist: what this run will analyse, one row per kind."""
+
+    def row(label: str, key: str, describe=None) -> SummaryRow:
+        value = inputs.get(key)
+        if not value:
+            return SummaryRow(label, "missing", "not found")
+        shown = display_path(value, request.evidence_dir)
+        if key in request.overrides:
+            shown += " (chosen manually)"
+        return SummaryRow(label, "found", describe(shown) if describe else shown, value)
+
+    hives = [k for k in ("system", "ntuser", "amcache") if inputs.get(k)]
+    registry = SummaryRow(
+        "Registry hives",
+        "found" if hives else "missing",
+        f"{len(hives)} of 3 found" if hives else "not found",
+        "\n".join(inputs[k] for k in hives),
+    )
+    memory_kind = (
+        "full memory image"
+        if inputs.get("source_type") == "full-memory"
+        else "live browser process dump"
+    )
+    rows = [
+        registry,
+        row("Memory", "dump", lambda shown: f"{shown} · {memory_kind}"),
+        row("Tor Browser profile", "disk_profile"),
+        row("Tor data folder", "tor_dir"),
+        row("Downloads scan", "downloads_scan"),
+    ]
+    if request.disk_image and (request.mount_image or request.carve_image):
+        actions = [
+            a
+            for a, on in (
+                ("mounted read-only", request.mount_image),
+                ("byte search", request.carve_image),
+            )
+            if on
+        ]
+        rows.append(
+            SummaryRow(
+                "Disk image",
+                "found",
+                f"{Path(request.disk_image).name} · {' + '.join(actions)}",
+                request.disk_image,
+            )
+        )
+    elif request.disk_root:
+        rows.append(
+            SummaryRow("Disk volume", "found", f"{request.disk_root} (mounted)", request.disk_root)
+        )
+    else:
+        rows.append(SummaryRow("Disk image", "off", "optional — add one under More options"))
+    return rows

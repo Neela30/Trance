@@ -16,7 +16,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
-    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -32,8 +31,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.advanced_inputs import DiskSection, InputsSection, MemorySection
-from gui.analysis_request import AnalysisRequest, discovered_inputs, effective_inputs, validate
+from gui.advanced_inputs import (
+    FIELD_GAP,
+    SECTION_GAP,
+    EvidenceSummary,
+    OptionsPanel,
+    card,
+    field_label,
+    labelled,
+)
+from gui.analysis_request import (
+    AnalysisRequest,
+    discovered_inputs,
+    effective_inputs,
+    summary_rows,
+    validate,
+)
 from gui.history import scan_history
 from gui.processes import AnalysisProcess, MountSession, mount_support
 from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style, repolish
@@ -106,24 +119,19 @@ class AnalyseTab(QWidget):
         content = QWidget(self)
         content.setMaximumWidth(FORM_MAX_WIDTH)
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 24, 0, 24)
+        content_layout.setContentsMargins(0, 32, 0, 32)
+        content_layout.setSpacing(SECTION_GAP)
 
         content_layout.addLayout(self._build_masthead())
-        content_layout.addSpacing(16)
-        content_layout.addWidget(self._build_fields_box())
-        content_layout.addWidget(self._build_targeting_section())
-        self._inputs_section = InputsSection(self)
-        self._disk_section = DiskSection(self._mount_supported, self._mount_reason, self)
-        self._memory_section = MemorySection(self)
-        content_layout.addWidget(self._inputs_section)
-        content_layout.addWidget(self._disk_section)
-        content_layout.addWidget(self._memory_section)
-        content_layout.addSpacing(4)
-        content_layout.addLayout(self._build_run_row())
-        content_layout.addSpacing(14)
-        content_layout.addWidget(self._progress)
-        content_layout.addWidget(self._status_label)
-        content_layout.addSpacing(20)
+        content_layout.addWidget(self._build_main_card())
+        self._summary = EvidenceSummary(self)
+        content_layout.addWidget(self._summary)
+        self._options = OptionsPanel(self._mount_supported, self._mount_reason, self)
+        self._options.changed.connect(self._refresh_summary)
+        self._host_field = self._options.target.host
+        self._username_field = self._options.target.username
+        content_layout.addWidget(self._options)
+        content_layout.addLayout(self._build_run_area())
 
         self._recent_cases_box = self._build_recent_cases_box()
         self._log_box = self._build_log_box()
@@ -135,8 +143,9 @@ class AnalyseTab(QWidget):
 
         centered = QWidget(self)
         row = QHBoxLayout(centered)
+        row.setContentsMargins(24, 0, 24, 0)
         row.addStretch(1)
-        row.addWidget(content)
+        row.addWidget(content, 100)
         row.addStretch(1)
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -146,6 +155,8 @@ class AnalyseTab(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
+        self._discovered: dict = {}
+        self._refresh_summary()
         self.refresh_recent_cases()
 
     # -- construction -----------------------------------------------------------
@@ -156,6 +167,7 @@ class AnalyseTab(QWidget):
         heading = QLabel("Run a new analysis", self)
         apply_heading_style(heading)
         heading_col = QVBoxLayout()
+        heading_col.setSpacing(6)
         heading_col.addWidget(eyebrow)
         heading_col.addWidget(heading)
 
@@ -165,6 +177,7 @@ class AnalyseTab(QWidget):
         self._stamp = StatusIndicator("Ready", self)
         self._stamp.set_status("ok")
         status_col = QVBoxLayout()
+        status_col.setSpacing(6)
         status_col.setAlignment(Qt.AlignmentFlag.AlignRight)
         status_col.addWidget(status_eyebrow)
         status_col.addWidget(self._stamp)
@@ -175,135 +188,107 @@ class AnalyseTab(QWidget):
         masthead.addLayout(status_col)
         return masthead
 
-    def _build_fields_box(self) -> QGroupBox:
-        evidence_label = QLabel("Evidence folder", self)
-        apply_eyebrow_style(evidence_label)
+    def _build_main_card(self) -> QGroupBox:
+        box, layout = card(self)
+        layout.setSpacing(SECTION_GAP)
+
         self._folder_field = _EvidenceDropField(self)
         self._folder_field.folder_dropped.connect(self._set_evidence_folder)
         browse_button = QPushButton("Browse…", self)
         browse_button.clicked.connect(self._browse)
         folder_row = QHBoxLayout()
-        folder_row.addWidget(self._folder_field)
+        folder_row.setSpacing(FIELD_GAP)
+        folder_row.addWidget(self._folder_field, 1)
         folder_row.addWidget(browse_button)
-
-        case_label = QLabel("Case name", self)
-        apply_eyebrow_style(case_label)
-        self._case_field = QLineEdit(self)
-        case_help = QLabel(
-            "Enter the report name. The evidence folder is optional when you only analyse "
-            "a disk image or individually chosen inputs.",
-            self,
+        layout.addLayout(
+            labelled(
+                field_label("Evidence folder", self),
+                folder_row,
+                "The folder trance-acquire created on the suspect machine.",
+                self,
+            )
         )
-        case_help.setWordWrap(True)
-        case_help.setStyleSheet("color: #8b969c; font-size: 11.5px;")
 
-        fields_box = QGroupBox(self)
-        fields_layout = QVBoxLayout()
-        fields_layout.addWidget(evidence_label)
-        fields_layout.addLayout(folder_row)
-        fields_layout.addSpacing(10)
-        fields_layout.addWidget(case_label)
-        fields_layout.addWidget(self._case_field)
-        fields_layout.addWidget(case_help)
-        fields_box.setLayout(fields_layout)
-        return fields_box
-
-    def _build_targeting_section(self) -> QWidget:
-        section = QWidget(self)
-        section_layout = QVBoxLayout(section)
-        section_layout.setContentsMargins(0, 10, 0, 0)
-
-        self._targeting_toggle = QPushButton("+ Add targeting details", self)
-        self._targeting_toggle.setProperty("class", "link")
-        self._targeting_toggle.clicked.connect(self._toggle_targeting)
-        section_layout.addWidget(self._targeting_toggle)
+        self._case_field = QLineEdit(self)
+        self._case_field.setPlaceholderText("e.g. vm-run-oct04")
+        layout.addLayout(
+            labelled(
+                field_label("Case name", self),
+                self._case_field,
+                "Names the report and its folder under output/.",
+                self,
+            )
+        )
 
         self._onion_field = QLineEdit(self)
-        self._host_field = QLineEdit(self)
-        self._username_field = QLineEdit(self)
-        self._onion_field.setPlaceholderText("e.g. sitename.onion")
-        self._host_field.setPlaceholderText("e.g. 1.2.3.4:8080")
-        self._username_field.setPlaceholderText("e.g. admin")
+        self._onion_field.setPlaceholderText("e.g. sitename.onion — optional")
+        layout.addLayout(
+            labelled(
+                field_label("Site under investigation", self),
+                self._onion_field,
+                "The .onion address you're looking for. Focuses the memory results on that site.",
+                self,
+            )
+        )
+        return box
 
-        self._targeting_box = QGroupBox(self)
-        targeting_form = QFormLayout()
-        targeting_form.addRow("Onion address", self._onion_field)
-        targeting_form.addRow("Host[:port]", self._host_field)
-        targeting_form.addRow("Username", self._username_field)
-        self._targeting_box.setLayout(targeting_form)
-        for label in (
-            targeting_form.labelForField(self._onion_field),
-            targeting_form.labelForField(self._host_field),
-            targeting_form.labelForField(self._username_field),
-        ):
-            apply_eyebrow_style(label)
-        self._targeting_box.setVisible(False)
-        section_layout.addWidget(self._targeting_box)
-        return section
-
-    def _build_run_row(self) -> QHBoxLayout:
+    def _build_run_area(self) -> QVBoxLayout:
         self._run_button = QPushButton("Run analysis", self)
         self._run_button.setProperty("class", "primary")
         self._run_button.setFixedWidth(RUN_BUTTON_WIDTH)
+        self._run_button.setMinimumHeight(40)
         self._run_button.clicked.connect(self._run)
 
         self._progress = QProgressBar(self)
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
+        self._progress.setVisible(False)  # only while a run is in progress
         self._progress_target = 0
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(PROGRESS_TICK_MS)
         self._progress_timer.timeout.connect(self._animate_progress)
         self._status_label = QLabel("", self)
+        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         apply_eyebrow_style(self._status_label, "")
 
+        area = QVBoxLayout()
+        area.setSpacing(12)
         run_row = QHBoxLayout()
         run_row.addStretch(1)
         run_row.addWidget(self._run_button)
         run_row.addStretch(1)
-        return run_row
+        area.addSpacing(6)
+        area.addLayout(run_row)
+        area.addWidget(self._progress)
+        area.addWidget(self._status_label)
+        return area
 
     def _build_recent_cases_box(self) -> QGroupBox:
-        eyebrow = QLabel("Recent cases", self)
-        apply_eyebrow_style(eyebrow)
-        self._recent_cases_layout = QVBoxLayout()
-        self._recent_cases_layout.addWidget(eyebrow)
+        box, self._recent_cases_layout = card(self)
+        self._recent_cases_layout.setSpacing(10)
+        self._recent_cases_layout.addWidget(field_label("Recent cases", self))
         self._recent_cases_empty_label = QLabel("No analyses run yet.", self)
         self._recent_cases_empty_label.setStyleSheet("color: #8b969c;")
         self._recent_cases_layout.addWidget(self._recent_cases_empty_label)
-
-        box = QGroupBox(self)
-        box.setLayout(self._recent_cases_layout)
         return box
 
     def _build_log_box(self) -> QGroupBox:
-        eyebrow = QLabel("Live log", self)
-        apply_eyebrow_style(eyebrow)
-
+        box, layout = card(self)
+        layout.setSpacing(10)
+        layout.addWidget(field_label("Live log", self))
         self._log_view = QPlainTextEdit(self)
         self._log_view.setReadOnly(True)
         self._log_view.setMaximumBlockCount(500)
+        self._log_view.setMinimumHeight(220)
         self._log_view.setStyleSheet(
             "QPlainTextEdit { font-family: 'Cascadia Code', Consolas, monospace; "
-            "font-size: 11.5px; background: #14181b; border: none; color: #8b969c; }"
+            "font-size: 11.5px; background: #14181b; border: none; color: #8b969c; "
+            "padding: 8px; }"
         )
-
-        layout = QVBoxLayout()
-        layout.addWidget(eyebrow)
         layout.addWidget(self._log_view)
-
-        box = QGroupBox(self)
-        box.setLayout(layout)
         return box
 
     # -- behavior -----------------------------------------------------------
-
-    def _toggle_targeting(self) -> None:
-        expanded = not self._targeting_box.isVisible()
-        self._targeting_box.setVisible(expanded)
-        self._targeting_toggle.setText(
-            "− Hide targeting details" if expanded else "+ Add targeting details"
-        )
 
     def _set_evidence_folder(self, folder: str) -> None:
         self._folder_field.setText(folder)
@@ -311,12 +296,22 @@ class AnalyseTab(QWidget):
         repolish(self._folder_field)
         if not self._case_field.text():
             self._case_field.setText(Path(folder).name)
-        self._inputs_section.clear_overrides()
+        self._options.inputs.clear_overrides()
         try:
-            self._inputs_section.set_discovered(discovered_inputs(folder))
+            self._discovered = discovered_inputs(folder)
         except (OSError, ValueError) as exc:  # unreadable/malformed acquire_manifest.json
-            self._inputs_section.set_discovered({})
+            self._discovered = {}
             QMessageBox.warning(self, "Evidence folder", f"Could not read the folder: {exc}")
+        self._options.inputs.set_discovered(self._discovered, folder)
+        self._refresh_summary()
+
+    def _refresh_summary(self) -> None:
+        request = self._build_request()
+        inputs = effective_inputs(request, self._discovered)
+        has_source = bool(
+            request.evidence_dir or request.overrides or request.disk_image or request.disk_root
+        )
+        self._summary.set_rows(summary_rows(request, inputs), has_source)
 
     def _browse(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Select evidence folder")
@@ -351,12 +346,12 @@ class AnalyseTab(QWidget):
             case_name=self._case_field.text().strip(),
             output_dir=str(self._output_dir),
             evidence_dir=evidence_dir,
-            overrides=self._inputs_section.overrides(),
+            overrides=self._options.inputs.overrides(),
             onion=self._onion_field.text().strip(),
             host=self._host_field.text().strip(),
             username=self._username_field.text().strip(),
-            **self._disk_section.values(),
-            **self._memory_section.values(),
+            **self._options.disk.values(),
+            **self._options.memory.values(),
         )
 
     def _run(self) -> None:
@@ -491,6 +486,7 @@ class AnalyseTab(QWidget):
         self._run_button.setProperty("class", "danger")
         repolish(self._run_button)
         self._run_button.setEnabled(True)
+        self._progress.setVisible(True)
         self._progress.setValue(0)
         self._progress_target = PROGRESS_STARTUP_TARGET
         self._progress_timer.start()
@@ -501,6 +497,7 @@ class AnalyseTab(QWidget):
 
     def _reset_ui(self, status: str, stamp: str, message: str) -> None:
         self._progress_timer.stop()
+        self._progress.setVisible(False)
         self._run_button.setText("Run analysis")
         self._run_button.setProperty("class", "primary")
         repolish(self._run_button)

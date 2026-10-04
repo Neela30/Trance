@@ -148,3 +148,25 @@ def test_validate_warns_when_memory_has_no_target(tmp_path):
     issues = validate(_request(tmp_path), {"dump": dump})
     assert issues.errors == []
     assert any("targeted URLs will be empty" in w for w in issues.warnings)
+
+
+def test_summary_rows_describe_what_will_be_analysed(tmp_path):
+    from gui.analysis_request import display_path, summary_rows
+
+    evidence = tmp_path / "evidence"
+    dump = _file(evidence / "memory" / "fullmem_1.raw")
+    request = _request(tmp_path, evidence_dir=str(evidence))
+    inputs = {"system": "s", "ntuser": "n", "dump": dump, "source_type": "full-memory"}
+    rows = {row.label: row for row in summary_rows(request, inputs)}
+
+    assert rows["Registry hives"].detail == "2 of 3 found"
+    assert rows["Memory"].detail == "memory/fullmem_1.raw · full memory image"
+    assert rows["Tor data folder"].state == "missing"
+    assert rows["Disk image"].state == "off"
+    assert display_path("/elsewhere/tor_dir", str(evidence)) == "tor_dir"
+
+    image = _file(tmp_path / "vm.vdi")
+    mounted = _request(tmp_path, disk_image=image, mount_image=True, carve_image=True)
+    [disk] = [r for r in summary_rows(mounted, {}) if r.label == "Disk image"]
+    assert disk.state == "found"
+    assert disk.detail == "vm.vdi · mounted read-only + byte search"
