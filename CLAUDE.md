@@ -290,6 +290,8 @@ ruff check . && black --check .
   ntfs-3g `ro,show_sys_files,streams_interface=windows` under `/run/trance-mounts/`, then
   waits: "unmount" on stdin **or stdin EOF** (GUI gone) unmounts and detaches. One password
   prompt per run. Linux only (`processes.mount_support()` disables it elsewhere).
+  **Verified for real** by the user (2026-10-04, Linux/GNOME/Wayland, flattened VM `.vdi`).
+  Formats: raw, `.vdi`, `.vmdk`, `.vhd(x)`, `.qcow2` — **not E01** (would need `ewfmount`).
 - `processes.py` — Qt wrappers: `AnalysisProcess` (QProcess, signals, terminate→kill cancel)
   and `MountSession`. Analyse tab order: mount → analyse with `disk_root=<mountpoint>` →
   unmount → show result; also unmounts on failure/cancel/window close.
@@ -316,8 +318,10 @@ Qt gotchas already hit (don't rediscover them):
 - Row → data lookups must go through `item.data(UserRole)`, not a parallel Python list
   (breaks after sorting).
 - A read-only `QLineEdit` still takes focus by default (showed a permanent accent border).
-- The GUI has only been verified **offscreen** (`QT_QPA_PLATFORM=offscreen`) and visually by
-  the user on Linux; never on Windows.
+- The GUI has been verified **offscreen** (`QT_QPA_PLATFORM=offscreen`, incl. full and
+  cancelled runs) and by the user on Linux/Wayland (incl. the in-app mount); never on
+  Windows. On Wayland without GBM, QtWebEngine segfaulted on page load until `gui_main.py`
+  defaulted `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`.
 
 ---
 
@@ -438,6 +442,24 @@ workflow on large changes):
 - Only one Tor Browser install is acquired and the analyze side only accepts one
   profile/tor_dir pair end to end (acquire → manifest → `module_b_disk.run`).
 - No acquire step produces a disk image or the read-only mount `--disk-root` needs.
+- **Planned (agreed 2026-10-04, not built): NTFS metadata collection in trance-acquire.**
+  New `modules/module_b_disk/acquire_ntfs.py` (stdlib, Windows, admin) reads the raw volume
+  and exports `disk/ntfs/{MFT, UsnJrnl_J, pagefile.sys, swapfile.sys}` + `ntfs_metadata.json`
+  + `hashes.sha256`, so Module B's `$MFT`/`$UsnJrnl`/residue analysis runs without imaging.
+  Decisions: read `$MFT`/`$J` from a **VSS snapshot device** (reuse Module A's WMI create/
+  delete), **fall back to the live volume** and record which; `$MFT` via record 0's `$DATA`
+  runlist; `$J` via the `$UsnJrnl` record under `$Extend` (record 11, follow
+  `$ATTRIBUTE_LIST`), copying **allocated runs only** into a compact file (records are
+  self-describing; original offsets kept in metadata); **pagefile + swapfile on by default**
+  from the live volume (VSS excludes them) with a free-space check and `--skip-pagefile`,
+  hiberfil opt-in; volumes = **system drive + the Tor Browser install's drive**;
+  `--skip-ntfs`; manifest `disk.ntfs`. Analyze side: Module B `ntfs_dir` input →
+  `analyze_ntfs(mft=, usnjrnl=)` + `carve_residue(ntfs_dir)` (it globs by file name), hash-
+  verified, `disk_root` wins when both exist; auto-resolved for the GUI (checklist row +
+  Inputs override). Verify: unit tests for boot sector/runlist/attribute list/compaction;
+  byte-compare the reader's `$MFT` against ntfs-3g's `/mnt/win10/$MFT` on the flattened VM
+  image and reproduce the `--disk-root` run (7,535 Tor USN events, 3 `.part` downloads,
+  382 deleted Tor files); then a real VM run.
 
 ### P2 — smaller cleanups
 
@@ -448,8 +470,8 @@ workflow on large changes):
   `vol` CLI; `click` is only used by `modules/module_a_registry/cli.py`.
 - GUI: Recent Cases shows raw ISO timestamps (History uses relative time); case-name and
   output checks exist in both `main.py` and `gui/analysis_request.validate()`. The in-app
-  mount needs pkexec + a polkit agent; its root path (qemu-nbd/ntfs-3g) is covered
-  only by unit tests of the pure parts until a real run through the GUI.
+  mount needs pkexec + a polkit agent; it has only been run on GNOME (other desktops need
+  their own polkit agent running). E01 images can't be mounted from the app yet.
 - `output/` contains stale results from older code (e.g. `output/vm-run-*` predate Module A;
   `output/Test002` shows `host_anchoring.applied: false` although current code applies it for
   that input — verified with a synthetic dump). Don't treat old outputs as current behavior.
