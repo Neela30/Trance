@@ -200,6 +200,14 @@ def _downloads_context(scan: dict) -> dict:
             "modified": _iso(h["timestamps"].get("modified_utc")),
             "timestamp_source": h["timestamps"].get("source"),
             "within_window": h.get("within_tor_daemon_window"),
+            "recycled": (
+                {
+                    "original_path": h["recycle_bin"].get("original_path"),
+                    "deleted": _iso(h["recycle_bin"].get("deleted_utc")),
+                }
+                if h.get("recycle_bin")
+                else None
+            ),
         }
         for h in scan.get("internet_origin_files", [])
     ]
@@ -220,6 +228,7 @@ def _downloads_context(scan: dict) -> dict:
             else None
         ),
         "hits": hits,
+        "recycled": sum(1 for h in hits if h["recycled"]),
         "inside": sum(1 for h in hits if h["within_window"] is True),
         "outside": sum(1 for h in hits if h["within_window"] is False),
         "unknown": sum(1 for h in hits if h["within_window"] is None),

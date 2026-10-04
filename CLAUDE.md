@@ -154,9 +154,13 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
     this file is the only record of when tor wrote them; `analyze_tor_datadir` prefers it.
     `tor_dir`'s copy also records `tor_running_at_capture` (psutil).
   - **Live downloads scan** (`acquire_downloads.py`, Windows only): walks every drive
-    (fs_scan skip-list, depth ≤ 16, excluding the evidence output folder) for files with a
-    `:Zone.Identifier` stream; writes `disk/downloads/zone_identifier_scan.json` in exactly
-    `analyze_downloads.scan_volume()`'s shape (marked files hashed in place, not copied).
+    (fs_scan skip-list **minus `$Recycle.Bin`**, depth ≤ 16, excluding the evidence output
+    folder) for files with a `:Zone.Identifier` stream; writes
+    `disk/downloads/zone_identifier_scan.json` in exactly `analyze_downloads.scan_volume()`'s
+    shape (marked files hashed in place, not copied). Hits inside the Recycle Bin get
+    `recycle_bin` = original path / deletion time / size from the matching `$I` file
+    (`analyze_downloads.recycle_bin_info()`, shared with the mounted-volume scan; handles
+    `$I` v1 and v2 and files inside deleted folders).
 - **Analyze** (`__init__.py: run(config, profile_dir, tor_dir, disk_image, disk_root,
   downloads_scan)`):
   - `profile_dir` → `recover_evidence.analyze_profile()` on a verified disposable working copy

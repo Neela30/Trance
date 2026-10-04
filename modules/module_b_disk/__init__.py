@@ -204,6 +204,13 @@ def _download_artifacts(scan: dict) -> list[Artifact]:
             correlation = "created outside the last recorded Tor daemon window"
         else:
             correlation = "no Tor daemon window available for correlation"
+        recycled = hit.get("recycle_bin")
+        if recycled:
+            deleted = f", deleted {recycled['deleted_utc']}" if recycled.get("deleted_utc") else ""
+            correlation += (
+                f"; in the Recycle Bin (originally "
+                f"{recycled.get('original_path') or 'unknown: no $I record'}{deleted})"
+            )
         artifacts.append(
             Artifact(
                 MODULE_NAME,

@@ -6,7 +6,8 @@ mount, which needs a separately imaged and mounted volume that trance-acquire.ex
 never produces. On the live target the same evidence is directly readable: Windows
 exposes the mark-of-the-web as the `<file>:Zone.Identifier` stream and NTFS creation
 times through os.stat. This walks every drive (the same skip-list as Tor Browser
-auto-discovery, so no assumption about a Downloads folder) and writes a report in
+auto-discovery minus $Recycle.Bin, so no assumption about a Downloads folder and
+deleted downloads are still found) and writes a report in
 exactly scan_volume()'s shape, so module_b_disk.correlate_downloads() and the report
 presenter consume it unchanged.
 
@@ -24,12 +25,19 @@ from pathlib import Path
 
 from core import fs_scan
 from core.hashing import hash_file
-from modules.module_b_disk.analyze_downloads import ZONE_STREAM, parse_zone_identifier
+from modules.module_b_disk.analyze_downloads import (
+    ZONE_STREAM,
+    parse_zone_identifier,
+    recycle_bin_info,
+)
 
 SCAN_METHOD = "live_windows"
 # Deeper than Tor Browser discovery's default: a download can sit anywhere under
 # C:\Users\<name>\AppData\..., which is already 4-5 levels down.
 SCAN_MAX_DEPTH = 16
+# Tor Browser discovery skips $Recycle.Bin; this scan must not: a download the suspect
+# deleted sits there with its Zone.Identifier stream intact.
+SKIP_DIR_NAMES = frozenset(fs_scan.SKIP_DIR_NAMES - {"$Recycle.Bin"})
 
 
 def _read_stream_windows(path: str, stream: str) -> bytes | None:
@@ -75,7 +83,7 @@ def scan_live(
     unreadable = 0
     hits = []
     for root in roots:
-        for current, dirnames, filenames in fs_scan.walk_pruned(root, max_depth):
+        for current, dirnames, filenames in fs_scan.walk_pruned(root, max_depth, SKIP_DIR_NAMES):
             if any(current == e or current.is_relative_to(e) for e in excluded):
                 dirnames[:] = []
                 continue
@@ -93,15 +101,17 @@ def scan_live(
                 except OSError:
                     unreadable += 1
                     continue
-                hits.append(
-                    {
-                        "path": str(path),
-                        "size": st.st_size,
-                        "sha256": digest,
-                        "zone_identifier": parse_zone_identifier(stream),
-                        "timestamps": file_times(st),
-                    }
-                )
+                hit = {
+                    "path": str(path),
+                    "size": st.st_size,
+                    "sha256": digest,
+                    "zone_identifier": parse_zone_identifier(stream),
+                    "timestamps": file_times(st),
+                }
+                recycled = recycle_bin_info(path)
+                if recycled:
+                    hit["recycle_bin"] = recycled
+                hits.append(hit)
     hits.sort(key=lambda h: h["timestamps"]["created_utc"] or h["timestamps"]["modified_utc"] or "")
     return {
         "scan_method": SCAN_METHOD,

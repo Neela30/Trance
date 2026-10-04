@@ -88,6 +88,74 @@ def parse_zone_identifier(raw: bytes) -> dict:
     }
 
 
+RECYCLE_BIN_DIR = "$recycle.bin"  # matched case-insensitively
+_RECYCLE_V1_NAME_BYTES = 520  # Vista-8.1: fixed 260 UTF-16 characters
+
+
+def parse_recycle_index(raw: bytes) -> dict | None:
+    """Parse a Recycle Bin $I file (Vista+). Layout: int64 version, int64 original
+    size, FILETIME deletion time, then the original path -- fixed 520 bytes of UTF-16
+    in version 1 (Vista-8.1), or a uint32 character count + UTF-16 in version 2
+    (Windows 10+)."""
+    if len(raw) < 24:
+        return None
+    version, size, deleted = struct.unpack_from("<qqQ", raw, 0)
+    if version == 2 and len(raw) >= 28:
+        count = struct.unpack_from("<I", raw, 24)[0]
+        name_bytes = raw[28 : 28 + count * 2]
+    elif version == 1:
+        name_bytes = raw[24 : 24 + _RECYCLE_V1_NAME_BYTES]
+    else:
+        return None
+    name = name_bytes.decode("utf-16-le", errors="replace").split("\x00", 1)[0]
+    return {
+        "original_path": name or None,
+        "original_size": size,
+        "deleted_utc": _filetime_to_utc(deleted),
+        "index_version": version,
+    }
+
+
+def recycle_bin_info(path: Path) -> dict | None:
+    """For a file inside $Recycle.Bin, where it originally lived and when it was
+    deleted. Windows renames a deleted item to $R<id><ext> and keeps the original
+    path in the matching $I<id><ext>; a deleted *folder* is a $R directory, so a file
+    inside it gets the folder's original path plus its own relative part. Returns None
+    for files outside the Recycle Bin."""
+    parts = path.parts
+    lowered = [p.lower() for p in parts]
+    if RECYCLE_BIN_DIR not in lowered:
+        return None
+    index = lowered.index(RECYCLE_BIN_DIR)
+    after = parts[index + 1 :]
+    info: dict = {
+        "sid": after[0] if after else None,
+        "recycled_name": after[1] if len(after) > 1 else None,
+        "original_path": None,
+        "original_size": None,
+        "deleted_utc": None,
+        "index_file": None,
+    }
+    if len(after) < 2 or not after[1].upper().startswith("$R"):
+        return info  # e.g. a desktop.ini, or a layout this doesn't recognise
+    index_file = Path(*parts[: index + 2]) / ("$I" + after[1][2:])
+    info["index_file"] = index_file.name
+    try:
+        parsed = parse_recycle_index(index_file.read_bytes())
+    except OSError:
+        parsed = None
+    if parsed:
+        original = parsed["original_path"]
+        if original and len(after) > 2:  # inside a deleted folder
+            original = "\\".join([original.rstrip("\\"), *after[2:]])
+        info.update(
+            original_path=original,
+            original_size=parsed["original_size"],
+            deleted_utc=parsed["deleted_utc"],
+        )
+    return info
+
+
 def ntfs_timestamps(path: str) -> dict:
     raw = _read_xattr(path, NTFS_TIMES_XATTR)
     if raw and len(raw) >= 32:
@@ -134,15 +202,17 @@ def scan_volume(root: Path) -> dict:
             except OSError:
                 unreadable += 1
                 continue
-            hits.append(
-                {
-                    "path": os.path.relpath(path, root),
-                    "size": size,
-                    "sha256": digest,
-                    "zone_identifier": parse_zone_identifier(stream),
-                    "timestamps": ntfs_timestamps(path),
-                }
-            )
+            hit = {
+                "path": os.path.relpath(path, root),
+                "size": size,
+                "sha256": digest,
+                "zone_identifier": parse_zone_identifier(stream),
+                "timestamps": ntfs_timestamps(path),
+            }
+            recycled = recycle_bin_info(Path(path))
+            if recycled:
+                hit["recycle_bin"] = recycled
+            hits.append(hit)
     hits.sort(key=lambda h: h["timestamps"]["created_utc"] or h["timestamps"]["modified_utc"] or "")
     return {
         "volume_root": str(root),
