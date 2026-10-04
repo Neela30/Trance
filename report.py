@@ -71,5 +71,5 @@ def render_report(findings: dict) -> str:
 def write_report(findings: dict, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / REPORT_FILENAME
-    path.write_text(render_report(findings))
+    path.write_text(render_report(findings), encoding="utf-8")
     return path
