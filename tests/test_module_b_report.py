@@ -179,6 +179,7 @@ def test_context_shapes_every_section():
     assert downloads["window"] == {
         "start": "2026-09-19 07:43:51 UTC",
         "end": "2026-09-19 08:32:51 UTC",
+        "end_basis": None,
     }
     assert downloads["hits"][0]["created"] == "2026-09-19 08:12:26 UTC"
     assert downloads["hits"][1]["created"] is None

@@ -28,6 +28,7 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
             "tor_dir": _path("tor_dir"),
             "disk_image": None,
             "disk_root": None,
+            "downloads_scan": _path("downloads_scan"),
         },
         "module_c_memory": {
             "dump": _path("dump"),

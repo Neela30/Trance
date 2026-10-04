@@ -248,7 +248,7 @@
       <dd>{% if disk.daemon.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.daemon.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest — {{ disk.daemon.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.daemon.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
       {% endif %}
       {% if disk.downloads %}
-      <dt>Volume scanned</dt><dd>{{ disk.downloads.volume_root }} — {{ "{:,}".format(disk.downloads.files_walked) }} files walked in {{ disk.downloads.scan_seconds }}s</dd>
+      <dt>Volume scanned</dt><dd>{{ disk.downloads.volume_root }}{% if disk.downloads.live_scan %} (live scan on the target at acquisition){% endif %} — {{ "{:,}".format(disk.downloads.files_walked) }} files walked in {{ disk.downloads.scan_seconds }}s</dd>
       {% endif %}
     </dl>
   </div>
@@ -378,7 +378,7 @@
       <strong>Network origin and timing, not the source site.</strong> Windows tags every file a browser saves from the network with a <span class="mono">Zone.Identifier</span> stream; locally created or USB/ISO-copied files never carry one. Tor Browser deliberately omits the <span class="mono">HostUrl</span>/<span class="mono">ReferrerUrl</span> fields other browsers write there, so the originating address is not recoverable from the file. Only the last Tor session's window is reconstructable from daemon artifacts.
     </div>
     {% if disk.downloads.window %}
-    <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>.</p>
+    <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>{% if disk.downloads.window.end_basis %} (end: {{ disk.downloads.window.end_basis }}){% endif %}.</p>
     {% elif 'tor_daemon' in disk.supplied %}
     <p class="note" style="margin-bottom:12px;">No daemon window could be derived (missing <span class="mono">lock</span> or <span class="mono">state</span>) — files are listed without correlation.</p>
     {% else %}

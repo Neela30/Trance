@@ -206,11 +206,18 @@ def _downloads_context(scan: dict) -> dict:
     window = scan.get("tor_daemon_window")
     return {
         "volume_root": scan.get("volume_root"),
+        "live_scan": scan.get("scan_method") == "live_windows",
         "files_walked": scan.get("files_walked", 0),
         "scan_seconds": scan.get("scan_seconds"),
         "xattr_support": scan.get("xattr_support"),
         "window": (
-            {"start": _iso(window["start_utc"]), "end": _iso(window["end_utc"])} if window else None
+            {
+                "start": _iso(window["start_utc"]),
+                "end": _iso(window["end_utc"]),
+                "end_basis": window.get("end_basis"),
+            }
+            if window
+            else None
         ),
         "hits": hits,
         "inside": sum(1 for h in hits if h["within_window"] is True),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from pathlib import Path
 
 from core.config import TranceConfig
@@ -22,14 +23,48 @@ def _parse_utc(value: str | None) -> dt.datetime | None:
 
 
 def daemon_window(daemon: dict) -> dict | None:
-    """Bound the last Tor session: lock creation to the newest daemon write."""
+    """Bound the last Tor session: lock creation to the newest daemon write.
+
+    If acquisition saw tor.exe still running, the session hadn't ended: tor only
+    rewrites `state` periodically, so a download after its last write would otherwise
+    fall outside a window that was in fact still open. The end extends to the capture
+    time instead."""
     start = _parse_utc(daemon.get("daemon_start_utc"))
     ends = [_parse_utc(v) for v in daemon.get("file_mtimes_utc", {}).values()]
     ends.append(_parse_utc(daemon.get("state", {}).get("last_written_utc")))
     ends = [e for e in ends if e]
-    if not start or not ends:
+    metadata = daemon.get("filesystem_metadata") or {}
+    captured = (
+        _parse_utc(metadata.get("captured_at_utc"))
+        if metadata.get("tor_running_at_capture") is True
+        else None
+    )
+    if not start or not (ends or captured):
         return None
-    return {"start_utc": start.isoformat(), "end_utc": max(ends).isoformat()}
+    end = max(ends + ([captured] if captured else []))
+    return {
+        "start_utc": start.isoformat(),
+        "end_utc": end.isoformat(),
+        "end_basis": (
+            "capture time (tor.exe still running)" if end == captured else "last daemon write"
+        ),
+    }
+
+
+def load_downloads_scan(path: Path) -> dict:
+    """Load the acquire-side live Zone.Identifier scan (acquire_downloads.scan_live),
+    verifying its folder's hashes.sha256 first, same as the profile/tor_dir copies."""
+    from core.exceptions import IntegrityError
+    from modules.module_b_disk.evidence import verify_hashes
+
+    path = Path(path).resolve(strict=True)
+    verification = verify_hashes(path.parent)
+    failures = {k: v for k, v in verification.items() if v["status"] != "match"}
+    if failures:
+        raise IntegrityError(f"Manifest verification failed: {failures}")
+    scan = json.loads(path.read_text(encoding="utf-8"))
+    scan["hash_verification"] = verification
+    return scan
 
 
 def correlate_downloads(scan: dict, window: dict | None) -> dict:
@@ -290,9 +325,10 @@ def run(
     tor_dir: Path | None = None,
     disk_image: Path | None = None,
     disk_root: Path | None = None,
+    downloads_scan: Path | None = None,
     **_: object,
 ) -> ModuleResult:
-    if not any((profile_dir, tor_dir, disk_image, disk_root)):
+    if not any((profile_dir, tor_dir, disk_image, disk_root, downloads_scan)):
         return ModuleResult(
             module=MODULE_NAME, status="skipped", message="no disk evidence supplied"
         )
@@ -334,6 +370,19 @@ def run(
         except Exception as exc:
             details["raw_carve"] = {"error": f"{type(exc).__name__}: {exc}"}
             errors.append("raw-image carve failed")
+    if downloads_scan and not disk_root:
+        # A mounted volume (disk_root) is the stronger source when both exist; the live
+        # scan is what trance-acquire.exe produces when there's no imaged volume.
+        try:
+            daemon = details.get("tor_daemon", {})
+            window = daemon_window(daemon) if not daemon.get("error") else None
+            details["downloads"] = correlate_downloads(
+                load_downloads_scan(Path(downloads_scan)), window
+            )
+            artifacts.extend(_download_artifacts(details["downloads"]))
+        except Exception as exc:
+            details["downloads"] = {"error": f"{type(exc).__name__}: {exc}"}
+            errors.append("downloads scan analysis failed")
     if disk_root:
         try:
             from modules.module_b_disk.analyze_downloads import scan_volume

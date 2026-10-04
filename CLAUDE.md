@@ -145,14 +145,30 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
     Documents first, then every drive; skip-list of system dirs; depth ≤ 8). Several installs
     → picks the one whose `torrc` was modified most recently, records the others in
     `other_installations_found`.
-  - Plain file copy, **not VSS** — copying while Tor Browser runs can catch a sqlite db
-    mid-write.
-- **Analyze** (`__init__.py: run(config, profile_dir, tor_dir, disk_image, disk_root)`):
+  - Plain file copy (`shutil.copy2`), **not VSS** — copying while Tor Browser runs can catch a
+    sqlite db mid-write. Each file is copied independently: one that can't be read (the
+    running `tor.exe` keeps `lock` locked) goes under `failed` instead of aborting the rest.
+  - **Source timestamps**: every file's original created/modified/accessed times are read
+    *before* copying into `filesystem_metadata.json` next to the copy (hashed by the manifest).
+    Copies get fresh timestamps — on the target and again on every examiner-side `cp` — so
+    this file is the only record of when tor wrote them; `analyze_tor_datadir` prefers it.
+    `tor_dir`'s copy also records `tor_running_at_capture` (psutil).
+  - **Live downloads scan** (`acquire_downloads.py`, Windows only): walks every drive
+    (fs_scan skip-list, depth ≤ 16, excluding the evidence output folder) for files with a
+    `:Zone.Identifier` stream; writes `disk/downloads/zone_identifier_scan.json` in exactly
+    `analyze_downloads.scan_volume()`'s shape (marked files hashed in place, not copied).
+- **Analyze** (`__init__.py: run(config, profile_dir, tor_dir, disk_image, disk_root,
+  downloads_scan)`):
   - `profile_dir` → `recover_evidence.analyze_profile()` on a verified disposable working copy
     (`evidence.working_copy()`); filters Tor Browser's shipped default bookmarks
     (`DEFAULT_BOOKMARK_URLS`). An inert profile is *expected* (permanent private browsing).
   - `tor_dir` → `analyze_tor_datadir.py`: guards used, circuits, consensus validity window,
     daemon start (`lock`), onion client-auth credentials.
+  - `downloads_scan` (live scan above; auto-resolved by `analyze_evidence`, so the GUI runs it
+    with no extra input) → hash-verified, then `correlate_downloads()` against
+    `daemon_window()`. The window is `lock` time → newest daemon write, extended to the
+    capture time when `tor_running_at_capture` (tor only rewrites `state` periodically).
+    `disk_root` takes precedence when both are given.
   - `disk_image` → `carve_onion_strings.py` raw byte carve (slow, optional).
   - `disk_root` (read-only ntfs-3g mount with `show_sys_files,streams_interface=windows`) →
     `analyze_downloads.py` (Zone.Identifier internet-origin files correlated to the daemon
@@ -161,7 +177,10 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
     download renames → browser-family attribution, Tor file-activity timeline).
 - **Report**: dedicated presenter `modules/module_b_disk/report.py`.
 - Note: `acquire_all.py` never produces `--disk-image` or `--disk-root` inputs — those need a
-  separate imaging step (not implemented; see §8).
+  separate imaging step (not implemented; see §8). The downloads correlation no longer needs
+  them (live scan), but `$MFT`/`$UsnJrnl` and pagefile/hiberfil residue still do.
+- Known gap: any sub-step error (e.g. an incomplete profile) sets the whole module to
+  `error`, and the report then drops Module B's dedicated presenter for the generic table.
 
 ### Module C — memory (`modules/module_c_memory/`) — the most-developed module
 
