@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,12 @@ from PySide6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
 from gui.theme import load_stylesheet
+
+# The report tab is a static HTML page; Chromium's GPU path buys nothing there and
+# segfaults QtWebEngine on some Linux/Wayland setups ("GBM is not supported ...
+# Fallback to Vulkan rendering" followed by a crash as soon as a page loads). Must be
+# set before QtWebEngine initializes; an explicit value from the environment wins.
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
 
 
 def main(argv: list[str] | None = None) -> int:
