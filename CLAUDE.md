@@ -266,13 +266,33 @@ ruff check . && black --check .
 - `main_window.py` — `QTabWidget`: **Analyse**, **Report**, **History**. Wires signals:
   analysis finished → load report + refresh history; history "view" → load report;
   history delete → clear report tab if it showed that case + refresh recent cases.
-- `analyse_tab.py` — 720px centered form: evidence folder (read-only, `NoFocus`, drag-and-drop,
-  dashed when empty), case name, collapsible targeting (onion/host/username), Run button,
-  progress bar, live status dot (`StatusIndicator`), bottom panel that shows **Recent cases**
-  when idle and a **Live log** while running.
-- `pipeline_worker.py` — `QThread` running `main.run_pipeline()`; captures the pipeline's
-  `print()` output via `contextlib.redirect_stdout` into a line-emitting stream → `log`
-  signal. (stdout redirect is process-global; safe only because one run at a time.)
+- **The GUI is the primary analysis interface** and covers every analysis-side CLI flag;
+  `main.py`/`analyze_evidence.py` stay as the engine and a scriptable fallback.
+  `trance-acquire.exe` stays CLI (it runs on the target).
+- `analyse_tab.py` — 720px centered, scrollable form: evidence folder (optional; read-only,
+  `NoFocus`, drag-and-drop), case name, and collapsible sections (`advanced_inputs.py`):
+  targeting; **Review detected inputs** (each auto-discovered input with Change…/reset —
+  the `--system/--ntuser/--amcache/--dump/--disk-profile/--tor-dir/--downloads-scan`
+  overrides); **disk image or mounted volume** (`--disk-image` carve, mount-from-the-app,
+  or an already-mounted `--disk-root`); **memory options** (`--source-type`, `--vol3-path`
+  auto-filled from PATH, `--vol3-extract-process/-pid`). Run becomes **Cancel** while
+  running. Bottom panel: **Recent cases** idle, **Live log** while running.
+- `analysis_request.py` (Qt-free) — `AnalysisRequest` dataclass = the form; `effective_inputs()`
+  merges `resolve_evidence()` with overrides; `validate()` mirrors `main.main()`'s rules plus
+  form-only ones (returns errors + warnings). JSON round-trip for the child process.
+- `analysis_runner.py` (Qt-free) — the analysis runs as a **child process** (`gui_main.py
+  --run-analysis <request.json>`; frozen: the same exe re-launches itself) so Cancel can stop
+  it; stdout carries log lines plus `@@TRANCE {json}` progress/result/error lines. Cancel
+  removes the case folder only if this run created it.
+- `mount_helper.py` (stdlib only, **runs as root via pkexec**, `gui_main.py --mount-helper` when
+  frozen) — validates the image (regular file; refuses VirtualBox *differencing* VDIs by
+  header type 4 at 0x4C), `qemu-nbd --read-only`, mounts the largest NTFS partition with
+  ntfs-3g `ro,show_sys_files,streams_interface=windows` under `/run/trance-mounts/`, then
+  waits: "unmount" on stdin **or stdin EOF** (GUI gone) unmounts and detaches. One password
+  prompt per run. Linux only (`processes.mount_support()` disables it elsewhere).
+- `processes.py` — Qt wrappers: `AnalysisProcess` (QProcess, signals, terminate→kill cancel)
+  and `MountSession`. Analyse tab order: mount → analyse with `disk_root=<mountpoint>` →
+  unmount → show result; also unmounts on failure/cancel/window close.
 - Progress bar: 0–100 with a `QTimer` easing toward the last real checkpoint (25/50/75/100).
   Honest limitation: there are only 4 real checkpoints; it's visual smoothing.
 - `report_tab.py` — `QWebEngineView` loading the existing `report.html` (paths must be
@@ -281,7 +301,8 @@ ruff check . && black --check .
   Sortable table with filter box, relative-time "Generated" column (ISO in tooltip), status
   chips painted by a `QStyledItemDelegate`, selection-gated View/Delete, Delete behind a
   confirmation dialog (`shutil.rmtree` of the case dir).
-- `history.py`, `pipeline_inputs.py` — **Qt-free** pure logic, unit-tested without PySide6.
+- `history.py`, `pipeline_inputs.py`, `analysis_request.py`, `analysis_runner.py`,
+  `mount_helper.py` — **Qt-free** pure logic, unit-tested without PySide6.
   Keep new logic Qt-free where possible; CI does not install PySide6.
 - `theme.qss` + `theme.py` — styling matching the report's CSS tokens (`--bg #14181b`,
   `--surface #1b2126`, `--accent #e2694f`, `--confirm #4fae84`, `--noise #c9a552`, …).
@@ -425,9 +446,10 @@ workflow on large changes):
 - CI's `compileall` step skips `gui/`, `acquire_all.py`, `analyze_evidence.py`, `gui_main.py`.
 - `yara-python` is in requirements but unused; `volatility3` is only needed as the external
   `vol` CLI; `click` is only used by `modules/module_a_registry/cli.py`.
-- GUI: no cancel for a running analysis; can't pass `--vol3-path`, `--disk-root`,
-  `--disk-image` from the GUI; Recent Cases shows raw ISO timestamps (History uses relative
-  time); case-name validation is duplicated between `main.py` and `gui/analyse_tab.py`.
+- GUI: Recent Cases shows raw ISO timestamps (History uses relative time); case-name and
+  output checks exist in both `main.py` and `gui/analysis_request.validate()`. The in-app
+  mount needs pkexec + a polkit agent; its root path (qemu-nbd/ntfs-3g) is covered
+  only by unit tests of the pure parts until a real run through the GUI.
 - `output/` contains stale results from older code (e.g. `output/vm-run-*` predate Module A;
   `output/Test002` shows `host_anchoring.applied: false` although current code applies it for
   that input — verified with a synthetic dump). Don't treat old outputs as current behavior.
