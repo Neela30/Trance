@@ -166,6 +166,109 @@ def test_component_timeline_correlates_same_basename_across_hive_types():
     assert ctx["corroborated_components"] == 1
 
 
+def test_linked_launches_groups_same_timestamp_different_basenames():
+    # Real pattern: a .lnk shortcut and the .exe it launched both get a UserAssist
+    # entry with the identical recorded instant -- same event, not cross-hive
+    # corroboration (both are UserAssist).
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "UserAssist": [
+                {
+                    "description": "UserAssist evidence for 'E:\\Tor Browser\\Tor Browser.lnk' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-09-03T04:41:53.211000+00:00",
+                },
+                {
+                    "description": "UserAssist evidence for 'E:\\Tor Browser\\Browser\\firefox.exe' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-09-03T04:41:53.211000+00:00",
+                },
+                {
+                    "description": "UserAssist evidence for 'C:\\unrelated.exe' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                },
+            ]
+        },
+        "hives_provided": {"ntuser": True, "system": False, "amcache": False},
+    }
+    ctx = build_context(details)
+    assert len(ctx["linked_launches"]) == 1
+    link = ctx["linked_launches"][0]
+    assert link["timestamp"] == "2026-09-03T04:41:53.211000+00:00"
+    assert link["paths"] == [
+        "E:\\Tor Browser\\Browser\\firefox.exe",
+        "E:\\Tor Browser\\Tor Browser.lnk",
+    ]
+
+
+def test_linked_launches_empty_when_no_shared_timestamps():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "UserAssist": [
+                {
+                    "description": "UserAssist evidence for 'a.exe' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "description": "UserAssist evidence for 'b.exe' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-01-02T00:00:00+00:00",
+                },
+            ]
+        },
+        "hives_provided": {"ntuser": True, "system": False, "amcache": False},
+    }
+    ctx = build_context(details)
+    assert ctx["linked_launches"] == []
+
+
+def test_quiet_hive_notes_flag_supplied_but_empty_amcache_and_shimcache():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "UserAssist": [
+                {
+                    "description": "UserAssist evidence for 'a.exe' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-01-01T00:00:00+00:00",
+                }
+            ]
+        },
+        "hives_provided": {"ntuser": True, "system": True, "amcache": True},
+    }
+    ctx = build_context(details)
+    assert len(ctx["quiet_hive_notes"]) == 2
+    assert any("Amcache" in note for note in ctx["quiet_hive_notes"])
+    assert any("ShimCache" in note for note in ctx["quiet_hive_notes"])
+
+
+def test_quiet_hive_notes_absent_when_hive_not_supplied_or_has_findings():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "ShimCache": [
+                {
+                    "description": "ShimCache/AppCompatCache entry for 'a.exe'.",
+                    "source": "SYSTEM",
+                    "timestamp": None,
+                }
+            ]
+        },
+        # amcache not supplied at all -> no note; system supplied and has findings -> no note.
+        "hives_provided": {"ntuser": False, "system": True, "amcache": False},
+    }
+    ctx = build_context(details)
+    assert ctx["quiet_hive_notes"] == []
+
+
 def test_component_timeline_empty_when_no_paths_extractable():
     details = {
         "summary": "x",

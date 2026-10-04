@@ -174,9 +174,9 @@
           <tr>
             <td class="val">{{ c.basename }}{% if c.paths|length > 1 %}<br><span class="off">({{ c.paths|length }} path variants)</span>{% endif %}</td>
             <td class="val">{% for t in c.seen_in %}<span class="chip {{ 'high' if t in ('UserAssist', 'Amcache') else 'low' if t == 'RecentDocs' else '' }}">{{ t }}</span> {% endfor %}</td>
-            <td class="off">{{ c.amcache_first_seen or "—" }}</td>
+            <td class="off">{{ c.amcache_first_seen|fmt_ts }}</td>
             <td class="off">{{ c.userassist_run_count or "—" }}</td>
-            <td class="off">{{ c.userassist_last_run or "—" }}</td>
+            <td class="off">{{ c.userassist_last_run|fmt_ts }}</td>
             <td class="off">{{ c.shimcache_hits or "—" }}</td>
           </tr>
           {% endfor %}
@@ -186,6 +186,19 @@
     {% if registry.corroborated_components %}
     <div class="callout">
       <strong>Independent corroboration:</strong> {{ registry.corroborated_components }} file{{ "s" if registry.corroborated_components != 1 }} above {{ "is" if registry.corroborated_components == 1 else "are" }} confirmed by 2 or more separate OS subsystems (execution history, cache insertion, install record) agreeing independently — stronger than any single artifact type's say-so alone.
+    </div>
+    {% endif %}
+    {% for note in registry.quiet_hive_notes %}
+    <p class="note">{{ note }}</p>
+    {% endfor %}
+    {% if registry.linked_launches %}
+    <div class="callout">
+      <strong>Likely linked launches:</strong> these UserAssist entries share the exact same recorded instant — very likely one user action viewed from two angles (e.g. a shortcut and the program it launched), not independent corroboration from a separate OS subsystem.
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        {% for link in registry.linked_launches %}
+        <li class="mono" style="font-size:12px;">{{ link.timestamp|fmt_ts }} — {{ link.paths|join(" ↔ ") }}</li>
+        {% endfor %}
+      </ul>
     </div>
     {% endif %}
     {% else %}
@@ -205,6 +218,23 @@
           <span class="count"><span class="chip {{ 'high' if s.confidence == 'high' else ('low' if s.confidence == 'low' else '') }}">{{ s.confidence }}</span> {{ s.findings|length }} finding{{ "s" if s.findings|length != 1 }}</span>
         </div>
         <div class="table-scroll">
+          {% if s.type == 'UserAssist' %}
+          <table class="evidence-table">
+            <thead><tr><th>Path</th><th>Run count</th><th>Focus count</th><th>Focus time (ms)</th><th>Timestamp</th><th>Occ.</th></tr></thead>
+            <tbody>
+              {% for f in s.findings %}
+              <tr>
+                <td class="val">{{ f.path or "—" }}</td>
+                <td class="off">{{ f.run_count if f.run_count is not none else "—" }}</td>
+                <td class="off">{{ f.focus_count if f.focus_count is not none else "—" }}</td>
+                <td class="off">{{ f.total_focus_time_ms if f.total_focus_time_ms is not none else "—" }}</td>
+                <td class="off">{{ f.timestamp|fmt_ts }}</td>
+                <td class="off">{{ f.occurrences }}{% if f.occurrences > 1 %} (collapsed dup.){% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% else %}
           <table class="evidence-table">
             <thead><tr><th>Path</th><th>Detail</th><th>Timestamp</th><th>Occ.</th></tr></thead>
             <tbody>
@@ -212,17 +242,17 @@
               <tr>
                 <td class="val">{{ f.path or "—" }}</td>
                 <td class="val">
-                  {% if s.type == 'UserAssist' %}run_count={{ f.run_count }}, focus_count={{ f.focus_count }}, focus_time_ms={{ f.total_focus_time_ms }}
-                  {% elif s.type == 'Amcache' %}sha1={{ f.sha1 or "—" }}, size={{ f.size or "—" }}
+                  {% if s.type == 'Amcache' %}sha1={{ f.sha1 or "—" }}, size={{ f.size or "—" }}
                   {% else %}{{ f.description }}
                   {% endif %}
                 </td>
-                <td class="off">{{ f.timestamp or "—" }}</td>
+                <td class="off">{{ f.timestamp|fmt_ts }}</td>
                 <td class="off">{{ f.occurrences }}{% if f.occurrences > 1 %} (collapsed dup.){% endif %}</td>
               </tr>
               {% endfor %}
             </tbody>
           </table>
+          {% endif %}
         </div>
         {% endfor %}
       </div>

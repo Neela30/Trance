@@ -162,6 +162,59 @@ def _build_component_timeline(annotated_by_type: dict[str, list[dict]]) -> list[
     return timeline
 
 
+def _find_linked_launches(annotated_by_type: dict[str, list[dict]]) -> list[dict]:
+    """UserAssist entries that fired at the exact same recorded instant are very likely
+    one user action viewed from two angles (e.g. a .lnk shortcut and the .exe it
+    launched) -- not independent corroboration (both come from the same hive/subsystem),
+    but still a link a reader would otherwise only notice by eye-comparing timestamps
+    across unrelated-looking rows (see e.g. "Tor Browser.lnk" and "firefox.exe" sharing a
+    timestamp in a real acquisition). Grouped and sorted explicitly so this is as
+    repeatable as the rest of the presentation layer -- never relies on dict/set order.
+    """
+    basenames_by_timestamp: dict[str, set[str]] = {}
+    paths_by_timestamp: dict[str, list[str]] = {}
+    for finding in annotated_by_type.get("UserAssist", []):
+        timestamp = finding.get("timestamp")
+        path = finding.get("path")
+        if not timestamp or not path:
+            continue
+        seen_basenames = basenames_by_timestamp.setdefault(timestamp, set())
+        basename = _basename(path)
+        if basename not in seen_basenames:
+            seen_basenames.add(basename)
+            paths_by_timestamp.setdefault(timestamp, []).append(path)
+
+    linked = [
+        {"timestamp": timestamp, "paths": sorted(paths)}
+        for timestamp, paths in paths_by_timestamp.items()
+        if len(basenames_by_timestamp[timestamp]) > 1
+    ]
+    linked.sort(key=lambda entry: entry["timestamp"])
+    return linked
+
+
+def _quiet_hive_notes(hives_provided: dict, annotated_by_type: dict[str, list[dict]]) -> list[str]:
+    """A component showing no Amcache/ShimCache hits isn't necessarily evidence those
+    subsystems never saw Tor -- both have reasons to stay silent that have nothing to do
+    with whether Tor ran. Surfaced explicitly here instead of leaving a reader to infer
+    it from a bare "—" in the component table."""
+    notes = []
+    if hives_provided.get("amcache") and not annotated_by_type.get("Amcache"):
+        notes.append(
+            "Amcache.hve was supplied but contained no Tor-related entries. Amcache is "
+            "populated by Windows' periodic Compatibility Appraiser scan, not at install "
+            "or run time — this usually means that scan hasn't run since the activity "
+            "above, not that Tor wasn't used."
+        )
+    if hives_provided.get("system") and not annotated_by_type.get("ShimCache"):
+        notes.append(
+            "SYSTEM was supplied but contained no Tor-related ShimCache entries. "
+            "ShimCache is a bounded, insertion-order cache that reboots or other "
+            "activity can evict entries from — its absence doesn't rule out execution."
+        )
+    return notes
+
+
 def build_context(details: dict) -> dict:
     """Presentation context for the registry section of the case report."""
     findings_by_type = details.get("findings_by_type", {})
@@ -194,4 +247,6 @@ def build_context(details: dict) -> dict:
         "total_findings": sum(len(s["findings"]) for s in sections),
         "component_timeline": component_timeline,
         "corroborated_components": sum(1 for c in component_timeline if len(c["seen_in"]) > 1),
+        "linked_launches": _find_linked_launches(annotated_by_type),
+        "quiet_hive_notes": _quiet_hive_notes(hives_provided, annotated_by_type),
     }

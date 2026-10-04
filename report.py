@@ -10,6 +10,7 @@ later without touching this file's rendering.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -30,6 +31,25 @@ PRESENTERS: dict[str, Callable[[dict], dict]] = {
 }
 
 
+def _format_timestamp(value: str | datetime | None) -> str:
+    """One consistent, human-readable rendering for every timestamp the report shows --
+    the raw value is either an ISO-8601 string (straight from Artifact.timestamp) or an
+    already-parsed datetime (module_a_registry's component-timeline fields), and left to
+    each one's own default text form, they used to show up differently (microseconds and
+    a "+00:00" offset) depending on which path produced them."""
+    if not value:
+        return "—"
+    dt = value
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except ValueError:
+            return value
+    if not isinstance(dt, datetime):
+        return str(dt)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+
+
 def render_report(findings: dict) -> str:
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
@@ -39,6 +59,7 @@ def render_report(findings: dict) -> str:
         trim_blocks=True,
         lstrip_blocks=True,
     )
+    env.filters["fmt_ts"] = _format_timestamp
     template = env.get_template(TEMPLATE_NAME)
 
     presented: dict[str, dict] = {}

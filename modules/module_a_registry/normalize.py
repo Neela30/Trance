@@ -30,6 +30,19 @@ from .constants import (
 
 MODULE_NAME = "module_a_registry"
 
+# Windows FILETIME's epoch is 1601-01-01 -- a raw FILETIME value of 0 (field never set)
+# converts to exactly that date, which regipy hands back as an ordinary-looking
+# timestamp. Left alone, "no timestamp recorded" displays as a real-looking date 425
+# years in the past; this catches that sentinel and turns it back into None, regardless
+# of which artifact type or sub-second precision produced it.
+_NULL_FILETIME_DATE = "1601-01-01"
+
+
+def _clean_timestamp(timestamp: str | None) -> str | None:
+    if timestamp and timestamp.startswith(_NULL_FILETIME_DATE):
+        return None
+    return timestamp
+
 
 def _first(entry: dict, keys: tuple[str, ...]) -> object | None:
     for key in keys:
@@ -114,6 +127,7 @@ def normalize_entry(artifact_type: str, entry: dict, source_hive: str) -> Artifa
         raise ValueError(f"Unknown artifact_type: {artifact_type!r}") from exc
 
     description, timestamp = normalizer(entry)
+    timestamp = _clean_timestamp(timestamp)
 
     return Artifact(
         module=MODULE_NAME,

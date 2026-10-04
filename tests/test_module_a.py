@@ -145,6 +145,28 @@ class TestNormalizeEntry:
         with pytest.raises(ValueError):
             normalize_entry("NotARealType", {}, "NTUSER.DAT")
 
+    def test_null_filetime_timestamp_becomes_none(self):
+        # A raw FILETIME of 0 (field never set) decodes to exactly the Windows FILETIME
+        # epoch -- a real date string, not an error, so nothing upstream would catch it.
+        entry = {
+            "name": r"C:\Tor Browser\Browser\firefox.exe",
+            "timestamp": "1601-01-01T00:00:00+00:00",
+            "run_counter": 0,
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_USER_ASSIST, entry, "NTUSER.DAT")
+
+        assert artifact.timestamp is None
+
+    def test_real_timestamp_near_but_not_at_filetime_epoch_is_kept(self):
+        entry = {
+            "name": r"C:\Tor Browser\Browser\firefox.exe",
+            "timestamp": "1601-01-02T00:00:00+00:00",
+            "run_counter": 1,
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_USER_ASSIST, entry, "NTUSER.DAT")
+
+        assert artifact.timestamp == "1601-01-02T00:00:00+00:00"
+
 
 # ---------------------------------------------------------------------------
 # Pipeline: integrity + repeatability, with extractors mocked out.
@@ -250,6 +272,17 @@ class TestPipelineIntegrity:
             assert (
                 actions["ingest_pre_parse"] == actions["post_parse_verify"]
             ), f"Hash changed across parsing for {path} — read-only violation."
+
+    def test_summary_timestamps_are_human_readable_not_raw_isoformat(self, tmp_path):
+        output_dir = tmp_path / "out"
+        result = _run_pipeline_with_mocks(tmp_path, output_dir)
+
+        # Amcache mock timestamp is "2026-07-10T09:01:47+00:00" (install), UserAssist
+        # mock's later timestamp is "2026-07-14T14:15:22+00:00" (last run) -- both
+        # should read as "YYYY-MM-DD HH:MM:SS UTC", not the raw ISO +00:00 offset.
+        assert "2026-07-10 09:01:47 UTC" in result.summary
+        assert "2026-07-14 14:15:22 UTC" in result.summary
+        assert "+00:00" not in result.summary
 
     def test_only_tor_related_entries_survive_filtering(self, tmp_path):
         output_dir = tmp_path / "out"

@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from core.config import TranceConfig
@@ -168,6 +169,20 @@ def _update_stats(stats: dict, artifact_type: str, entry: dict) -> None:
             stats["last_executed"] = ts
 
 
+def _format_summary_timestamp(value: str | None) -> str | None:
+    """Same human-readable intent as report.py's template-side timestamp formatting,
+    but done here with stdlib only: this summary sentence also reaches plain stdout and
+    module_a_registry.json, not just the HTML report, so it can't depend on a Jinja
+    filter that only exists inside report.py's Environment."""
+    if not value:
+        return value
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+
+
 def _build_summary(
     findings: list[Artifact],
     errors: list[str],
@@ -176,11 +191,13 @@ def _build_summary(
 ) -> str:
     parts = []
     if stats["install_timestamp"]:
-        parts.append(f"Tor Browser installed {stats['install_timestamp']}")
+        parts.append(
+            f"Tor Browser installed {_format_summary_timestamp(stats['install_timestamp'])}"
+        )
     if stats["run_count_total"]:
         parts.append(f"executed {stats['run_count_total']} times")
     if stats["last_executed"]:
-        parts.append(f"last run {stats['last_executed']}")
+        parts.append(f"last run {_format_summary_timestamp(stats['last_executed'])}")
 
     if parts:
         summary = ", ".join(parts) + "."
