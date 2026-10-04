@@ -135,6 +135,32 @@ def _usnjrnl(tmp_path):
     return path
 
 
+def test_usn_window_covers_every_tor_event_not_just_the_stored_ones(tmp_path, monkeypatch):
+    # Regression: the window and count used to come from the capped event list, so
+    # once MAX_EVENTS Tor events were stored the window stopped at that event's time
+    # (18:39 on a real VM whose journal and daemon ran to 18:53).
+    monkeypatch.setattr(analyze_ntfs_journal, "MAX_EVENTS", 10)
+    records = analyze_ntfs_journal.parse_mft(_mft(tmp_path))
+    journal = [_usn_record(i + 1, 83, 70, i, 0x2, "state") for i in range(25)]
+    path = tmp_path / "J"
+    path.write_bytes(b"\x00" * 4096 + b"".join(journal) + b"\x00" * 4096)
+
+    report = analyze_ntfs_journal.analyze_usn(path, records)
+
+    assert report["tor_activity_window"] == {
+        "first_utc": T0.isoformat(),
+        "last_utc": (T0 + dt.timedelta(minutes=24)).isoformat(),
+        "events": 25,
+    }
+    assert report["tor_events_total"] == 25
+    assert report["tor_events_truncated"] is True
+    # The newest events are the ones kept, still in journal (oldest-first) order.
+    times = [e["time_utc"] for e in report["tor_events"]]
+    assert len(times) == 10
+    assert times[0] == (T0 + dt.timedelta(minutes=15)).isoformat()
+    assert times == sorted(times)
+
+
 def test_mft_parses_names_paths_streams_and_deleted_records(tmp_path):
     records = analyze_ntfs_journal.parse_mft(_mft(tmp_path))
     assert analyze_ntfs_journal.resolve_path(records, 81) == "Users\\u\\Downloads\\gone.txt"

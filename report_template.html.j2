@@ -530,7 +530,7 @@
     {% endif %}
     {% if disk.ntfs.events %}
     <details class="appendix" style="margin-top:22px;">
-      <summary>Show {{ disk.ntfs.events|length }} journal event{{ "s" if disk.ntfs.events|length != 1 }} on Tor Browser / daemon files{% if disk.ntfs.deleted_tor_files %} and {{ disk.ntfs.deleted_tor_files|length }} deleted Tor-related file{{ "s" if disk.ntfs.deleted_tor_files|length != 1 }}{% endif %}</summary>
+      <summary>Show {{ disk.ntfs.events|length }}{% if disk.ntfs.events_total > disk.ntfs.events|length %} most recent of {{ disk.ntfs.events_total }}{% endif %} journal event{{ "s" if disk.ntfs.events|length != 1 }} on Tor Browser / daemon files{% if disk.ntfs.deleted_tor_files %} and {{ disk.ntfs.deleted_tor_files|length }} deleted Tor-related file{{ "s" if disk.ntfs.deleted_tor_files|length != 1 }}{% endif %}</summary>
       <div class="appendix-body">
         {% if disk.ntfs.deleted_tor_files %}
         <p class="note" style="margin-bottom:10px;">Deleted (MFT record not in use, name retained):</p>
@@ -538,8 +538,8 @@
         <div class="appendix-row"><span class="val">{{ d.path }}</span><span class="why">{{ d.modified or "—" }}</span></div>
         {% endfor %}
         {% endif %}
-        <p class="note" style="margin:14px 0 10px;">Change journal, oldest first{% if disk.ntfs.events|length > 500 %} (first 500 shown){% endif %}:</p>
-        {% for e in disk.ntfs.events[:500] %}
+        <p class="note" style="margin:14px 0 10px;">Change journal, oldest first{% if disk.ntfs.events|length > 500 %} (most recent 500 shown){% endif %}:</p>
+        {% for e in disk.ntfs.events[-500:] %}
         <div class="appendix-row"><span class="val">{{ e.time or "—" }} · {{ e.path }}</span><span class="why">{{ e.reasons }}</span></div>
         {% endfor %}
       </div>

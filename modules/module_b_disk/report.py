@@ -318,6 +318,7 @@ def _ntfs_context(ntfs: dict) -> dict:
             if window
             else None
         ),
+        "events_total": usn.get("tor_events_total", len(usn.get("tor_events", []))),
         "events": [
             {
                 "time": _iso(e.get("time_utc")),
