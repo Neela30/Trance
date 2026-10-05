@@ -231,7 +231,8 @@ def test_module_b_orchestrates_profile_and_daemon(tmp_path):
     config = TranceConfig("test", tmp_path / "output")
     result = run_disk_module(config, profile_dir=profile, tor_dir=tor_dir)
     assert result.status == "ok"
-    assert set(result.details) == {"profile", "tor_daemon"}
+    assert set(result.details) == {"profile", "tor_daemon", "warnings"}
+    assert result.details["warnings"] == []
     assert result.details["profile"]["integrity"]["source_unchanged"] is True
     assert result.details["tor_daemon"]["integrity"]["source_unchanged"] is True
     types = {artifact.artifact_type for artifact in result.artifacts}
@@ -262,6 +263,42 @@ def test_module_b_orchestrates_profile_and_daemon(tmp_path):
             "last_modified": 123456,
         }
     ]
+
+
+def test_module_b_one_failed_source_is_partial_not_error_and_others_still_run(
+    tmp_path, monkeypatch
+):
+    """Module B already isolates each source independently (profile failing has never
+    stopped tor_dir from being analyzed) -- this confirms the status/warnings refinement
+    on top of that: "partial" (not "error", which Module B doesn't raise for this at
+    all), with a structured, traceback-carrying warning recorded for the one that
+    failed, same shape Module A now produces."""
+    profile = tmp_path / "profile"
+    tor_dir = tmp_path / "tor"
+    _create_profile(profile)
+    _create_tor_dir(tor_dir)
+
+    from modules.module_b_disk import recover_evidence
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError("synthetic profile analysis failure")
+
+    monkeypatch.setattr(recover_evidence, "analyze_profile", _raise)
+
+    config = TranceConfig("test", tmp_path / "output")
+    result = run_disk_module(config, profile_dir=profile, tor_dir=tor_dir)
+
+    assert result.status == "partial"
+    assert result.details["tor_daemon"]["integrity"]["source_unchanged"] is True
+    assert len(result.details["warnings"]) == 1
+    warning = result.details["warnings"][0]
+    assert warning["source"] == "profile"
+    assert warning["artifact_type"] == "profile analysis"
+    assert "synthetic profile analysis failure" in warning["reason"]
+    assert "ValueError" in warning["traceback"]
+    assert "synthetic profile analysis failure" in warning["traceback"]
+    types = {artifact.artifact_type for artifact in result.artifacts}
+    assert "tor_guard_usage" in types  # tor_dir's own analysis still ran and contributed
 
 
 def test_module_b_skips_without_input(tmp_path):

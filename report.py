@@ -101,8 +101,16 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
     generic: list[dict] = []
     for name, module in findings["modules"].items():
         presenter = PRESENTERS.get(name)
-        if presenter and module["status"] == "ok":
+        # "partial" (some extractors/sub-analyses failed, others didn't) still gets the
+        # module's full presenter -- narrative, tables, everything -- same as "ok". Only
+        # "error" (nothing in this module can be trusted -- e.g. an integrity hash
+        # mismatch) falls back to the generic table below. This is the fix for one failed
+        # extractor silently discarding every OTHER artifact type's real findings from
+        # the report (status used to be a strict binary, so any failure looked identical
+        # to a whole-module failure here).
+        if presenter and module["status"] in ("ok", "partial"):
             presented[name] = presenter(module["details"], resolved_tz)
+            presented[name]["module_status"] = module["status"]
             continue
         artifacts = [a for a in findings["artifacts"] if a["module"] == name]
         generic.append(
@@ -110,6 +118,7 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
                 "name": name,
                 "status": module["status"],
                 "message": module["message"],
+                "warnings": module.get("warnings", []),
                 "artifacts": artifacts[:GENERIC_TABLE_CAP],
                 "total": len(artifacts),
             }

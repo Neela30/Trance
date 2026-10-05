@@ -14,6 +14,7 @@ def _base_args(**overrides):
         "system": None,
         "amcache": None,
         "software": None,
+        "usrclass": None,
         "disk_profile": None,
         "tor_dir": None,
         "disk_image": None,
@@ -127,6 +128,19 @@ def test_resolve_from_manifest_skips_failed_categories(tmp_path):
     assert "ntuser" not in resolved
 
 
+def test_resolve_from_manifest_includes_usrclass(tmp_path):
+    manifest = {
+        "registry": {"UsrClass.dat": {"status": "ok", "path": "registry/UsrClass_alice_x.dat"}},
+        "memory": {},
+        "disk": {},
+    }
+    (tmp_path / "acquire_manifest.json").write_text(json.dumps(manifest))
+
+    resolved = analyze_evidence.resolve_evidence(tmp_path)
+
+    assert resolved["usrclass"] == str(tmp_path / "registry" / "UsrClass_alice_x.dat")
+
+
 def test_resolve_by_globbing_picks_latest_and_prefers_full_image(tmp_path):
     registry = tmp_path / "registry"
     registry.mkdir()
@@ -161,6 +175,17 @@ def test_resolve_by_globbing_falls_back_to_flat_layout(tmp_path):
     assert resolved["amcache"].endswith("Amcache_20260918T170509Z.hve")
     assert resolved["dump"].endswith("firefox_5368_20260904T050334Z.bin")
     assert resolved["source_type"] == "process"
+
+
+def test_resolve_by_globbing_finds_usrclass(tmp_path):
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / "UsrClass_alice_20260101T000000Z.dat").write_bytes(b"hive bytes")
+    (registry / "UsrClass_alice_20260101T000000Z.dat.sha256").write_text("deadbeef  x\n")
+
+    resolved = analyze_evidence.resolve_evidence(tmp_path)
+
+    assert resolved["usrclass"].endswith("UsrClass_alice_20260101T000000Z.dat")
 
 
 def test_resolve_by_globbing_does_not_mistake_sha256_sidecar_for_the_system_hive(tmp_path):

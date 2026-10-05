@@ -1,9 +1,11 @@
 """Registry hive acquisition for Module A (Windows only, admin-required).
 
-Exports the three hives modules/module_a_registry/pipeline.py analyzes --
-NTUSER.DAT, SYSTEM, Amcache.hve -- from a live Windows target to captures/,
-mirroring module_c_memory's acquire-then-analyze split (dumper.py /
-winpmem_acquire.py): acquisition needs a live, elevated Windows session;
+Exports the hives modules/module_a_registry/pipeline.py analyzes --
+NTUSER.DAT, SYSTEM, Amcache.hve, SOFTWARE, and (acquired but not yet parsed
+as of Phase 0 of the Module A roadmap -- see pipeline.py's
+_usrclass_extractors()) UsrClass.dat -- from a live Windows target to
+captures/, mirroring module_c_memory's acquire-then-analyze split (dumper.py
+/ winpmem_acquire.py): acquisition needs a live, elevated Windows session;
 analysis (pipeline.py) runs anywhere, offline, against the exported copies.
 
 Windows locks these hives while running, so a plain file copy fails ("file
@@ -35,11 +37,16 @@ instead of the live HKCU export -- covers both "a different user is
 logged in right now" (their hive is locked too, just not reachable via
 your own HKCU) and "that user isn't logged in at all" (unlocked on disk,
 but VSS works either way, so this is one code path instead of two).
+UsrClass.dat is always acquired via this same VSS path (see
+acquire_usrclass()'s own docstring for why it has no "live" reg-save
+variant the way NTUSER does) for the same target user --ntuser-user names,
+or the current session's user if that wasn't given.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -218,12 +225,86 @@ def acquire_ntuser_for_user(user: str, output_dir: Path, custody: CustodyLog) ->
     return output_path
 
 
+def acquire_usrclass(user: str, output_dir: Path, custody: CustodyLog) -> Path:
+    """UsrClass.dat for a named user, via VSS -- same pattern as
+    acquire_ntuser_for_user(), and for the same reason: works whether or not that user is
+    the current session. Deliberately always VSS (no "live" reg-save variant the way
+    NTUSER has one) -- `reg save HKCU\\Software\\Classes` would reach the current
+    session's live-mounted equivalent, but whether that produces a hive byte-structurally
+    equivalent enough for regipy's ShellBags plugin (Phase 1) to run against is untested;
+    a plain file copy of the real UsrClass.dat is unambiguously correct either way.
+
+    Holds Shell Bags (folder-browsing history), among other things -- analysis of this
+    hive is Phase 1 of the Module A roadmap; acquisition only is wired up for now.
+    """
+    output_path = output_dir / f"UsrClass_{user}_{_timestamp()}.dat"
+    _copy_via_shadow(rf"Users\{user}\AppData\Local\Microsoft\Windows\UsrClass.dat", output_path)
+    _hash_sidecar_custody(
+        output_path, custody, f"UsrClass.dat for user {user!r} via Volume Shadow Copy"
+    )
+    return output_path
+
+
+def _resolve_target_user(ntuser_user: str | None) -> str:
+    """The user UsrClass.dat is acquired for is the same one NTUSER.DAT targets --
+    "the target user" is one concept, not two separate flags. Falls back to the current
+    session's own PROFILE FOLDER NAME (the literal directory under C:\\Users\\ --
+    _copy_via_shadow() builds a filesystem path from this, not a registry lookup) when
+    --ntuser-user wasn't given, i.e. "the user running this script".
+
+    This is deliberately NOT the account's login/display name (os.getlogin(), USERNAME,
+    getpass.getuser() -- all equivalent to each other, all login-name-based). Windows
+    never renames an existing profile folder when an account's login name changes later
+    (via Microsoft-account linking, `net user` rename, etc.), so the two can permanently
+    diverge for a long-lived account -- confirmed in the field: a real run had the
+    current login name as "Neela" while that same account's profile folder was (and had
+    always been) C:\\Users\\Admin. `reg save HKCU` (acquire_ntuser_live(), no path
+    involved -- it reads the live registry via the security token directly) correctly
+    captured that session's real history either way, but this function's first two
+    attempts (os.getlogin(), then USERNAME) both returned the login name "Neela" and
+    sent the VSS copy looking for a nonexistent Users\\Neela\\... path, failing with "No
+    such file or directory" -- a login name is simply the wrong kind of value for a
+    filesystem path here, regardless of which login-name source is asked.
+
+    USERPROFILE is Windows' own environment variable for "my current profile folder's
+    full path" and is immune to this divergence -- tried first, its leaf directory name
+    is exactly what's needed. Login-name-based resolution remains only as a fallback for
+    a non-Windows dev/test machine, where USERPROFILE doesn't exist at all.
+    """
+    if ntuser_user:
+        return ntuser_user
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile:
+        name = Path(userprofile).name
+        if name:
+            return name
+    try:
+        username = os.getlogin()
+    except OSError:
+        username = None
+    if not username:
+        username = os.environ.get("USERNAME") or os.environ.get("USER")
+    if not username:
+        import getpass
+
+        try:
+            username = getpass.getuser()
+        except OSError:
+            username = None
+    if not username:
+        raise AcquisitionError(
+            "Could not resolve the current username -- pass --ntuser-user explicitly."
+        )
+    return username
+
+
 def acquire_all(
     output_dir: Path,
     include_system: bool = True,
     include_ntuser: bool = True,
     include_amcache: bool = True,
     include_software: bool = True,
+    include_usrclass: bool = True,
     ntuser_user: str | None = None,
 ) -> dict:
     """Best-effort: each hive is attempted independently -- one failing (e.g. Amcache's
@@ -260,6 +341,11 @@ def acquire_all(
         attempt("Amcache.hve", lambda: acquire_amcache(output_dir, custody))
     if include_software:
         attempt("SOFTWARE", lambda: acquire_software(output_dir, custody))
+    if include_usrclass:
+        attempt(
+            "UsrClass.dat",
+            lambda: acquire_usrclass(_resolve_target_user(ntuser_user), output_dir, custody),
+        )
 
     custody.save()
     results["custody_log_path"] = str(custody.log_path)
@@ -268,8 +354,8 @@ def acquire_all(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export NTUSER.DAT, SYSTEM, Amcache.hve and SOFTWARE from a live "
-        "Windows target for Module A."
+        description="Export NTUSER.DAT, SYSTEM, Amcache.hve, SOFTWARE and UsrClass.dat "
+        "from a live Windows target for Module A."
     )
     parser.add_argument(
         "--output-dir", type=Path, default=Path("captures"), help="Default: %(default)s"
@@ -278,6 +364,7 @@ def main() -> None:
     parser.add_argument("--skip-ntuser", action="store_true", help="Don't export NTUSER.DAT")
     parser.add_argument("--skip-amcache", action="store_true", help="Don't export Amcache.hve")
     parser.add_argument("--skip-software", action="store_true", help="Don't export SOFTWARE")
+    parser.add_argument("--skip-usrclass", action="store_true", help="Don't export UsrClass.dat")
     parser.add_argument(
         "--ntuser-user",
         help="Export this named user's NTUSER.DAT via Volume Shadow Copy instead of the current "
@@ -293,6 +380,7 @@ def main() -> None:
             include_ntuser=not args.skip_ntuser,
             include_amcache=not args.skip_amcache,
             include_software=not args.skip_software,
+            include_usrclass=not args.skip_usrclass,
             ntuser_user=args.ntuser_user,
         )
     except AcquisitionError as exc:

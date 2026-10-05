@@ -22,9 +22,30 @@ def test_sections_ordered_strongest_confidence_first():
         "errors": [],
         "custody_log_path": None,
         "findings_by_type": {
-            "RecentDocs": [{"description": "d1", "source": "NTUSER.DAT", "timestamp": None}],
-            "ShimCache": [{"description": "d2", "source": "SYSTEM", "timestamp": None}],
-            "UserAssist": [{"description": "d3", "source": "NTUSER.DAT", "timestamp": "t"}],
+            "RecentDocs": [
+                {
+                    "description": "d1",
+                    "source": "NTUSER.DAT",
+                    "timestamp": None,
+                    "confidence": "low",
+                }
+            ],
+            "ShimCache": [
+                {
+                    "description": "d2",
+                    "source": "SYSTEM",
+                    "timestamp": None,
+                    "confidence": "medium",
+                }
+            ],
+            "UserAssist": [
+                {
+                    "description": "d3",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "t",
+                    "confidence": "high",
+                }
+            ],
         },
         "hives_provided": {"ntuser": True, "system": True, "amcache": False},
     }
@@ -454,6 +475,52 @@ def test_harddiskvolume_path_resolved_via_matching_drive_letter_in_another_recor
     assert "HarddiskVolume6" in note
     assert "E:" in note
     assert "inference" in note or "inferred" in note
+
+
+def test_system_context_surfaces_context_findings_separately_from_sections():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "UserAssist": [
+                {
+                    "description": "UserAssist evidence for 'C:\\Tor Browser\\firefox.exe' "
+                    "(run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-07-14T14:15:22+00:00",
+                    "confidence": "high",
+                }
+            ],
+            "ComputerName": [
+                {
+                    "description": "Computer name recorded as 'DESKTOP-ABC123'.",
+                    "source": "SYSTEM",
+                    "timestamp": None,
+                    "confidence": "high",
+                    "category": "context",
+                    "computer_name": "DESKTOP-ABC123",
+                }
+            ],
+        },
+        "hives_provided": {"ntuser": True, "system": True, "amcache": False},
+    }
+    ctx = build_context(details)
+
+    # Context findings never appear in the tor-direct `sections` list.
+    assert {s["type"] for s in ctx["sections"]} == {"UserAssist"}
+    assert "ComputerName" in ctx["system_context"]
+    assert ctx["system_context"]["ComputerName"]["computer_name"] == "DESKTOP-ABC123"
+
+
+def test_system_context_empty_when_no_context_findings():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {},
+        "hives_provided": {"ntuser": False, "system": False, "amcache": False},
+    }
+    ctx = build_context(details)
+    assert ctx["system_context"] == {}
 
 
 def test_harddiskvolume_path_with_no_matching_letter_states_so_honestly():

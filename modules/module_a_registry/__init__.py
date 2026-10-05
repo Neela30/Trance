@@ -44,9 +44,10 @@ def run(
     system: Path | None = None,
     amcache: Path | None = None,
     software: Path | None = None,
+    usrclass: Path | None = None,
     **_: object,
 ) -> ModuleResult:
-    if not any((ntuser, system, amcache, software)):
+    if not any((ntuser, system, amcache, software, usrclass)):
         return ModuleResult(
             module=MODULE_NAME, status="skipped", message="no registry hive supplied"
         )
@@ -55,7 +56,12 @@ def run(
 
     try:
         result = run_module_a(
-            config, ntuser=ntuser, system=system, amcache=amcache, software=software
+            config,
+            ntuser=ntuser,
+            system=system,
+            amcache=amcache,
+            software=software,
+            usrclass=usrclass,
         )
     except IntegrityError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))
@@ -67,13 +73,35 @@ def run(
     for finding in result.findings:
         findings_by_type.setdefault(finding.artifact_type, []).append(asdict(finding))
 
+    # "partial" (some extractors failed, others didn't -- distinct from "error", reserved
+    # for a whole-hive IntegrityError like the one caught above) vs "ok" (no extractor
+    # failures at all). See root report.py's presenter gate: a "partial" module still
+    # gets its full narrative/tables section, not the generic fallback table -- one bad
+    # extractor must not hide every OTHER artifact type's real findings.
+    status = "partial" if result.errors else "ok"
+
+    # Short, examiner-facing reason per failed artifact type for the report's Module
+    # status card; full traceback kept alongside for findings.json/log-level debugging,
+    # never rendered in plain-English prose (see report.py's own extraction-warning
+    # sentences for that).
+    warnings = [
+        {
+            "artifact_type": w["artifact_type"],
+            "source": w["hive"],
+            "reason": w["message"],
+            "traceback": w["traceback"],
+        }
+        for w in result.warnings
+    ]
+
     return ModuleResult(
         module=MODULE_NAME,
-        status="error" if result.errors else "ok",
+        status=status,
         artifacts=result.findings,
         details={
             "summary": result.summary,
             "errors": result.errors,
+            "warnings": warnings,
             "custody_log_path": result.custody_log_path,
             "findings_by_type": findings_by_type,
             "profiles": result.profiles,
@@ -82,6 +110,7 @@ def run(
                 "system": system is not None,
                 "amcache": amcache is not None,
                 "software": software is not None,
+                "usrclass": usrclass is not None,
             },
         },
         message="; ".join(result.errors) if result.errors else None,

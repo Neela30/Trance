@@ -25,7 +25,9 @@ def test_run_ok_with_findings_and_no_errors(tmp_path, monkeypatch):
         timestamp="2026-09-01T00:00:00",
     )
 
-    def fake_run_module_a(config, ntuser=None, system=None, amcache=None, software=None):
+    def fake_run_module_a(
+        config, ntuser=None, system=None, amcache=None, software=None, usrclass=None
+    ):
         return ModuleAResult(
             findings=[artifact], summary="Tor Browser executed 3 times.", errors=[]
         )
@@ -40,8 +42,10 @@ def test_run_ok_with_findings_and_no_errors(tmp_path, monkeypatch):
     assert result.details["errors"] == []
 
 
-def test_run_error_status_when_pipeline_reports_extraction_errors(tmp_path, monkeypatch):
-    def fake_run_module_a(config, ntuser=None, system=None, amcache=None, software=None):
+def test_run_partial_status_when_pipeline_reports_extraction_errors(tmp_path, monkeypatch):
+    def fake_run_module_a(
+        config, ntuser=None, system=None, amcache=None, software=None, usrclass=None
+    ):
         return ModuleAResult(
             findings=[],
             summary="No Tor Browser artifacts found.",
@@ -51,13 +55,15 @@ def test_run_error_status_when_pipeline_reports_extraction_errors(tmp_path, monk
     monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)
     result = module_a_registry.run(make_config(tmp_path), system=tmp_path / "SYSTEM")
 
-    assert result.status == "error"
+    assert result.status == "partial"
     assert "not recognized as a SYSTEM hive" in result.message
     assert result.details["errors"] == ["ShimCache (SYSTEM): not recognized as a SYSTEM hive."]
 
 
 def test_run_error_status_on_integrity_mismatch(tmp_path, monkeypatch):
-    def fake_run_module_a(config, ntuser=None, system=None, amcache=None, software=None):
+    def fake_run_module_a(
+        config, ntuser=None, system=None, amcache=None, software=None, usrclass=None
+    ):
         raise IntegrityError("Hash mismatch for NTUSER.DAT")
 
     monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)
@@ -66,3 +72,21 @@ def test_run_error_status_on_integrity_mismatch(tmp_path, monkeypatch):
     assert result.status == "error"
     assert "Hash mismatch" in result.message
     assert result.artifacts == []
+
+
+def test_run_passes_usrclass_through_and_skipped_requires_no_hive_at_all(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run_module_a(
+        config, ntuser=None, system=None, amcache=None, software=None, usrclass=None
+    ):
+        captured["usrclass"] = usrclass
+        return ModuleAResult(findings=[], summary="x", errors=[])
+
+    monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)
+    usrclass_path = tmp_path / "UsrClass.dat"
+    result = module_a_registry.run(make_config(tmp_path), usrclass=usrclass_path)
+
+    assert result.status == "ok"
+    assert captured["usrclass"] == usrclass_path
+    assert result.details["hives_provided"]["usrclass"] is True

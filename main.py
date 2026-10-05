@@ -185,7 +185,14 @@ def main(argv: list[str] | None = None) -> int:
     registry.add_argument(
         "--software",
         type=Path,
-        help="Acquired SOFTWARE hive (feeds ProfileList and Installed Programs)",
+        help="Acquired SOFTWARE hive (feeds ProfileList, Installed Programs, and Windows "
+        "version)",
+    )
+    registry.add_argument(
+        "--usrclass",
+        type=Path,
+        help="Acquired UsrClass.dat hive. Hashed/custody-logged but not yet analyzed "
+        "(Phase 1 of the Module A roadmap adds Shell Bags etc.)",
     )
 
     disk = parser.add_argument_group("module_b_disk")
@@ -285,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
             "system": args.system,
             "amcache": args.amcache,
             "software": args.software,
+            "usrclass": args.usrclass,
         },
         "module_b_disk": {
             "profile_dir": args.disk_profile,

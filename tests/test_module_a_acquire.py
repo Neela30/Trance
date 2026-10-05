@@ -86,6 +86,76 @@ def test_acquire_software_writes_sidecar_and_custody(tmp_path, monkeypatch):
     assert custody.entries[0].sha256 == acquire.hash_file(path)
 
 
+def test_acquire_usrclass_writes_sidecar_and_custody(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_copy_via_shadow(relative_path, output_path, drive="C:"):
+        captured["relative_path"] = relative_path
+        output_path.write_bytes(b"fake usrclass bytes")
+
+    monkeypatch.setattr(acquire, "_copy_via_shadow", fake_copy_via_shadow)
+    custody = acquire.CustodyLog(tmp_path / "custody.json")
+    path = acquire.acquire_usrclass("alice", tmp_path, custody)
+
+    assert path.read_bytes() == b"fake usrclass bytes"
+    assert captured["relative_path"] == r"Users\alice\AppData\Local\Microsoft\Windows\UsrClass.dat"
+    sidecar = path.with_name(path.name + ".sha256")
+    assert sidecar.exists()
+    assert custody.entries[0].sha256 == acquire.hash_file(path)
+
+
+def _raise_os_error(*_args, **_kwargs):
+    raise OSError("no controlling terminal")
+
+
+def test_resolve_target_user_prefers_explicit_ntuser_user():
+    assert acquire._resolve_target_user("alice") == "alice"
+
+
+def test_resolve_target_user_prefers_userprofile_folder_name_over_login_name(monkeypatch):
+    # The real field bug: a long-lived Windows account's LOGIN name ("neela") had
+    # diverged from its PROFILE FOLDER name ("Admin", i.e. C:\Users\Admin) -- Windows
+    # never renames an existing profile folder when an account's login name changes
+    # later. _copy_via_shadow() needs the folder name (it builds a literal filesystem
+    # path), so os.getlogin()/USERNAME -- both login-name-based -- are the wrong kind of
+    # value here even when they're internally consistent with each other and with
+    # `reg save HKCU` (which needs no path at all). USERPROFILE must win regardless.
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\Admin")
+    monkeypatch.setattr(acquire.os, "getlogin", lambda: "neela")
+    monkeypatch.setenv("USERNAME", "neela")
+    assert acquire._resolve_target_user(None) == "Admin"
+
+
+def test_resolve_target_user_falls_back_to_os_getlogin_when_no_userprofile(monkeypatch):
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    monkeypatch.setattr(acquire.os, "getlogin", lambda: "admin")
+    monkeypatch.setenv("USERNAME", "neela")
+    assert acquire._resolve_target_user(None) == "admin"
+
+
+def test_resolve_target_user_falls_back_to_environment_when_getlogin_unavailable(monkeypatch):
+    # os.getlogin() routinely raises OSError without a controlling terminal (e.g. a
+    # non-Windows dev machine, or certain service contexts) -- USERNAME/USER still work
+    # as a fallback in that case.
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    monkeypatch.setattr(acquire.os, "getlogin", _raise_os_error)
+    monkeypatch.setenv("USERNAME", "bob")
+    monkeypatch.delenv("USER", raising=False)
+    assert acquire._resolve_target_user(None) == "bob"
+
+
+def test_resolve_target_user_raises_when_unresolvable(monkeypatch):
+    import getpass
+
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    monkeypatch.setattr(acquire.os, "getlogin", _raise_os_error)
+    monkeypatch.delenv("USERNAME", raising=False)
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.setattr(getpass, "getuser", _raise_os_error)
+    with pytest.raises(AcquisitionError, match="Could not resolve the current username"):
+        acquire._resolve_target_user(None)
+
+
 def test_create_shadow_copy_parses_id_and_device_object(monkeypatch):
     # Real shape of the PowerShell/WMI script's stdout (Win32_ShadowCopy.Create(), not
     # vssadmin -- vssadmin's own "create shadow" verb is Server-only, confirmed on a real
@@ -230,6 +300,7 @@ def test_acquire_all_isolates_one_hive_failure_from_the_rest(tmp_path, monkeypat
     assert results["NTUSER.DAT"]["status"] == "ok"
     assert results["Amcache.hve"]["status"] == "ok"
     assert results["SOFTWARE"]["status"] == "ok"
+    assert results["UsrClass.dat"]["status"] == "ok"
     assert "custody_log_path" in results
 
 
@@ -252,7 +323,11 @@ def test_acquire_all_uses_named_user_for_ntuser_when_given(tmp_path, monkeypatch
     results = acquire.acquire_all(tmp_path, ntuser_user="alice")
 
     assert results["NTUSER.DAT"]["status"] == "ok"
-    assert any("alice" in c for c in calls)
+    assert results["UsrClass.dat"]["status"] == "ok"
+    # Both NTUSER.DAT and UsrClass.dat are acquired for the SAME named user --
+    # "the target user" is one concept, not two separate flags (see
+    # acquire._resolve_target_user()'s docstring).
+    assert sum("alice" in c for c in calls) == 2
 
 
 def test_cli_skip_flags(monkeypatch, tmp_path):
@@ -265,3 +340,19 @@ def test_cli_skip_flags(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc_info:
         acquire.main()
     assert exc_info.value.code == 1
+
+
+def test_cli_skip_usrclass_flag_is_parsed(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_acquire_all(output_dir, **kwargs):
+        captured.update(kwargs)
+        return {"custody_log_path": str(tmp_path / "custody.json")}
+
+    monkeypatch.setattr(
+        sys, "argv", ["acquire.py", "--output-dir", str(tmp_path), "--skip-usrclass"]
+    )
+    monkeypatch.setattr(acquire, "acquire_all", fake_acquire_all)
+    acquire.main()
+
+    assert captured["include_usrclass"] is False

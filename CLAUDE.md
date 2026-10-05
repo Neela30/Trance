@@ -114,23 +114,92 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
 
 ### Module A — registry & execution evidence (`modules/module_a_registry/`)
 
-- **Acquire** (`acquire.py`, Windows, admin): `reg save HKLM\SYSTEM` and `reg save HKCU`
-  (current user's NTUSER.DAT); Amcache.hve via a Volume Shadow Copy created with WMI
-  (`Win32_ShadowCopy.Create()` through PowerShell — `vssadmin create shadow` is Server-only,
-  confirmed on real client Windows) and deleted with `vssadmin delete shadows` afterwards.
-  `--ntuser-user <name>` pulls another user's NTUSER.DAT via VSS. Each hive independent.
-- **Analyze** (`pipeline.py`): hash on ingest → regipy extraction (`extractors.py`:
-  UserAssist, RecentDocs from NTUSER; ShimCache from SYSTEM; Amcache) → Tor-relevance filter
-  (`constants.py: is_tor_related`) → normalize to `Artifact`s (`normalize.py`) → re-hash and
-  raise `IntegrityError` on mismatch.
-- **Filter philosophy**: deliberately *recall over precision* — substring path markers
-  (`"tor browser"`, `"torbrowser"`, `"\\tbb\\"`, `"torproject"`, …) plus a list of
-  Tor-specific executable names. `firefox.exe` alone is intentionally NOT a match.
+Module A is mid-way through a multi-phase roadmap (Phase 0 "foundations" and Phase 1
+"execution evidence" are done; Phases 2–6 — USB devices, network context,
+persistence/config, report/narrative wiring, SRUM/event logs — are not started). What
+follows describes the current state.
+
+- **Acquire** (`acquire.py`, Windows, admin): `reg save HKLM\SYSTEM`, `reg save
+  HKLM\SOFTWARE`, and `reg save HKCU` (current user's NTUSER.DAT); Amcache.hve via a
+  Volume Shadow Copy created with WMI (`Win32_ShadowCopy.Create()` through PowerShell —
+  `vssadmin create shadow` is Server-only, confirmed on real client Windows) and deleted
+  with `vssadmin delete shadows` afterwards. `--ntuser-user <name>` pulls another user's
+  NTUSER.DAT via VSS instead of the live HKCU export. UsrClass.dat is acquired the same
+  way (VSS copy, no live-registry variant — see `acquire_usrclass()`'s docstring) for
+  that same target user (or the current session's username if `--ntuser-user` wasn't
+  given). Each hive/flag independent; `--skip-usrclass` etc. opt out.
+- **Analyze** (`pipeline.py`): hash on ingest → extraction → Tor-relevance filter
+  (`constants.py: is_tor_related_entry`) → normalize to `Artifact`s (`normalize.py`) →
+  re-hash and raise `IntegrityError` on mismatch. 19 artifact types total, from three
+  sources:
+  - **regipy plugins, thin-wrapped in `extractors.py`**: UserAssist, RecentDocs, MUICache,
+    RunMRU, WordWheelQuery, ComDlg32, TypedPaths from NTUSER; ShimCache, BAM, ComputerName,
+    TimeZone from SYSTEM; Amcache; InstalledPrograms, WindowsVersion from SOFTWARE;
+    ShellBags from UsrClass.dat (needs the `regipy[full]` extra — `libfwsi-python`/
+    `libfwps-python`, importable as `pyfwsi`/`pyfwps` — see requirements.txt).
+  - **One regipy *function* reused directly, bypassing a broken plugin *method* for this
+    one sub-case** (`extract_last_visited_pidl_mru` in `extractors.py`): ComDlg32Plugin's
+    own `LastVisitedPidlMRU` handling reuses OpenSavePidlMRU's "value names are
+    digit-indexed MRU slots" assumption, but LastVisitedPidlMRU's real values are named
+    for the *invoking program's full path* with no digit-named values at all — that
+    method silently returns zero entries against a real hive. Reimplemented correctly
+    using regipy's own public `parse_pidl_mru_value()` + `LAST_VISITED_PIDL_MRU_PATH`;
+    OpenSavePidlMRU/OpenSaveMRU (same plugin, unaffected) are still used as-is.
+  - **Hand-written parsers, no regipy plugin exists at all — `custom_extractors.py`**:
+    MUICache from UsrClass.dat (a same-named NTUSER-only plugin exists but can never
+    reach this data — see that file's module docstring), Program Compatibility Assistant
+    Store, `Software\Mozilla\Firefox\Launcher`, `FeatureUsage\AppSwitched`, all from
+    NTUSER. Every hive is opened with an **explicit** `hive_type=` (never regipy's own
+    auto-detection, which reads the hive's *embedded* header path and is unreliable for
+    an acquired/renamed copy — confirmed broken for UsrClass.dat specifically, whose
+    check is an exact-equality match no real acquired hive will ever satisfy).
+  - MUICache-from-UsrClass deliberately shares the `MUICache` artifact type with the
+    NTUSER-sourced one (same kind of evidence, two possible source hives depending on
+    Windows version; merged into one report section, `Artifact.source` differentiates).
+- **Filter philosophy**: deliberately *recall over precision* for every "tor-direct"
+  type — substring path markers (`"tor browser"`, `"torbrowser"`, `"\\tbb\\"`,
+  `"torproject"`, …) plus a list of Tor-specific executable names. `firefox.exe` alone is
+  intentionally NOT a match. `is_tor_related_entry()` extends plain `is_tor_related()`
+  for the one type that needs a second field checked: `LastVisitedPidlMRU`'s `program`
+  field (the invoking exe's full path) can establish Tor-relevance even when its paired
+  folder alone gives no hint (a Tor Browser Save-As dialog pointed at a plain Downloads
+  folder) — `_ADDITIONAL_TOR_CHECK_FIELDS` in `constants.py` is where any future type
+  needing the same treatment gets added.
+- **Confidence / category — structured `Artifact` fields, not description prose**:
+  `Artifact` has `confidence` (`"high"`/`"medium"`/`"low"`), `confidence_reason` (one-line
+  justification), and `category` (`"tor-direct"`/`"context"`), all assigned once per
+  `artifact_type` in `normalize.py` from `constants.py`'s `ARTIFACT_CONFIDENCE` /
+  `ARTIFACT_CONFIDENCE_REASON` / `ARTIFACT_CATEGORY` maps — the single source of truth.
+  Three types (ComputerName, TimeZone, WindowsVersion) are `category="context"`:
+  machine-wide facts, never filtered by `is_tor_related()`, and — per `pipeline.py`'s
+  `run_module_a()` — **only kept in the final findings if the same run also produced at
+  least one "tor-direct" finding** (a bare computer name/time zone isn't interesting on
+  its own). `findings.json`'s per-module `artifacts` stay a superset across all modules;
+  Module B/C artifacts simply leave these three fields `None`.
+  Program Compatibility Assistant Store's and Firefox Launcher's value **data** (beyond
+  the path-bearing value name) are decoded best-effort / low-confidence-on-exact-layout —
+  neither has been verified against a real captured hive yet; treat
+  `flagged_timestamp`/`raw_value` as supplementary, not authoritative, same caveat
+  ComDlg32's own PIDL decoding already carries.
 - **Report** (`report.py`): dedupes, builds a per-component timeline across hives, and counts
   components *corroborated by 2+ independent hive sources* — the only real correlation logic
-  in the codebase right now, and only within Module A.
+  in the codebase right now, and only within Module A. `build_context()`'s `system_context`
+  key carries the three context facts separately from the tor-direct `sections` list
+  (structured only so far — no narrative/template prose yet; that's Phase 5). The other
+  per-finding regex field extraction (`_RUN_COUNT_RE`/`_SHA1_RE`/etc.) was deliberately
+  NOT extended for Phase 1's new per-type fields (e.g. `LastVisitedPidlMRU`'s `program`) —
+  still visible in the plain `description` text, just not pulled into its own table
+  column yet; revisit if/when that starts to strain.
+- **Narrative** (`narrative.py`): deterministic, rule-based plain-English story
+  (`key_finding`/`timeline`/`reliability`/`not_determined` for a non-technical reader, plus
+  a `technical` sub-dict) — unchanged by Phase 0/1; does not yet reference the three
+  context facts or any Phase 1 artifact type.
 - Standalone CLI: `python -m modules.module_a_registry.cli` (uses `click`).
-- Real runs produce ~21 artifacts — manageable, low noise.
+- None of Phase 1's new extractors have been run against a real UsrClass.dat/NTUSER.DAT
+  hive yet (same "mocked-only, never exercised against real data" status every Module A
+  extractor has had since Phase 0) — `pyfwsi`/`pyfwps`'s actual behavior against a real
+  ShellBags key is specifically unverified, flagged the same way Volatility3 is in
+  Module C.
 
 ### Module B — disk (`modules/module_b_disk/`) — mostly written by teammate (branch `Sahe`)
 
@@ -209,7 +278,8 @@ memory/disk used to fail silently).
 Output:
 ```
 evidence/
-  registry/  SYSTEM_<ts>, NTUSER_<ts>.DAT, Amcache_<ts>.hve (+ .sha256, custody json)
+  registry/  SYSTEM_<ts>, SOFTWARE_<ts>, NTUSER_<ts>.DAT, UsrClass_<user>_<ts>.dat,
+             Amcache_<ts>.hve (+ .sha256, custody json)
   memory/    firefox_<pid>_<ts>.bin and/or fullmem_<ts>.raw (+ .sha256, custody json)
   disk/      profile/, tor_dir/ (each with hashes.sha256) + custody json
   acquire_manifest.json   status + path per artifact
@@ -219,7 +289,8 @@ evidence/
 ```bash
 source .venv/bin/activate
 # Explicit flags:
-python main.py --case demo --output-dir output --ntuser ... --system ... --amcache ... \
+python main.py --case demo --output-dir output \
+    --ntuser ... --system ... --amcache ... --software ... --usrclass ... \
     --disk-profile ... --tor-dir ... [--disk-root ...] [--disk-image ...] \
     --dump ... --source-type full-memory --onion X.onion --host 1.2.3.4:5000 --username alice \
     [--vol3-path vol --vol3-extract-process firefox.exe]

@@ -62,6 +62,7 @@
   @media (max-width: 560px) { .tiles, .tiles.three { grid-template-columns: 1fr; } }
   .tile { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--confirm); border-radius: 6px; padding: 16px 18px; box-shadow: var(--shadow); }
   .tile.gap { border-left-color: var(--noise); }
+  .tile.warn { border-left-color: var(--noise); }
   .tile.err { border-left-color: var(--accent); }
   .tile h3 { font-size: 15px; margin-bottom: 6px; }
   .tile p { font-size: 13px; color: var(--ink-muted); margin-bottom: 0; }
@@ -75,7 +76,7 @@
   .table-scroll { overflow-x: auto; }
   .chip { display: inline-block; font-family: ui-monospace, monospace; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
   .chip.high, .chip.ok { background: var(--confirm-bg); color: var(--confirm); }
-  .chip.low, .chip.skipped, .chip.not_implemented { background: var(--noise-bg); color: var(--noise); }
+  .chip.low, .chip.skipped, .chip.not_implemented, .chip.partial { background: var(--noise-bg); color: var(--noise); }
   .chip.error { background: var(--accent-bg); color: var(--accent); }
   .path-list { display: flex; flex-wrap: wrap; gap: 8px; }
   .path-pill { font-family: ui-monospace, monospace; font-size: 12.5px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; }
@@ -132,11 +133,18 @@
     <div class="section-head"><h2>Module status</h2></div>
     <div class="tiles three">
       {% for name, m in modules.items() %}
-      <div class="tile{{ ' err' if m.status == 'error' else (' gap' if m.status != 'ok' else '') }}">
+      {% set tile_class = 'err' if m.status == 'error' else ('warn' if m.status == 'partial' else ('gap' if m.status != 'ok' else '')) %}
+      <div class="tile{{ ' ' + tile_class if tile_class }}">
         <h3 class="mono" style="font-size:13px;">{{ name }}</h3>
         <p><span class="chip {{ m.status }}">{{ m.status.replace('_', ' ') }}</span>
-        {% if m.status == 'ok' %} · {{ m.artifact_count }} artifact{{ 's' if m.artifact_count != 1 }}{% endif %}</p>
-        {% if m.message %}<p style="margin-top:6px;">{{ m.message }}</p>{% endif %}
+        {% if m.status in ['ok', 'partial'] %} · {{ m.artifact_count }} artifact{{ 's' if m.artifact_count != 1 }}{% endif %}</p>
+        {% if m.status == 'partial' and m.warnings %}
+        <ul style="margin-top:8px; padding-left:16px; font-size:12px; color:var(--ink-muted);">
+          {% for w in m.warnings %}
+          <li><span class="mono">{{ w.artifact_type }}</span>{% if w.source %} ({{ w.source }}){% endif %}: {{ w.reason }}</li>
+          {% endfor %}
+        </ul>
+        {% elif m.message %}<p style="margin-top:6px;">{{ m.message }}</p>{% endif %}
       </div>
       {% endfor %}
     </div>
@@ -169,12 +177,26 @@
   {% if registry.errors %}
   <section>
     <div class="callout">
+      {% if registry.extraction_warnings %}
+      {% for line in registry.extraction_warnings %}
+      <p{% if not loop.first %} style="margin-top:6px;"{% endif %}>{{ line }}</p>
+      {% endfor %}
+      <details style="margin-top:10px;">
+        <summary class="note" style="cursor:pointer;">Technical detail</summary>
+        <ul style="margin:8px 0 0; padding-left:18px;">
+          {% for err in registry.errors %}
+          <li class="mono" style="font-size:12px;">{{ err }}</li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% else %}
       <strong>Extraction errors:</strong> the findings below are from whichever hives/plugins succeeded; these did not.
       <ul style="margin:8px 0 0; padding-left:18px;">
         {% for err in registry.errors %}
         <li class="mono" style="font-size:12px;">{{ err }}</li>
         {% endfor %}
       </ul>
+      {% endif %}
     </div>
   </section>
   {% endif %}

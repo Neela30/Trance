@@ -31,6 +31,25 @@ ARTIFACT_TYPE_WORDWHEELQUERY = "WordWheelQuery"
 ARTIFACT_TYPE_COMDLG32 = "ComDlg32"
 ARTIFACT_TYPE_INSTALLEDPROGRAMS = "InstalledPrograms"
 
+# "Context" artifact types (see CATEGORY_CONTEXT below) -- machine-wide facts that never
+# go through is_tor_related() at all, unlike the ten types above.
+ARTIFACT_TYPE_COMPUTERNAME = "ComputerName"
+ARTIFACT_TYPE_TIMEZONE = "TimeZone"
+ARTIFACT_TYPE_WINDOWSVERSION = "WindowsVersion"
+
+# Phase 1 of the Module A roadmap -- execution evidence. All six are CATEGORY_TOR_DIRECT
+# (filtered by is_tor_related()/is_tor_related_entry() same as the original ten). MUICache
+# from UsrClass.dat deliberately reuses ARTIFACT_TYPE_MUICACHE above rather than getting
+# its own constant -- same kind of evidence as the NTUSER-sourced MUICache, just from
+# Windows Vista+'s actual location for it; merging them into one report section (sources
+# differentiated by Artifact.source) is more useful than an artificial split.
+ARTIFACT_TYPE_SHELLBAGS = "ShellBags"
+ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE = "CompatAssistantStore"
+ARTIFACT_TYPE_FIREFOX_LAUNCHER = "FirefoxLauncher"
+ARTIFACT_TYPE_APP_SWITCHED = "AppSwitched"
+ARTIFACT_TYPE_TYPEDPATHS = "TypedPaths"
+ARTIFACT_TYPE_LASTVISITEDPIDLMRU = "LastVisitedPidlMRU"
+
 # Bare executable/basename matches. Kept deliberately short: only binaries
 # that are unique to the Tor ecosystem belong here. Notably, "firefox.exe"
 # is NOT listed — Tor Browser's firefox.exe is indistinguishable by name
@@ -93,6 +112,12 @@ _CANDIDATE_PATH_FIELDS: dict[str, tuple[str, ...]] = {
     ARTIFACT_TYPE_WORDWHEELQUERY: ("name",),
     ARTIFACT_TYPE_COMDLG32: ("path",),
     ARTIFACT_TYPE_INSTALLEDPROGRAMS: ("DisplayName", "InstallLocation", "service_name"),
+    ARTIFACT_TYPE_SHELLBAGS: ("path",),
+    ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE: ("path",),
+    ARTIFACT_TYPE_FIREFOX_LAUNCHER: ("path",),
+    ARTIFACT_TYPE_APP_SWITCHED: ("path",),
+    ARTIFACT_TYPE_TYPEDPATHS: ("path",),
+    ARTIFACT_TYPE_LASTVISITEDPIDLMRU: ("path",),
 }
 
 
@@ -130,6 +155,32 @@ def is_tor_related(path: str | None) -> bool:
 
     basename = normalized.rsplit("\\", 1)[-1]
     return basename in TOR_EXECUTABLE_NAMES
+
+
+# A handful of artifact types carry Tor-relevance in a field OTHER than (or in addition
+# to) candidate_path()'s "the path" -- e.g. LastVisitedPidlMRU's "program" field (the
+# invoking exe's full path) can establish Tor-relevance even when the paired folder path
+# alone gives no hint at all (a Tor Browser Save-As dialog pointed at a perfectly generic
+# Downloads folder). Only types that need this get an entry; every other type's
+# is_tor_related_entry() call is exactly equivalent to the plain
+# is_tor_related(candidate_path(...)) check it replaces.
+_ADDITIONAL_TOR_CHECK_FIELDS: dict[str, tuple[str, ...]] = {
+    ARTIFACT_TYPE_LASTVISITEDPIDLMRU: ("program",),
+}
+
+
+def is_tor_related_entry(artifact_type: str, entry: dict) -> bool:
+    """Like is_tor_related(candidate_path(artifact_type, entry)), but ORs in any
+    additional type-specific fields from _ADDITIONAL_TOR_CHECK_FIELDS -- see that dict's
+    docstring. This is what pipeline.py's _process_hive() calls for the keep/discard
+    filtering decision; candidate_path() itself is unchanged and still used on its own
+    wherever only the single "display" path is needed (e.g. _update_stats())."""
+    if is_tor_related(candidate_path(artifact_type, entry)):
+        return True
+    for field in _ADDITIONAL_TOR_CHECK_FIELDS.get(artifact_type, ()):
+        if is_tor_related(entry.get(field)):
+            return True
+    return False
 
 
 # Tor Browser's own installer filename shape, recognized literally rather than guessed
@@ -214,3 +265,139 @@ def infer_drive_letters(paths: Iterable[str]) -> dict[str, str]:
         if letters and len(letters) == 1:
             resolved[path] = next(iter(letters))
     return resolved
+
+
+# ---------------------------------------------------------------------------
+# Confidence / category -- single source of truth (Phase 0 of the Module A roadmap).
+# ---------------------------------------------------------------------------
+#
+# Previously, confidence was a sentence baked into normalize.py's description prose for
+# each type, AND independently restated as report.py's own CONFIDENCE_BY_TYPE map -- two
+# places that had to be kept in sync by hand. Both now read from here instead; see
+# normalize.py's normalize_entry() for how this is applied uniformly per artifact_type,
+# and report.py's build_context() for how a section's displayed confidence is now read
+# straight off a finding rather than from a second map.
+#
+# category distinguishes "matched is_tor_related(), this IS Tor evidence" (the ten types
+# above) from "machine-wide context fact, never filtered by is_tor_related() at all" (the
+# three below) -- see pipeline.py's run_module_a() for the rule that context findings are
+# only kept in the final output when at least one tor-direct finding also exists in the
+# same run (a computer name / time zone / Windows version is not interesting on its own).
+
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
+
+CATEGORY_TOR_DIRECT = "tor-direct"
+CATEGORY_CONTEXT = "context"
+
+# Per Module A Description 2.4 / 2.2 -- same levels normalize.py has always assigned,
+# just now data instead of ten near-identical docstring paragraphs:
+#   HIGH   -- UserAssist/Amcache/BAM/InstalledPrograms: GUI-launch, install/first-seen,
+#             independent last-run record, or registered install -- all largely
+#             independent of execution/shutdown state once recorded.
+#   MEDIUM -- ShimCache/MUICache: presence/insertion evidence, not confirmed execution.
+#   LOW    -- RecentDocs/RunMRU/WordWheelQuery/ComDlg32: contextual/corroborating only.
+# Context facts are all direct, authoritative single-value reads of the OS's own record
+# (not execution evidence of anything) -- HIGH here means "this is what the OS says",
+# not "this proves Tor ran".
+ARTIFACT_CONFIDENCE: dict[str, str] = {
+    ARTIFACT_TYPE_USER_ASSIST: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_AMCACHE: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_BAM: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_INSTALLEDPROGRAMS: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_SHIMCACHE: CONFIDENCE_MEDIUM,
+    ARTIFACT_TYPE_MUICACHE: CONFIDENCE_MEDIUM,
+    ARTIFACT_TYPE_RECENTDOCS: CONFIDENCE_LOW,
+    ARTIFACT_TYPE_RUNMRU: CONFIDENCE_LOW,
+    ARTIFACT_TYPE_WORDWHEELQUERY: CONFIDENCE_LOW,
+    ARTIFACT_TYPE_COMDLG32: CONFIDENCE_LOW,
+    ARTIFACT_TYPE_COMPUTERNAME: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_TIMEZONE: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_WINDOWSVERSION: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_SHELLBAGS: CONFIDENCE_MEDIUM,
+    ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_FIREFOX_LAUNCHER: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_APP_SWITCHED: CONFIDENCE_LOW,
+    ARTIFACT_TYPE_TYPEDPATHS: CONFIDENCE_LOW,
+    ARTIFACT_TYPE_LASTVISITEDPIDLMRU: CONFIDENCE_MEDIUM,
+}
+
+# The exact justification wording normalize.py used to append to `description` as
+# "Confidence: <LEVEL> — <reason>." -- moved here verbatim, nothing reworded, so this is a
+# relocation, not a second interpretation.
+ARTIFACT_CONFIDENCE_REASON: dict[str, str] = {
+    ARTIFACT_TYPE_USER_ASSIST: "GUI-launched execution evidence recorded by Windows Explorer.",
+    ARTIFACT_TYPE_AMCACHE: "persists largely independent of execution and shutdown state.",
+    ARTIFACT_TYPE_BAM: (
+        "an independent OS subsystem's own last-run record, separate from "
+        "UserAssist/ShimCache/Amcache."
+    ),
+    ARTIFACT_TYPE_INSTALLEDPROGRAMS: (
+        "a registered install, largely independent of execution and shutdown state "
+        "(though a portable Tor Browser won't register here)."
+    ),
+    ARTIFACT_TYPE_SHIMCACHE: "insertion-order evidence only, not confirmed execution.",
+    ARTIFACT_TYPE_MUICACHE: (
+        "shows the app was invoked via the shell at some point, not confirmed execution."
+    ),
+    ARTIFACT_TYPE_RECENTDOCS: (
+        "contextual/corroborating evidence only, not direct Tor Browser execution evidence."
+    ),
+    ARTIFACT_TYPE_RUNMRU: (
+        "contextual/corroborating evidence only, not direct Tor Browser execution evidence."
+    ),
+    ARTIFACT_TYPE_WORDWHEELQUERY: (
+        "contextual/corroborating evidence only, not direct Tor Browser execution evidence."
+    ),
+    ARTIFACT_TYPE_COMDLG32: (
+        "contextual/corroborating evidence only, not direct Tor Browser execution evidence; "
+        "regipy's own PIDL parsing here is best-effort and can be noisy."
+    ),
+    ARTIFACT_TYPE_COMPUTERNAME: (
+        "read directly from one of the SYSTEM hive's ControlSets, the OS's own "
+        "authoritative record."
+    ),
+    ARTIFACT_TYPE_TIMEZONE: (
+        "read directly from one of the SYSTEM hive's ControlSets, the OS's own "
+        "authoritative record."
+    ),
+    ARTIFACT_TYPE_WINDOWSVERSION: (
+        "read directly from SOFTWARE's CurrentVersion key, the OS's own authoritative record."
+    ),
+    ARTIFACT_TYPE_SHELLBAGS: (
+        "shows a folder was browsed in Explorer at some point, not confirmed program " "execution."
+    ),
+    ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE: (
+        "Windows' own Program Compatibility Assistant record of evaluating this specific "
+        "executable path -- an independent OS subsystem, separate from "
+        "UserAssist/ShimCache/Amcache/BAM."
+    ),
+    ARTIFACT_TYPE_FIREFOX_LAUNCHER: (
+        "a Firefox-family browser's own self-reported record of its full executable path "
+        "at launch."
+    ),
+    ARTIFACT_TYPE_APP_SWITCHED: (
+        "shows the window was switched to via Alt+Tab/the taskbar at some point -- "
+        "contextual/corroborating only, not direct Tor Browser execution evidence."
+    ),
+    ARTIFACT_TYPE_TYPEDPATHS: (
+        "a path manually typed into Explorer's address bar -- contextual/corroborating "
+        "evidence only, not direct Tor Browser execution evidence."
+    ),
+    ARTIFACT_TYPE_LASTVISITEDPIDLMRU: (
+        "ties a specific program's full path to a folder it last browsed via a common "
+        "dialog -- stronger than a bare Open/Save entry alone, still not confirmed "
+        "execution."
+    ),
+}
+
+# Only context types need an entry -- everything else defaults to CATEGORY_TOR_DIRECT via
+# ARTIFACT_CATEGORY.get(artifact_type, CATEGORY_TOR_DIRECT), used by both pipeline.py (to
+# decide whether an artifact_type's entries go through is_tor_related() filtering at all)
+# and normalize.py (to set Artifact.category).
+ARTIFACT_CATEGORY: dict[str, str] = {
+    ARTIFACT_TYPE_COMPUTERNAME: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_TIMEZONE: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_WINDOWSVERSION: CATEGORY_CONTEXT,
+}

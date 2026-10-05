@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 
 from core.config import TranceConfig
 from core.schema import ModuleResult
@@ -100,6 +101,72 @@ def test_render_report_narrative_uses_the_given_timezone(tmp_path):
 
     assert "What happened" in html
     assert "10:11 AM Asia/Colombo" in html
+
+
+def _module_a_result_partial_status() -> ModuleResult:
+    """One real finding plus one failed extractor -- the exact shape a real "ShellBags
+    crashed, everything else is fine" run now produces (see modules/module_a_registry/
+    __init__.py's status computation and core.schema.ModuleResult's own docstring)."""
+    finding = {
+        "description": (
+            "UserAssist evidence for 'E:\\Tor Browser\\Browser\\firefox.exe' (run_count=1)."
+        ),
+        "source": "NTUSER.DAT",
+        "timestamp": "2026-09-03T04:41:53+00:00",
+        "confidence": "high",
+    }
+    return ModuleResult(
+        module="module_a_registry",
+        status="partial",
+        artifacts=[],
+        details={
+            "summary": "Tor Browser launched 1 time.",
+            "errors": ["ShellBags (UsrClass.dat): invalid format string: %hhu."],
+            "warnings": [
+                {
+                    "artifact_type": "ShellBags",
+                    "source": "UsrClass.dat",
+                    "reason": "invalid format string: %hhu.",
+                    "traceback": "Traceback (most recent call last): ...",
+                }
+            ],
+            "findings_by_type": {"UserAssist": [finding]},
+            "hives_provided": {"ntuser": True, "system": False, "amcache": False},
+        },
+    )
+
+
+def test_partial_status_module_still_gets_its_full_presenter(tmp_path):
+    """The actual bug this status model fixes: a "partial" module (one extractor failed,
+    others didn't) must still get its rich narrative/tables section -- previously the
+    presenter gate only matched status == "ok", so this exact scenario silently fell
+    back to a bare generic artifact table, discarding the real UserAssist finding's
+    narrative/confidence presentation entirely."""
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    findings = build_findings(config, [_module_a_result_partial_status()])
+
+    html = render_report(findings, local_tz="Asia/Colombo")
+
+    assert "What happened" in html  # rich presenter engaged, not the generic fallback
+    assert "ShellBags" in html
+    assert "parser error" in html  # the plain-English extraction-warning sentence
+
+
+def test_error_status_module_falls_back_to_generic_table():
+    config = TranceConfig(case_name="case", output_dir=Path("."))
+    result = ModuleResult(
+        module="module_a_registry",
+        status="error",
+        artifacts=[],
+        details={"summary": "x", "errors": [], "findings_by_type": {}, "hives_provided": {}},
+        message="Hash mismatch for NTUSER.DAT",
+    )
+    findings = build_findings(config, [result])
+
+    html = render_report(findings)
+
+    assert "What happened" not in html
+    assert "Hash mismatch for NTUSER.DAT" in html
 
 
 def test_write_report_handles_non_ascii_template_content(tmp_path):

@@ -17,8 +17,11 @@ than any single hive alone — see _build_component_timeline(). That correlation
 per-field values (run count, sha1, size, ...) it needs, are pulled out of each Artifact's
 already-rendered `description` via regex rather than re-plumbing raw regipy fields through
 pipeline.py/normalize.py/extractors.py — those stay exactly as already tested; only this
-presentation layer changes. Confidence levels/ordering restate what normalize.py already
-decided per artifact type (2.4 of the project brief) — not a second interpretation.
+presentation layer changes. Confidence is read straight off each finding's own
+Artifact.confidence field (set once, per artifact_type, in normalize.py from
+constants.ARTIFACT_CONFIDENCE — see that module's "Confidence / category" section) rather
+than a second map living here, as of Phase 0 of the Module A roadmap; section ordering
+(ARTIFACT_TYPE_ORDER) is still a presentation-only choice made here.
 """
 
 from __future__ import annotations
@@ -29,51 +32,62 @@ from datetime import datetime
 from .constants import harddiskvolume_number, infer_drive_letters
 from .narrative import GLOSSARY, build_narrative
 
-# Strongest evidence first: UserAssist/Amcache/BAM/InstalledPrograms are HIGH confidence,
-# ShimCache/MUICache MEDIUM, RecentDocs/RunMRU/WordWheelQuery/ComDlg32 LOW (contextual
-# only) — see normalize.py's own docstring for the per-type reasoning.
+# Strongest evidence first: UserAssist/Amcache/BAM/InstalledPrograms/CompatAssistantStore/
+# FirefoxLauncher are HIGH confidence, ShimCache/MUICache/ShellBags/LastVisitedPidlMRU
+# MEDIUM, RecentDocs/RunMRU/WordWheelQuery/ComDlg32/AppSwitched/TypedPaths LOW
+# (contextual only) — see constants.py's ARTIFACT_CONFIDENCE for the per-type source of
+# truth (this tuple is presentation ordering only, kept consistent with it by hand).
 ARTIFACT_TYPE_ORDER = (
     "UserAssist",
     "Amcache",
     "BAM",
     "InstalledPrograms",
+    "CompatAssistantStore",
+    "FirefoxLauncher",
     "ShimCache",
     "MUICache",
+    "ShellBags",
+    "LastVisitedPidlMRU",
     "RecentDocs",
     "RunMRU",
     "WordWheelQuery",
     "ComDlg32",
+    "AppSwitched",
+    "TypedPaths",
 )
 ARTIFACT_TYPE_LABELS = {
     "UserAssist": "UserAssist — GUI-launched execution",
     "Amcache": "Amcache — install / first-seen",
     "BAM": "BAM — last-execution record",
     "InstalledPrograms": "Installed Programs (Uninstall key)",
+    "CompatAssistantStore": "Program Compatibility Assistant Store",
+    "FirefoxLauncher": "Firefox Launcher",
     "ShimCache": "ShimCache / AppCompatCache",
     "MUICache": "MUICache — shell display names",
+    "ShellBags": "ShellBags — folder-browsing history",
+    "LastVisitedPidlMRU": "LastVisitedPidlMRU — program + last-browsed folder",
     "RecentDocs": "RecentDocs — contextual",
     "RunMRU": "RunMRU — Run dialog history",
     "WordWheelQuery": "WordWheelQuery — Explorer search history",
     "ComDlg32": "ComDlg32 — Open/Save dialog history",
+    "AppSwitched": "AppSwitched — Alt+Tab/taskbar switches",
+    "TypedPaths": "TypedPaths — Explorer address bar history",
 }
-CONFIDENCE_BY_TYPE = {
-    "UserAssist": "high",
-    "Amcache": "high",
-    "BAM": "high",
-    "InstalledPrograms": "high",
-    "ShimCache": "medium",
-    "MUICache": "medium",
-    "RecentDocs": "low",
-    "RunMRU": "low",
-    "WordWheelQuery": "low",
-    "ComDlg32": "low",
-}
+# Confidence used to be independently restated here as a static per-type map, duplicating
+# normalize.py's own prose-embedded "Confidence: ..." sentence. As of Phase 0 of the
+# Module A roadmap, confidence is a structured field on each finding itself
+# (Artifact.confidence, set once in normalize.py from constants.ARTIFACT_CONFIDENCE) --
+# _section_confidence() below reads it directly instead of a second map.
 HIVE_LABELS = {
     "ntuser": "NTUSER.DAT",
     "system": "SYSTEM",
     "amcache": "Amcache.hve",
     "software": "SOFTWARE",
+    "usrclass": "UsrClass.dat",
 }
+# The three CATEGORY_CONTEXT artifact types (see constants.py) -- kept out of the
+# tor-direct `sections` list entirely and surfaced separately via system_context() below.
+CONTEXT_ARTIFACT_TYPES = ("ComputerName", "TimeZone", "WindowsVersion")
 
 # normalize.py's own description formats, matched here rather than re-plumbed as raw
 # fields — see module docstring. "for '...'" covers UserAssist/ShimCache/Amcache;
@@ -271,6 +285,50 @@ def _quiet_hive_notes(hives_provided: dict, annotated_by_type: dict[str, list[di
     return notes
 
 
+def _build_extraction_warnings(warnings: list[dict]) -> list[str]:
+    """Plain-English counterpart to the technical `details["warnings"]` list (see
+    core.schema.ModuleResult's docstring and __init__.py's run()) -- one fixed,
+    deterministic sentence per failed artifact type, same "no LLM, every sentence traces
+    to one rule" convention narrative.py uses throughout. Deliberately does NOT include
+    the raw exception text (that stays in the technical warning / findings.json / logs,
+    for examiners) -- a non-technical reader only needs to know what didn't come
+    through and that everything else is still trustworthy."""
+    sentences = []
+    for warning in warnings:
+        artifact_type = warning.get("artifact_type", "")
+        label = ARTIFACT_TYPE_LABELS.get(artifact_type, artifact_type)
+        friendly = label.split(" — ")[0]
+        sentences.append(
+            f"{friendly} could not be read due to a parser error; other registry "
+            "evidence in this report is unaffected."
+        )
+    return sentences
+
+
+def _section_confidence(findings: list[dict]) -> str:
+    """Every finding of one artifact_type shares the same confidence by construction
+    (normalize.py assigns it once per artifact_type -- see constants.ARTIFACT_CONFIDENCE),
+    so the first finding is representative. "unknown" is only reached by a hand-built
+    details dict that never went through normalize.py (e.g. an older test fixture)."""
+    if findings and findings[0].get("confidence"):
+        return findings[0]["confidence"]
+    return "unknown"
+
+
+def _build_system_context(findings_by_type: dict[str, list[dict]]) -> dict:
+    """Computer name / time zone / Windows version -- CATEGORY_CONTEXT findings (see
+    constants.py), kept out of the tor-direct `sections` list entirely since they were
+    never filtered by is_tor_related() and aren't Tor evidence themselves. Structured
+    only, for now -- no narrative/template prose wired up yet (that's Phase 5 of the
+    Module A roadmap); this just makes the facts available to whatever renders next."""
+    context: dict = {}
+    for artifact_type in CONTEXT_ARTIFACT_TYPES:
+        findings = findings_by_type.get(artifact_type) or []
+        if findings:
+            context[artifact_type] = findings[0]
+    return context
+
+
 def _build_profiles_table(profiles: list[dict], relevant_sid: str | None) -> list[dict]:
     """Reference table of every Windows user profile on the machine (SID -> username ->
     profile path), from SOFTWARE's ProfileList -- not a Tor-relevance finding, just
@@ -344,7 +402,7 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
         {
             "type": artifact_type,
             "label": ARTIFACT_TYPE_LABELS.get(artifact_type, artifact_type),
-            "confidence": CONFIDENCE_BY_TYPE.get(artifact_type, "unknown"),
+            "confidence": _section_confidence(annotated_by_type[artifact_type]),
             "findings": annotated_by_type[artifact_type],
         }
         for artifact_type in ARTIFACT_TYPE_ORDER
@@ -381,7 +439,9 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
         "corroborated_components": sum(1 for c in component_timeline if len(c["seen_in"]) > 1),
         "linked_launches": linked_launches,
         "quiet_hive_notes": quiet_hive_notes,
+        "extraction_warnings": _build_extraction_warnings(details.get("warnings", [])),
         "profiles": profiles,
+        "system_context": _build_system_context(findings_by_type),
         "narrative": build_narrative(
             annotated_by_type,
             component_timeline,

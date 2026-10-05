@@ -1,6 +1,6 @@
 volatility3>=2.26.0
 yara-python
-regipy
+regipy[full]
 jinja2
 click
 psutil

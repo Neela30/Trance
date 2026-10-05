@@ -35,6 +35,8 @@ already known to work.
 
 from __future__ import annotations
 
+import logging
+import traceback
 from pathlib import Path
 
 from core.config import TranceConfig
@@ -42,6 +44,7 @@ from core.exceptions import AnalysisError, TranceError
 from core.schema import Artifact, ModuleResult
 
 MODULE_NAME = "module_c_memory"
+logger = logging.getLogger(__name__)
 
 
 def _run_volatility3(image: Path, vol3_path: str | None) -> dict:
@@ -122,6 +125,20 @@ def run(
         )
     except TranceError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))
+    except Exception as exc:
+        # Boundary hardening, not per-extractor isolation: analyze() is one linear
+        # string-carving pass over the dump, not a set of independently named
+        # extractors the way Module A/B are -- there's no natural per-artifact-type
+        # seam to isolate failures within it (a "partial" status would have nothing
+        # concrete to point at). Previously only TranceError was caught here, so any
+        # other exception type would have escaped this module's own boundary entirely
+        # (main.py's own per-module catch would still stop it from taking down *other*
+        # modules, but this module itself got zero graceful handling). Full traceback
+        # logged for debugging; the module cleanly reports "error" either way.
+        logger.error(f"Module C analysis failed unexpectedly: {exc}\n{traceback.format_exc()}")
+        return ModuleResult(
+            module=MODULE_NAME, status="error", message=f"{type(exc).__name__}: {exc}"
+        )
 
     if process_extraction is not None:
         details["process_extraction"] = process_extraction

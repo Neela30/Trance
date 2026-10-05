@@ -14,38 +14,71 @@ per regipy's own `can_run()` check) or because regipy itself throws while
 parsing a malformed/corrupted hive. Callers (the pipeline) decide whether a
 ParsingError for one artifact should abort the whole run or just be noted
 and skipped — see pipeline.py's per-hive handling.
+
+One exception to "wraps a plugin": extract_last_visited_pidl_mru() reuses regipy's own
+public parse_pidl_mru_value() utility and LAST_VISITED_PIDL_MRU_PATH constant directly,
+bypassing ComDlg32Plugin's own LastVisitedPidlMRU method — see that function's docstring
+for why (that one method is structurally wrong for this specific MRU and returns nothing
+against a real hive; its sibling OpenSavePidlMRU/OpenSaveMRU handling is unaffected and
+still used as-is via extract_comdlg32()).
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+from regipy.exceptions import RegistryKeyNotFoundException
 from regipy.plugins.amcache.amcache import AmCachePlugin
-from regipy.plugins.ntuser.comdlg32 import ComDlg32Plugin
+from regipy.plugins.ntuser.comdlg32 import (
+    LAST_VISITED_PIDL_MRU_PATH,
+    ComDlg32Plugin,
+    parse_pidl_mru_value,
+)
 from regipy.plugins.ntuser.muicache import MUICachePlugin
 from regipy.plugins.ntuser.recentdocs import RecentDocsPlugin
 from regipy.plugins.ntuser.runmru import RunMRUPlugin
+from regipy.plugins.ntuser.typed_paths import TypedPathsPlugin
 from regipy.plugins.ntuser.user_assist import UserAssistPlugin
 from regipy.plugins.ntuser.word_wheel_query import WordWheelQueryPlugin
 from regipy.plugins.software.installed_programs import InstalledProgramsSoftwarePlugin
 from regipy.plugins.software.profilelist import ProfileListPlugin
+from regipy.plugins.software.winver import WinVersionPlugin
 from regipy.plugins.system.bam import BAMPlugin
+from regipy.plugins.system.computer_name import ComputerNamePlugin
 from regipy.plugins.system.shimcache import ShimCachePlugin
+from regipy.plugins.system.timezone_data2 import TimezoneDataPlugin2
+from regipy.plugins.usrclass.shellbags_usrclass import ShellBagUsrclassPlugin
 from regipy.registry import RegistryHive
+from regipy.utils import convert_wintime
 
 from core.exceptions import ParsingError
 
+from ._shellbags_patch import apply_shellbags_patch
 
-def _load_hive(hive_path: Path) -> RegistryHive:
+logger = logging.getLogger(__name__)
+
+
+def _load_hive(hive_path: Path, hive_type: str) -> RegistryHive:
+    """Always opens with an EXPLICIT hive_type rather than relying on regipy's own
+    identify_hive_type() auto-detection, which reads the *embedded* path string from the
+    hive file's own header (not the filesystem filename passed here) -- and for at least
+    "usrclass", that check is an exact string-equality against a bare, driveless path
+    (r"\\microsoft\\windows\\usrclass.dat") that a real acquired hive's embedded header
+    (a full path like "\\??\\C:\\Users\\<user>\\AppData\\Local\\Microsoft\\Windows\\
+    UsrClass.dat") will never match -- auto-detection would silently leave hive_type=None
+    and every plugin's can_run() would then reject a hive that is, in fact, exactly the
+    right type. Explicit hive_type is regipy's own documented escape hatch for this,
+    verified against the installed regipy (6.3.0) RegistryHive.__init__ docstring."""
     try:
-        return RegistryHive(str(hive_path))
+        return RegistryHive(str(hive_path), hive_type=hive_type)
     except Exception as exc:  # regipy raises its own exception hierarchy
         raise ParsingError(f"Could not open registry hive at {hive_path}: {exc}") from exc
 
 
 def extract_user_assist(ntuser_path: Path) -> list[dict]:
     """Extract UserAssist entries (run count, last-executed time) from NTUSER.DAT."""
-    hive = _load_hive(ntuser_path)
+    hive = _load_hive(ntuser_path, "ntuser")
     plugin = UserAssistPlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -66,7 +99,7 @@ def extract_shimcache(system_path: Path) -> list[dict]:
     execution — this caveat is preserved as a confidence annotation in
     normalize.py, not silently dropped here.
     """
-    hive = _load_hive(system_path)
+    hive = _load_hive(system_path, "system")
     plugin = ShimCachePlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -82,7 +115,7 @@ def extract_shimcache(system_path: Path) -> list[dict]:
 
 def extract_amcache(amcache_path: Path) -> list[dict]:
     """Extract Amcache entries (install path, first-seen time, SHA-1) from Amcache.hve."""
-    hive = _load_hive(amcache_path)
+    hive = _load_hive(amcache_path, "amcache")
     plugin = AmCachePlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -105,7 +138,7 @@ def extract_recentdocs(ntuser_path: Path) -> list[dict]:
     record per document — the same "list of flat dicts" shape the other
     three extractors already return — before it ever reaches the pipeline.
     """
-    hive = _load_hive(ntuser_path)
+    hive = _load_hive(ntuser_path, "ntuser")
     plugin = RecentDocsPlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -137,7 +170,7 @@ def extract_bam(system_path: Path) -> list[dict]:
     per full exe path) from SYSTEM -- a corroborating execution-evidence subsystem
     independent of UserAssist/ShimCache/Amcache. Already flat, one record per execution
     record -- no flattening needed."""
-    hive = _load_hive(system_path)
+    hive = _load_hive(system_path, "system")
     plugin = BAMPlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(f"BAM plugin cannot run against {system_path}: not a SYSTEM hive.")
@@ -153,7 +186,7 @@ def extract_muicache(ntuser_path: Path) -> list[dict]:
     NTUSER.DAT. MUICachePlugin groups results by registry key (one entry per hive path,
     each holding a list of applications) -- flattened here to one record per
     application, same shape as extract_recentdocs()'s flattening."""
-    hive = _load_hive(ntuser_path)
+    hive = _load_hive(ntuser_path, "ntuser")
     plugin = MUICachePlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -183,7 +216,7 @@ def extract_runmru(ntuser_path: Path) -> list[dict]:
     """Extract Run dialog (Win+R) command history from NTUSER.DAT. RunMRUPlugin returns
     one record for the whole key (holding a list of commands) -- flattened here to one
     record per typed command, same shape as extract_recentdocs()'s flattening."""
-    hive = _load_hive(ntuser_path)
+    hive = _load_hive(ntuser_path, "ntuser")
     plugin = RunMRUPlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -211,7 +244,7 @@ def extract_runmru(ntuser_path: Path) -> list[dict]:
 def extract_word_wheel_query(ntuser_path: Path) -> list[dict]:
     """Extract Explorer/Start-menu search history (WordWheelQuery) from NTUSER.DAT.
     Already flat, one record per search entry -- no flattening needed."""
-    hive = _load_hive(ntuser_path)
+    hive = _load_hive(ntuser_path, "ntuser")
     plugin = WordWheelQueryPlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -231,7 +264,7 @@ def extract_comdlg32(ntuser_path: Path) -> list[dict]:
     flattening. Note: regipy's own PIDL-bytes parser here is best-effort (loose
     byte-scanning with swallowed exceptions) -- treat its output as lower-confidence
     than the other NTUSER extractors."""
-    hive = _load_hive(ntuser_path)
+    hive = _load_hive(ntuser_path, "ntuser")
     plugin = ComDlg32Plugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -260,7 +293,7 @@ def extract_comdlg32(ntuser_path: Path) -> list[dict]:
 def extract_installed_programs(software_path: Path) -> list[dict]:
     """Extract the traditional Uninstall-key installed-programs list from SOFTWARE.
     Already flat, one record per installed program -- no flattening needed."""
-    hive = _load_hive(software_path)
+    hive = _load_hive(software_path, "software")
     plugin = InstalledProgramsSoftwarePlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -281,7 +314,7 @@ def extract_profiles(software_path: Path) -> list[dict]:
     the machine, used to resolve BAM's `sid` field and the narrative's user-account
     line, not a Tor-related finding in its own right. Already flat, one record per
     profile -- no flattening needed."""
-    hive = _load_hive(software_path)
+    hive = _load_hive(software_path, "software")
     plugin = ProfileListPlugin(hive, as_json=True)
     if not plugin.can_run():
         raise ParsingError(
@@ -292,3 +325,196 @@ def extract_profiles(software_path: Path) -> list[dict]:
     except Exception as exc:
         raise ParsingError(f"ProfileList extraction failed for {software_path}: {exc}") from exc
     return plugin.entries
+
+
+# ---------------------------------------------------------------------------
+# Context facts (Phase 0 of the Module A roadmap) -- reinstated as thin regipy-plugin
+# wrappers. These were originally hand-written against the raw RegistryHive/NKRecord API
+# in a since-removed system_context.py, before a fuller audit of regipy's own plugin set
+# turned up ComputerNamePlugin/TimezoneDataPlugin2/WinVersionPlugin -- real plugins for
+# exactly these three facts, missed the first time around. Per this project's "use
+# existing regipy plugins where they exist" rule, they replace the custom versions here.
+# ---------------------------------------------------------------------------
+
+
+def extract_computer_name(system_path: Path) -> list[dict]:
+    """Computer name from SYSTEM. ComputerNamePlugin emits one entry per ControlSet
+    get_control_sets() finds (usually one, occasionally two near-identical ones on a
+    system with a stale ControlSet002) -- not narrowed to "the active" one; report.py's
+    existing _dedupe() already collapses byte-identical duplicates downstream."""
+    hive = _load_hive(system_path, "system")
+    plugin = ComputerNamePlugin(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(
+            f"ComputerName plugin cannot run against {system_path}: not a SYSTEM hive."
+        )
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"ComputerName extraction failed for {system_path}: {exc}") from exc
+    return plugin.entries
+
+
+def extract_time_zone(system_path: Path) -> list[dict]:
+    """Windows' configured time zone from SYSTEM. TimezoneDataPlugin2 (not v1) is used
+    deliberately -- it sign-corrects Bias/DaylightBias/ActiveTimeBias and decodes
+    TimeZoneKeyName from UTF-16, where v1 hands back raw, unsigned, undecoded values.
+    plugin.entries is a dict keyed by control-set path, not a list -- flattened here to
+    the same "list of flat dicts" shape every other extractor in this file returns."""
+    hive = _load_hive(system_path, "system")
+    plugin = TimezoneDataPlugin2(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(
+            f"TimezoneData plugin cannot run against {system_path}: not a SYSTEM hive."
+        )
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"TimezoneData extraction failed for {system_path}: {exc}") from exc
+
+    flattened: list[dict] = []
+    for key_path, values in plugin.entries.items():
+        flattened.append({**values, "key_path": key_path})
+    return flattened
+
+
+def extract_windows_version(software_path: Path) -> list[dict]:
+    """Windows edition/build from SOFTWARE's Microsoft\\Windows NT\\CurrentVersion.
+    plugin.entries is a single-key dict (one path -> one dict of values) -- flattened
+    here the same way extract_time_zone() flattens its own dict-of-dicts shape."""
+    hive = _load_hive(software_path, "software")
+    plugin = WinVersionPlugin(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(
+            f"WinVersion plugin cannot run against {software_path}: not a SOFTWARE hive."
+        )
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"WinVersion extraction failed for {software_path}: {exc}") from exc
+
+    flattened: list[dict] = []
+    for key_path, values in plugin.entries.items():
+        flattened.append({**values, "key_path": key_path})
+    return flattened
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 of the Module A roadmap -- execution evidence.
+# ---------------------------------------------------------------------------
+
+
+def extract_shellbags(usrclass_path: Path) -> list[dict]:
+    """Shell Bags (folder-browsing history) from UsrClass.dat -- the active location on
+    Windows Vista+ (NTUSER.DAT's own ShellBags, via a sibling ShellBagNtuserPlugin, are
+    the legacy pre-Vista location and are not wired up here; UsrClass.dat is what the
+    Module A roadmap's Phase 1 asks for). Requires the `regipy[full]` extra
+    (libfwsi-python/libfwps-python, importable as pyfwsi/pyfwps) -- ShellBagUsrclassPlugin
+    raises ModuleNotFoundError itself with an actionable message if that's missing; left
+    uncaught here rather than folded into ParsingError, since "dependency not installed"
+    is a setup problem, not a parsing-time one.
+
+    apply_shellbags_patch() (idempotent) fixes a confirmed pyfwsi bug -- see
+    _shellbags_patch.py's module docstring for the full root-cause writeup -- where
+    extension_block.get_creation_time() raises SystemError (not the OSError regipy's own
+    plugin already guards against) on certain real-world entries, aborting the entire
+    traversal instead of just the one bad item. With the patch applied, a slot regipy
+    still can't read for some other reason is skipped individually (logged, counted on
+    plugin._shellbags_skip_count) rather than losing every already-walked entry.
+    """
+    apply_shellbags_patch()
+    hive = _load_hive(usrclass_path, "usrclass")
+    plugin = ShellBagUsrclassPlugin(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(
+            f"ShellBags plugin cannot run against {usrclass_path}: not a UsrClass.dat hive."
+        )
+    plugin._shellbags_skip_count = 0
+    plugin._shellbags_timestamp_failures = 0
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"ShellBags extraction failed for {usrclass_path}: {exc}") from exc
+    if plugin._shellbags_skip_count:
+        logger.warning(
+            f"ShellBags ({usrclass_path}): skipped {plugin._shellbags_skip_count} "
+            "unreadable slot(s); all other entries extracted normally."
+        )
+    if plugin._shellbags_timestamp_failures:
+        logger.info(
+            f"ShellBags ({usrclass_path}): {plugin._shellbags_timestamp_failures}/"
+            f"{len(plugin.entries)} entries had an unreadable creation/access/"
+            "modification time (a confirmed pyfwsi library bug -- see "
+            "_shellbags_patch.py); path and other metadata are unaffected."
+        )
+    return plugin.entries
+
+
+def extract_typed_paths(ntuser_path: Path) -> list[dict]:
+    """Paths typed into Explorer's address bar (TypedPaths) from NTUSER.DAT.
+    TypedPathsPlugin.entries is {"last_write":, "entries": [{"url1": "..."}, ...]} -- a
+    single dict, not a list -- flattened here to one record per typed path, same pattern
+    as extract_recentdocs()'s flattening."""
+    hive = _load_hive(ntuser_path, "ntuser")
+    plugin = TypedPathsPlugin(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(
+            f"TypedPaths plugin cannot run against {ntuser_path}: not an NTUSER.DAT hive."
+        )
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"TypedPaths extraction failed for {ntuser_path}: {exc}") from exc
+
+    last_write = plugin.entries.get("last_write") if plugin.entries else None
+    flattened: list[dict] = []
+    for item in (plugin.entries or {}).get("entries", []):
+        for path in item.values():
+            flattened.append({"path": path, "last_write": last_write})
+    return flattened
+
+
+def extract_last_visited_pidl_mru(ntuser_path: Path) -> list[dict]:
+    """LastVisitedPidlMRU (program -> last-browsed-folder pairs) from NTUSER.DAT's
+    ComDlg32 key -- NOT via ComDlg32Plugin._parse_last_visited_mru(), which is
+    structurally wrong for this specific MRU: it reuses OpenSavePidlMRU/OpenSaveMRU's
+    "value names are digit-indexed MRU slots" assumption, but LastVisitedPidlMRU's real
+    values are named for the *invoking program's full path* (e.g.
+    "E:\\Tor Browser\\Browser\\firefox.exe"), with no digit-named values at all -- so
+    that method's `mru_values` stays empty and it silently returns zero entries against
+    a real hive. This reimplements just that one pairing correctly, reusing
+    LAST_VISITED_PIDL_MRU_PATH and parse_pidl_mru_value() -- both already-public regipy
+    names from regipy.plugins.ntuser.comdlg32, not duplicating ComDlg32Plugin's own
+    (working) OpenSavePidlMRU/OpenSaveMRU handling.
+
+    The returned "program" field is a full executable path, so the existing
+    is_tor_related() substring markers already apply to it unchanged -- see
+    constants.is_tor_related_entry(), which checks this field for this artifact type.
+    """
+    hive = _load_hive(ntuser_path, "ntuser")
+    try:
+        key = hive.get_key(LAST_VISITED_PIDL_MRU_PATH)
+    except RegistryKeyNotFoundException:
+        return []
+    except Exception as exc:
+        raise ParsingError(
+            f"LastVisitedPidlMRU extraction failed for {ntuser_path}: {exc}"
+        ) from exc
+
+    last_write = convert_wintime(key.header.last_modified, as_json=True)
+    flattened: list[dict] = []
+    for value in key.iter_values(trim_values=False):
+        if value.name == "MRUListEx":
+            continue
+        folder = parse_pidl_mru_value(value.value)
+        if not folder:
+            continue
+        flattened.append(
+            {
+                "key_path": LAST_VISITED_PIDL_MRU_PATH,
+                "program": value.name,
+                "path": folder,
+                "last_write": last_write,
+            }
+        )
+    return flattened
