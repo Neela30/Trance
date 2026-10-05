@@ -248,7 +248,7 @@
       <dd>{% if disk.daemon.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.daemon.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest — {{ disk.daemon.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.daemon.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
       {% endif %}
       {% if disk.downloads %}
-      <dt>Volume scanned</dt><dd>{{ disk.downloads.volume_root }} — {{ "{:,}".format(disk.downloads.files_walked) }} files walked in {{ disk.downloads.scan_seconds }}s</dd>
+      <dt>Volume scanned</dt><dd>{{ disk.downloads.volume_root }}{% if disk.downloads.live_scan %} (live scan on the target at acquisition){% endif %} — {{ "{:,}".format(disk.downloads.files_walked) }} files walked in {{ disk.downloads.scan_seconds }}s</dd>
       {% endif %}
     </dl>
   </div>
@@ -378,7 +378,7 @@
       <strong>Network origin and timing, not the source site.</strong> Windows tags every file a browser saves from the network with a <span class="mono">Zone.Identifier</span> stream; locally created or USB/ISO-copied files never carry one. Tor Browser deliberately omits the <span class="mono">HostUrl</span>/<span class="mono">ReferrerUrl</span> fields other browsers write there, so the originating address is not recoverable from the file. Only the last Tor session's window is reconstructable from daemon artifacts.
     </div>
     {% if disk.downloads.window %}
-    <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>.</p>
+    <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>{% if disk.downloads.window.end_basis %} (end: {{ disk.downloads.window.end_basis }}){% endif %}.</p>
     {% elif 'tor_daemon' in disk.supplied %}
     <p class="note" style="margin-bottom:12px;">No daemon window could be derived (missing <span class="mono">lock</span> or <span class="mono">state</span>) — files are listed without correlation.</p>
     {% else %}
@@ -391,8 +391,8 @@
         <tbody>
           {% for h in disk.downloads.hits %}
           <tr>
-            <td class="val">{{ h.path }}{% if h.host_url or h.referrer_url %}<br><span class="off">host={{ h.host_url or "—" }} referrer={{ h.referrer_url or "—" }}</span>{% endif %}</td>
-            <td class="off">{{ h.created or h.modified or "—" }}{% if h.timestamp_source != 'ntfs' %}<br>(mtime; no NTFS times){% endif %}</td>
+            <td class="val">{{ h.path }}{% if h.recycled %}<br><span class="flag-warn">⚠ In the Recycle Bin</span> <span class="off">— originally {{ h.recycled.original_path or "unknown (no $I record)" }}{% if h.recycled.deleted %}, deleted {{ h.recycled.deleted }}{% endif %}</span>{% endif %}{% if h.host_url or h.referrer_url %}<br><span class="off">host={{ h.host_url or "—" }} referrer={{ h.referrer_url or "—" }}</span>{% endif %}</td>
+            <td class="off">{{ h.created or h.modified or "—" }}{% if not h.created %}<br>(mtime; no creation time){% endif %}</td>
             <td>{% if h.within_window is true %}<span class="chip high">yes</span>{% elif h.within_window is false %}<span class="chip low">no</span>{% else %}<span class="chip">unknown</span>{% endif %}</td>
             <td class="mono">{{ h.zone_id if h.zone_id is not none else "—" }}</td>
             <td class="off">{{ "{:,}".format(h.size) }}</td>
@@ -530,7 +530,7 @@
     {% endif %}
     {% if disk.ntfs.events %}
     <details class="appendix" style="margin-top:22px;">
-      <summary>Show {{ disk.ntfs.events|length }} journal event{{ "s" if disk.ntfs.events|length != 1 }} on Tor Browser / daemon files{% if disk.ntfs.deleted_tor_files %} and {{ disk.ntfs.deleted_tor_files|length }} deleted Tor-related file{{ "s" if disk.ntfs.deleted_tor_files|length != 1 }}{% endif %}</summary>
+      <summary>Show {{ disk.ntfs.events|length }}{% if disk.ntfs.events_total > disk.ntfs.events|length %} most recent of {{ disk.ntfs.events_total }}{% endif %} journal event{{ "s" if disk.ntfs.events|length != 1 }} on Tor Browser / daemon files{% if disk.ntfs.deleted_tor_files %} and {{ disk.ntfs.deleted_tor_files|length }} deleted Tor-related file{{ "s" if disk.ntfs.deleted_tor_files|length != 1 }}{% endif %}</summary>
       <div class="appendix-body">
         {% if disk.ntfs.deleted_tor_files %}
         <p class="note" style="margin-bottom:10px;">Deleted (MFT record not in use, name retained):</p>
@@ -538,8 +538,8 @@
         <div class="appendix-row"><span class="val">{{ d.path }}</span><span class="why">{{ d.modified or "—" }}</span></div>
         {% endfor %}
         {% endif %}
-        <p class="note" style="margin:14px 0 10px;">Change journal, oldest first{% if disk.ntfs.events|length > 500 %} (first 500 shown){% endif %}:</p>
-        {% for e in disk.ntfs.events[:500] %}
+        <p class="note" style="margin:14px 0 10px;">Change journal, oldest first{% if disk.ntfs.events|length > 500 %} (most recent 500 shown){% endif %}:</p>
+        {% for e in disk.ntfs.events[-500:] %}
         <div class="appendix-row"><span class="val">{{ e.time or "—" }} · {{ e.path }}</span><span class="why">{{ e.reasons }}</span></div>
         {% endfor %}
       </div>

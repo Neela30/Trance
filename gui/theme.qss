@@ -289,3 +289,75 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 QMessageBox {
     background: #1b2126;
 }
+
+/* ---- Choices (checkboxes, radio buttons, drop-downs) ----
+   Without these the platform style draws unchecked indicators in near-background
+   colours, so an unticked box or unselected option looked like plain text. */
+
+QCheckBox, QRadioButton {
+    spacing: 10px;
+    padding: 2px 0;
+    background: transparent;
+}
+
+QCheckBox::indicator, QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #5a666d;
+    background: #1b2126;
+}
+
+QCheckBox::indicator { border-radius: 4px; }
+QRadioButton::indicator { border-radius: 9px; }
+
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border: 1px solid #e2694f;
+}
+
+QCheckBox::indicator:checked {
+    background: #e2694f;
+    border: 1px solid #e2694f;
+}
+
+QRadioButton::indicator:checked {
+    background: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.5, fx: 0.5, fy: 0.5,
+                                stop: 0 #e2694f, stop: 0.45 #e2694f,
+                                stop: 0.55 #1b2126, stop: 1 #1b2126);
+    border: 1px solid #e2694f;
+}
+
+QCheckBox:disabled, QRadioButton:disabled { color: #5a666d; }
+QCheckBox::indicator:disabled { border: 1px solid #313a40; background: #232a2f; }
+
+QComboBox {
+    background: #1b2126;
+    color: #dce2e6;
+    border: 1px solid #313a40;
+    border-radius: 6px;
+    padding: 7px 10px;
+    min-height: 20px;
+}
+
+QComboBox:hover, QComboBox:focus { border: 1px solid #e2694f; }
+
+QComboBox::drop-down {
+    border: none;
+    width: 28px;
+}
+
+QComboBox QAbstractItemView {
+    background: #1b2126;
+    color: #dce2e6;
+    border: 1px solid #313a40;
+    selection-background-color: #33211c;
+    selection-color: #e2694f;
+    padding: 4px;
+    outline: none;
+}
+
+/* Options tabs: the pane is the card, so it gets the card surface and padding. */
+QTabWidget#optionsTabs::pane {
+    background: #1b2126;
+    border: 1px solid #313a40;
+    border-radius: 6px;
+}

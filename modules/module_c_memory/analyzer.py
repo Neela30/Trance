@@ -393,26 +393,26 @@ def analyze(
         url_hits: list[tuple[int, str, str, str]] = []
         for m in URL_RE.finditer(s):
             url_spans.append((m.start(), m.end()))
-            host, path = _split_url(m.group())
-            url_hits.append((m.start(), m.group(), host, path))
+            url_host, path = _split_url(m.group())
+            url_hits.append((m.start(), m.group(), url_host, path))
         for m in ONION_RE.finditer(s):
             # Inside a full URL it's already covered by that URL (or is a search engine
             # merely mentioning it); without a path it's a mention, not a visit.
             if not m.group("path") or any(a <= m.start() < b for a, b in url_spans):
                 continue
             url_hits.append((m.start(), m.group(), m.group("host").lower(), m.group("path")))
-        for start, url, host, path in url_hits:
+        for start, url, url_host, path in url_hits:
             match_offset = offset + start
             unfiltered_url_count += 1
             if len(unfiltered_url_sample) < SAMPLE_CAP:
                 unfiltered_url_sample.append(url)
-            if targets and _matches_target(host, targets):
+            if targets and _matches_target(url_host, targets):
                 append_capped(
                     urls,
                     {
                         "offset": hex(match_offset),
                         "value": url,
-                        "host": host,
+                        "host": url_host,
                         "path": path,
                         "asset": _is_asset_path(path),
                     },

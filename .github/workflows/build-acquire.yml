@@ -1,0 +1,43 @@
+name: Build trance-acquire (Windows)
+
+# PyInstaller can't cross-compile, so the target-side exe is built on a
+# Windows runner and uploaded as a workflow artifact to carry into the VM.
+on:
+  push:
+    branches: [sahe]
+  workflow_dispatch:
+
+jobs:
+  build-acquire:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Acquire side only needs psutil -- keep the analysis deps out of the exe.
+      - name: Install build dependencies
+        run: pip install psutil pyinstaller
+
+      - name: Build trance-acquire.exe
+        run: python -m PyInstaller --onefile --name trance-acquire acquire_all.py
+
+      - name: Smoke test (--help, no admin needed)
+        run: dist\trance-acquire.exe --help
+
+      - name: SHA-256 of the built exe
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist\trance-acquire.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  trance-acquire.exe" | Out-File -Encoding ascii dist\trance-acquire.exe.sha256
+          Get-Content dist\trance-acquire.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trance-acquire-${{ github.sha }}
+          path: |
+            dist/trance-acquire.exe
+            dist/trance-acquire.exe.sha256
+          retention-days: 14

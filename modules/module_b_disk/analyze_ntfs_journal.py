@@ -33,6 +33,7 @@ import os
 import re
 import struct
 import sys
+from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -395,7 +396,13 @@ def _temp_family(name: str) -> str | None:
 def analyze_usn(path: Path, records: dict[int, dict]) -> dict:
     total = 0
     first = last = None
-    events = []
+    # The journal reads oldest first. Only MAX_EVENTS Tor events are *stored*, and the
+    # newest are the ones kept (closest to the incident); the activity window and count
+    # cover every Tor event. Bounding the window by the stored list ended it at the
+    # 5,000th event's time, not at Tor's last journaled write.
+    events: deque[dict] = deque(maxlen=MAX_EVENTS)
+    tor_total = 0
+    tor_first = tor_last = None
     onion_names: dict[str, dict] = {}
     downloads = []
     temp_created: dict[int, dict] = {}
@@ -453,7 +460,11 @@ def analyze_usn(path: Path, records: dict[int, dict]) -> dict:
                 download["zone_identifier_written_utc"] = rec["time_utc"]
             if rec["reason"] & 0x200:
                 download["deleted_utc"] = rec["time_utc"]
-        if _is_tor_related(rec["name"], full) and len(events) < MAX_EVENTS:
+        if _is_tor_related(rec["name"], full):
+            tor_total += 1
+            if rec["time_utc"]:
+                tor_first = min(tor_first or rec["time_utc"], rec["time_utc"])
+                tor_last = max(tor_last or rec["time_utc"], rec["time_utc"])
             events.append(
                 {
                     "time_utc": rec["time_utc"],
@@ -462,15 +473,16 @@ def analyze_usn(path: Path, records: dict[int, dict]) -> dict:
                     "reasons": rec["reasons"],
                 }
             )
-    tor_times = [e["time_utc"] for e in events if e["time_utc"]]
     return {
         "records": total,
         "journal_first_utc": first,
         "journal_last_utc": last,
-        "tor_events": events,
+        "tor_events": list(events),
+        "tor_events_total": tor_total,
+        "tor_events_truncated": tor_total > len(events),
         "tor_activity_window": (
-            {"first_utc": min(tor_times), "last_utc": max(tor_times), "events": len(events)}
-            if tor_times
+            {"first_utc": tor_first, "last_utc": tor_last, "events": tor_total}
+            if tor_first
             else None
         ),
         "onion_filenames": sorted(onion_names.values(), key=lambda e: e["first_seen_utc"] or ""),
@@ -578,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         window = u["tor_activity_window"]
         print(
             f"$UsnJrnl: {u['records']} records ({u['journal_first_utc']} to {u['journal_last_utc']}); "
-            f"{len(u['tor_events'])} Tor-related event(s)"
+            f"{u['tor_events_total']} Tor-related event(s)"
             + (f", active {window['first_utc']} to {window['last_utc']}" if window else "")
         )
     for address, info in report["onion_addresses"].items():
