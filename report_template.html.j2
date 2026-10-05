@@ -172,7 +172,21 @@
     {% if not registry.narrative.empty %}
     <p class="note" style="margin-top:10px;">See <a href="#appendix-profiles">Appendix: Windows user profiles</a> at the end of this report for every Windows account found on this computer.</p>
     {% endif %}
+    {% if registry.devices and (registry.devices.usbstor or registry.devices.mounted_devices) %}
+    <p class="note" style="margin-top:6px;">See <a href="#appendix-devices">Appendix: All connected devices and volumes</a> at the end of this report for every removable device this computer has recorded.</p>
+    {% endif %}
   </section>
+
+  {% if registry.narrative.device_story %}
+  <section>
+    <div class="section-head"><h2>Where Tor Browser ran from</h2></div>
+    <ul class="narrative-list">
+      {% for line in registry.narrative.device_story %}
+      <li>{{ line }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
 
   {% if registry.errors %}
   <section>
@@ -322,6 +336,21 @@
               {% endfor %}
             </tbody>
           </table>
+          {% elif s.type == 'MUICache' %}
+          <table class="evidence-table">
+            <thead><tr><th>Path</th><th>Detail</th><th>Registry key last updated</th><th>Occ.</th></tr></thead>
+            <tbody>
+              {% for f in s.findings %}
+              <tr>
+                <td class="val">{{ f.path|wrap_path }}{% if f.harddiskvolume_note %}<br><span class="off">{{ f.harddiskvolume_note }}</span>{% endif %}</td>
+                <td class="val">{{ f.description }}</td>
+                <td class="off">{{ f.timestamp|fmt_ts }}</td>
+                <td class="off">{{ f.occurrences }}{% if f.occurrences > 1 %} (collapsed dup.){% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          <p class="note" style="margin-top:6px;">This timestamp is the registry key's own last-write time, shared by every program recorded in this key — not a per-program run time.</p>
           {% else %}
           <table class="evidence-table">
             <thead><tr><th>Path</th><th>Detail</th><th>Timestamp</th><th>Occ.</th></tr></thead>
@@ -1170,6 +1199,182 @@
                 <td class="val">{{ p.path|wrap_path }}</td>
                 <td class="off">{{ p.sid or "—" }}</td>
                 <td class="off">{{ p.last_write|fmt_ts }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if registry and registry.devices and (registry.devices.usbstor or registry.devices.mounted_devices or registry.devices.usb_devices or registry.devices.mountpoints2 or registry.devices.emdmgmt or registry.devices.portable_devices) %}
+  {% set devices = registry.devices %}
+  <div class="band" id="appendix-devices">
+    <div class="eyebrow">Appendix</div>
+    <h2>All connected devices and volumes</h2>
+    <p class="band-subtitle">Every USB/removable-device and volume record this computer's registry holds — reference data, not Tor-related findings on their own, except where directly tied to the Tor install's own drive letter below.</p>
+  </div>
+  <section>
+    {% if devices.device_match and devices.device_match.name %}
+    <div class="callout" style="border-left-color: var(--confirm); margin-bottom:16px;">
+      <strong>Tor Browser was installed on drive {{ devices.device_match.drive_letter }}:, which this registry directly ties to one physical device:</strong>
+      <p style="margin-top:8px;">{{ devices.device_match.name }}{% if devices.device_match.serial %} (serial {{ devices.device_match.serial }}){% endif %}</p>
+    </div>
+    {% elif devices.device_match and devices.device_match.dynamic_disk %}
+    <p class="note" style="margin-bottom:16px;">Drive {{ devices.device_match.drive_letter }}: is a volume on a Windows dynamic disk. Windows does not allow dynamic disks on removable USB drives, so it is most likely a partition of an internal (fixed) disk rather than a USB stick.</p>
+    {% elif devices.install_drive_letter %}
+    <p class="note" style="margin-bottom:16px;">Tor Browser was installed on drive {{ devices.install_drive_letter }}:, but no MountedDevices/USBSTOR record could be directly correlated to a specific physical device.</p>
+    {% endif %}
+
+    {% if devices.usbstor %}
+    {% set relevant_usbstor = devices.usbstor|selectattr("is_relevant")|list %}
+    {% set other_usbstor = devices.usbstor|rejectattr("is_relevant")|list %}
+    <h3 style="margin-top:0;">USBSTOR — USB mass-storage connection history</h3>
+    {% if relevant_usbstor %}
+    <div class="table-scroll" style="margin-bottom:12px;">
+      <table class="evidence-table">
+        <thead><tr><th>Device</th><th>Manufacturer</th><th>Serial</th><th>Last connected</th></tr></thead>
+        <tbody>
+          {% for d in relevant_usbstor %}
+          <tr>
+            <td class="val">{{ d.path }}</td>
+            <td class="off">{{ d.manufacturer or "—" }}</td>
+            <td class="off">{{ d.serial_number or "—" }}</td>
+            <td class="off">{{ d.timestamp|fmt_ts }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if other_usbstor %}
+    <details class="appendix">
+      <summary>Show {{ other_usbstor|length }} other USB storage device{{ "s" if other_usbstor|length != 1 }} this computer has recorded</summary>
+      <div class="appendix-body">
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Device</th><th>Manufacturer</th><th>Serial</th><th>Last connected</th></tr></thead>
+            <tbody>
+              {% for d in other_usbstor %}
+              <tr>
+                <td class="val">{{ d.path }}</td>
+                <td class="off">{{ d.manufacturer or "—" }}</td>
+                <td class="off">{{ d.serial_number or "—" }}</td>
+                <td class="off">{{ d.timestamp|fmt_ts }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+    {% endif %}
+
+    {% if devices.mounted_devices %}
+    <details class="appendix" style="margin-top:12px;">
+      <summary>Show {{ devices.mounted_devices|length }} MountedDevices record{{ "s" if devices.mounted_devices|length != 1 }} (drive-letter / volume -&gt; device mapping)</summary>
+      <div class="appendix-body">
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Mount point</th><th>Type</th><th>Decoded</th><th>Last write</th></tr></thead>
+            <tbody>
+              {% for d in devices.mounted_devices %}
+              <tr{% if d.is_relevant %} style="background:rgba(79,174,132,0.08);"{% endif %}>
+                <td class="val">{{ d.path }}</td>
+                <td class="off">{{ d.mount_type or "—" }}</td>
+                <td class="off">{{ d.decoded|wrap_path if d.decoded else "—" }}</td>
+                <td class="off">{{ d.timestamp|fmt_ts }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+
+    {% if devices.mountpoints2 %}
+    <details class="appendix" style="margin-top:12px;">
+      <summary>Show {{ devices.mountpoints2|length }} MountPoints2 record{{ "s" if devices.mountpoints2|length != 1 }} (volumes this user's session has mounted)</summary>
+      <div class="appendix-body">
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Volume / device identifier</th><th>Last write</th></tr></thead>
+            <tbody>
+              {% for d in devices.mountpoints2 %}
+              <tr{% if d.is_relevant %} style="background:rgba(79,174,132,0.08);"{% endif %}>
+                <td class="val">{{ d.path|wrap_path }}</td>
+                <td class="off">{{ d.timestamp|fmt_ts }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+
+    {% if devices.emdmgmt %}
+    <details class="appendix" style="margin-top:12px;">
+      <summary>Show {{ devices.emdmgmt|length }} EMDMgmt record{{ "s" if devices.emdmgmt|length != 1 }} (ReadyBoost device-eligibility tests)</summary>
+      <div class="appendix-body">
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Device identifier</th><th>Capacity</th><th>Last write</th></tr></thead>
+            <tbody>
+              {% for d in devices.emdmgmt %}
+              <tr{% if d.is_relevant %} style="background:rgba(79,174,132,0.08);"{% endif %}>
+                <td class="val">{{ d.path|wrap_path }}</td>
+                <td class="off">{{ d.device_capacity or "—" }}</td>
+                <td class="off">{{ d.timestamp|fmt_ts }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+
+    {% if devices.usb_devices %}
+    <details class="appendix" style="margin-top:12px;">
+      <summary>Show {{ devices.usb_devices|length }} generic USB device record{{ "s" if devices.usb_devices|length != 1 }} (includes non-storage devices, e.g. keyboards/mice)</summary>
+      <div class="appendix-body">
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Device</th><th>VID</th><th>PID</th><th>Last write</th></tr></thead>
+            <tbody>
+              {% for d in devices.usb_devices %}
+              <tr>
+                <td class="val">{{ d.path }}</td>
+                <td class="off">{{ d.vid or "—" }}</td>
+                <td class="off">{{ d.pid or "—" }}</td>
+                <td class="off">{{ d.timestamp|fmt_ts }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+
+    {% if devices.portable_devices %}
+    <details class="appendix" style="margin-top:12px;">
+      <summary>Show {{ devices.portable_devices|length }} Windows Portable Devices record{{ "s" if devices.portable_devices|length != 1 }} (MTP/portable device history, e.g. phones/cameras)</summary>
+      <div class="appendix-body">
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Device</th><th>Last write</th></tr></thead>
+            <tbody>
+              {% for d in devices.portable_devices %}
+              <tr>
+                <td class="val">{{ d.path }}</td>
+                <td class="off">{{ d.timestamp|fmt_ts }}</td>
               </tr>
               {% endfor %}
             </tbody>

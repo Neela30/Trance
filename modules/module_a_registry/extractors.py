@@ -46,14 +46,18 @@ from regipy.plugins.software.profilelist import ProfileListPlugin
 from regipy.plugins.software.winver import WinVersionPlugin
 from regipy.plugins.system.bam import BAMPlugin
 from regipy.plugins.system.computer_name import ComputerNamePlugin
+from regipy.plugins.system.mountdev import MOUNTED_DEVICES_PATH, parse_device_data
 from regipy.plugins.system.shimcache import ShimCachePlugin
 from regipy.plugins.system.timezone_data2 import TimezoneDataPlugin2
+from regipy.plugins.system.usb_devices import USBDevicesPlugin
+from regipy.plugins.system.usbstor import USBSTORPlugin
 from regipy.plugins.usrclass.shellbags_usrclass import ShellBagUsrclassPlugin
 from regipy.registry import RegistryHive
 from regipy.utils import convert_wintime
 
 from core.exceptions import ParsingError
 
+from ._muicache_grouping import group_muicache_values
 from ._shellbags_patch import apply_shellbags_patch
 
 logger = logging.getLogger(__name__)
@@ -184,8 +188,10 @@ def extract_bam(system_path: Path) -> list[dict]:
 def extract_muicache(ntuser_path: Path) -> list[dict]:
     """Extract MUICache entries (display names of apps invoked via the shell) from
     NTUSER.DAT. MUICachePlugin groups results by registry key (one entry per hive path,
-    each holding a list of applications) -- flattened here to one record per
-    application, same shape as extract_recentdocs()'s flattening."""
+    each holding a list of applications) -- flattened here to one record per raw
+    registry value, then grouped by group_muicache_values() to merge the Vista+
+    FriendlyAppName/ApplicationCompany value pair for the same program into one finding
+    (see that module's docstring for the confirmed real-world bug this fixes)."""
     hive = _load_hive(ntuser_path, "ntuser")
     plugin = MUICachePlugin(hive, as_json=True)
     if not plugin.can_run():
@@ -209,6 +215,7 @@ def extract_muicache(ntuser_path: Path) -> list[dict]:
                     "filename": app.get("filename"),
                 }
             )
+    return group_muicache_values(flattened)
     return flattened
 
 
@@ -518,3 +525,123 @@ def extract_last_visited_pidl_mru(ntuser_path: Path) -> list[dict]:
             }
         )
     return flattened
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 of the Module A roadmap -- device evidence.
+# ---------------------------------------------------------------------------
+
+
+def extract_usbstor(system_path: Path) -> list[dict]:
+    """USB mass-storage connection history from SYSTEM's Enum\\USBSTOR. Already flat,
+    one record per device+serial -- no flattening needed. `serial_number` is the field
+    report.py's device correlation (_build_device_correlation()) joins against
+    MountedDevices' decoded device path."""
+    hive = _load_hive(system_path, "system")
+    plugin = USBSTORPlugin(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(f"USBSTOR plugin cannot run against {system_path}: not a SYSTEM hive.")
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"USBSTOR extraction failed for {system_path}: {exc}") from exc
+    return plugin.entries
+
+
+def extract_usb_devices(system_path: Path) -> list[dict]:
+    """Generic USB device connection history (incl. non-storage, e.g. keyboards/mice)
+    from SYSTEM's Enum\\USB -- complements extract_usbstor(), which only covers USB mass
+    storage. Already flat, no flattening needed."""
+    hive = _load_hive(system_path, "system")
+    plugin = USBDevicesPlugin(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(
+            f"USB devices plugin cannot run against {system_path}: not a SYSTEM hive."
+        )
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"USB devices extraction failed for {system_path}: {exc}") from exc
+    return plugin.entries
+
+
+# Windows Dynamic Disk (Logical Disk Manager) volumes store "DMIO:ID:" + a 16-byte LDM
+# object id as their MountedDevices value, instead of a path/signature/GUID -- confirmed
+# against a real acquisition, not guessed (see extract_mounted_devices()'s own docstring).
+# Windows does not support converting a removable USB disk to a dynamic disk, so this
+# prefix is itself real, structural evidence a drive is a fixed/internal-disk partition,
+# not a USB stick -- report.py's device correlation treats it as a distinct case from a
+# genuinely undecodable value.
+_DYNAMIC_DISK_PREFIX = b"DMIO:ID:"
+
+
+def extract_mounted_devices(system_path: Path) -> list[dict]:
+    """Drive-letter/volume-to-device mapping from SYSTEM's MountedDevices -- the key
+    enabler for mapping the Tor install's drive letter to a physical device directly
+    (report.py's _build_device_correlation()): each entry's own `mount_type` ("drive_letter"
+    vs "volume") and, for a USB-attached drive, a decoded `path` field containing the
+    same `_??_USBSTOR#...#<serial>#{GUID}` shape extract_usbstor()'s own `serial_number`
+    is derived from -- the two are joined on that serial number, a real structural
+    correlation rather than constants.infer_drive_letters()'s same-evidence path-suffix
+    guess (kept unchanged -- a different problem: \\Device\\HarddiskVolumeN\\... -> letter).
+
+    Deliberately does NOT use regipy's own MountedDevicesPlugin, despite one existing: its
+    `run()` calls `iter_values()` with the default `trim_values=True`, which for
+    REG_BINARY data (exactly what every MountedDevices value is) returns a HEX STRING, not
+    `bytes` -- confirmed by reading regipy's own `NKRecord.iter_values()` source. Its own
+    `isinstance(data, bytes)` check is therefore always False, so its `parse_device_data()`
+    call is never reached and every entry decodes to nothing, regardless of what the value
+    actually contains -- confirmed against a real SYSTEM hive (manually re-reading the same
+    values with `trim_values=False` decodes them immediately). This reimplements the
+    plugin's own short categorization logic (name prefix -> mount_type) directly, reusing
+    regipy's own public `parse_device_data()` utility on real bytes -- same "bypass one
+    broken piece, reuse the rest of the public API" precedent as
+    extract_last_visited_pidl_mru()'s own docstring describes for a different plugin."""
+    hive = _load_hive(system_path, "system")
+    if hive.hive_type != "system":
+        raise ParsingError(
+            f"MountedDevices extraction cannot run against {system_path}: not a SYSTEM hive."
+        )
+    try:
+        mounted_key = hive.get_key(MOUNTED_DEVICES_PATH)
+    except RegistryKeyNotFoundException:
+        return []
+    except Exception as exc:
+        raise ParsingError(f"MountedDevices extraction failed for {system_path}: {exc}") from exc
+
+    last_write = convert_wintime(mounted_key.header.last_modified, as_json=True)
+    entries: list[dict] = []
+    try:
+        values = list(mounted_key.iter_values(trim_values=False))
+    except Exception as exc:
+        raise ParsingError(f"MountedDevices extraction failed for {system_path}: {exc}") from exc
+
+    for value in values:
+        name = value.name
+        data = value.value
+
+        entry: dict = {
+            "key_path": MOUNTED_DEVICES_PATH,
+            "last_write": last_write,
+            "value_name": name,
+        }
+        if name.startswith("\\DosDevices\\"):
+            entry["mount_point"] = name.replace("\\DosDevices\\", "")
+            entry["mount_type"] = "drive_letter"
+        elif name.startswith("\\??\\Volume"):
+            entry["mount_point"] = name
+            entry["mount_type"] = "volume"
+        elif name == "#{":
+            entry["mount_type"] = "database"
+        else:
+            entry["mount_type"] = "other"
+
+        if isinstance(data, bytes):
+            if data.startswith(_DYNAMIC_DISK_PREFIX):
+                entry["dynamic_disk"] = True
+            else:
+                entry.update(parse_device_data(data))
+            entry["data_size"] = len(data)
+
+        entries.append(entry)
+    return entries

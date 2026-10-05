@@ -21,6 +21,8 @@ from modules.module_a_registry.narrative import (
     describe_source_time_gap,
     describe_user_account,
     describe_user_account_plain,
+    extract_drive_letter,
+    find_install_location_path,
     format_dual_time,
     format_dual_time_plain,
     parse_tor_installer_filename,
@@ -116,6 +118,74 @@ class TestDescribeInstallLocation:
     def test_none_path(self):
         assert describe_install_location(None) == (None, None)
 
+    def test_device_match_on_same_drive_letter_names_the_specific_device(self):
+        """Phase 2: when report.py's device correlation found a direct serial-number
+        match for this exact drive letter, the generic 'may be a USB drive' hedge is
+        replaced with the specific device identity."""
+        device_match = {"drive_letter": "E", "name": "Cruzer_Blade", "serial": "4C53&0"}
+        folder, note = describe_install_location(
+            r"E:\Tor Browser\Browser\firefox.exe", device_match
+        )
+        assert folder == r"E:\Tor Browser\Browser"
+        assert "Cruzer_Blade" in note
+        assert "4C53&0" in note
+        assert "may be a USB drive" not in note
+
+    def test_device_match_on_a_different_drive_letter_falls_back_to_generic_wording(self):
+        """Regression pin: the fallback path (no match, or a match for some OTHER drive)
+        must produce exactly the pre-Phase-2 generic wording, unchanged."""
+        device_match = {"drive_letter": "F", "name": "Some Other Drive", "serial": "XYZ"}
+        folder, note = describe_install_location(
+            r"E:\Tor Browser\Browser\firefox.exe", device_match
+        )
+        assert folder == r"E:\Tor Browser\Browser"
+        assert note == (
+            "E: is not the main system drive and may be a USB drive or a second "
+            "disk — files there may not remain on this machine."
+        )
+
+    def test_no_device_match_falls_back_to_generic_wording(self):
+        folder, note = describe_install_location(
+            r"E:\Tor Browser\Browser\firefox.exe", device_info=None
+        )
+        assert folder == r"E:\Tor Browser\Browser"
+        assert note == (
+            "E: is not the main system drive and may be a USB drive or a second "
+            "disk — files there may not remain on this machine."
+        )
+
+
+class TestExtractDriveLetter:
+    def test_extracts_uppercase_letter(self):
+        assert extract_drive_letter(r"e:\Tor Browser\firefox.exe") == "E"
+
+    def test_none_path_returns_none(self):
+        assert extract_drive_letter(None) is None
+
+    def test_no_drive_letter_returns_none(self):
+        assert extract_drive_letter(r"\Device\HarddiskVolume6\Tor Browser\firefox.exe") is None
+
+
+class TestFindInstallLocationPath:
+    def test_prefers_lnk_shortcut_over_first_non_installer_entry(self):
+        annotated_by_type = {
+            "UserAssist": [
+                {
+                    "path": r"C:\Users\bob\Downloads\tor-browser-windows-x86_64-14.5.exe",
+                    "run_count": 1,
+                },
+                {"path": r"E:\Tor Browser\Tor Browser.lnk", "run_count": 3},
+            ]
+        }
+        assert find_install_location_path(annotated_by_type) == r"E:\Tor Browser\Tor Browser.lnk"
+
+    def test_no_run_count_entries_returns_none(self):
+        annotated_by_type = {"UserAssist": [{"path": r"C:\x.exe", "run_count": None}]}
+        assert find_install_location_path(annotated_by_type) is None
+
+    def test_empty_annotated_returns_none(self):
+        assert find_install_location_path({}) is None
+
 
 class TestDescribeUserAccount:
     def test_found_in_a_findings_path(self):
@@ -168,6 +238,39 @@ class TestDescribeEvidenceStrength:
             describe_evidence_strength([])
             == "Strength: no corroborating registry evidence was found."
         )
+
+    def test_shellbags_excluded_from_execution_source_count(self):
+        """Fix 6: ShellBags only shows folder access, not execution -- a component seen
+        in both UserAssist and ShellBags must report "one source only", not "confirmed by
+        2 independent sources"."""
+        timeline = [
+            {
+                "basename": "firefox.exe",
+                "seen_in": ["UserAssist", "ShellBags"],
+                "execution_sources": ["UserAssist"],
+            }
+        ]
+        text = describe_evidence_strength(timeline)
+        assert "one source only (UserAssist)" in text
+        assert "ShellBags" not in text
+
+    def test_shimcache_still_counts_as_a_second_execution_source(self):
+        timeline = [
+            {
+                "basename": "firefox.exe",
+                "seen_in": ["UserAssist", "ShimCache"],
+                "execution_sources": ["UserAssist", "ShimCache"],
+            }
+        ]
+        text = describe_evidence_strength(timeline)
+        assert "confirmed by 2 independent sources" in text
+
+    def test_no_execution_sources_at_all_states_so_plainly(self):
+        """Edge case: a component could in principle be seen only in contextual
+        tor-direct types (e.g. ShellBags alone), with zero execution-confirming sources."""
+        timeline = [{"basename": "x", "seen_in": ["ShellBags"], "execution_sources": []}]
+        text = describe_evidence_strength(timeline)
+        assert "no execution-confirming source" in text
 
 
 class TestDescribeNoFindings:
@@ -483,6 +586,90 @@ def _dt(iso: str):
     return datetime.fromisoformat(iso)
 
 
+def _minimal_launch_setup(shellbags=None, shellbags_timestamp=None):
+    annotated_by_type = {
+        "UserAssist": [
+            {
+                "path": r"E:\Tor Browser\Tor Browser.lnk",
+                "timestamp": "2026-07-14T15:11:00+00:00",
+                "run_count": 1,
+                "focus_count": 0,
+                "total_focus_time_ms": 0,
+            },
+        ],
+    }
+    if shellbags is not None:
+        annotated_by_type["ShellBags"] = shellbags
+    component_timeline = [{"basename": "tor browser.lnk", "seen_in": ["UserAssist"]}]
+    return annotated_by_type, component_timeline
+
+
+class TestShellBagsInTimeline:
+    """Fix 5: ShellBags folder-access events are interleaved chronologically with the
+    launch sentence, worded to match what the data actually proves (the BagMRU
+    registry key's own last-write time, not a literal "folder opened" claim -- see
+    narrative.build_narrative()'s own comment on this)."""
+
+    def test_shellbags_before_launch_appears_first(self):
+        annotated_by_type, component_timeline = _minimal_launch_setup(
+            shellbags=[
+                {
+                    "path": r"E:\Tor Browser",
+                    "timestamp": "2026-07-14T14:58:19+00:00",
+                }
+            ]
+        )
+        result = build_narrative(annotated_by_type, component_timeline, [], [], [], None)
+
+        shellbags_line = next(
+            line for line in result["timeline"] if line.startswith("Explorer recorded")
+        )
+        launch_line = next(line for line in result["timeline"] if "was opened once" in line)
+        assert result["timeline"].index(shellbags_line) < result["timeline"].index(launch_line)
+        assert (
+            shellbags_line
+            == r"Explorer recorded the folder E:\Tor Browser (last updated 14 Jul 2026, 14:58 UTC)."
+        )
+
+    def test_shellbags_after_launch_appears_after(self):
+        annotated_by_type, component_timeline = _minimal_launch_setup(
+            shellbags=[
+                {
+                    "path": r"E:\Tor Browser\Browser",
+                    "timestamp": "2026-07-14T15:30:00+00:00",
+                }
+            ]
+        )
+        result = build_narrative(annotated_by_type, component_timeline, [], [], [], None)
+
+        shellbags_line = next(
+            line for line in result["timeline"] if line.startswith("Explorer recorded")
+        )
+        launch_line = next(line for line in result["timeline"] if "was opened once" in line)
+        assert result["timeline"].index(launch_line) < result["timeline"].index(shellbags_line)
+
+    def test_no_shellbags_findings_leaves_timeline_unchanged(self):
+        annotated_by_type, component_timeline = _minimal_launch_setup()
+        result = build_narrative(annotated_by_type, component_timeline, [], [], [], None)
+
+        assert not any(line.startswith("Explorer recorded") for line in result["timeline"])
+        assert any("was opened once" in line for line in result["timeline"])
+
+    def test_wording_never_claims_the_user_opened_the_folder(self):
+        """The ShellBags timestamp is a registry key's own last-write time, not the
+        folder's own access time -- "the user opened the folder ... on X" would overstate
+        what that actually proves."""
+        annotated_by_type, component_timeline = _minimal_launch_setup(
+            shellbags=[{"path": r"E:\Tor Browser", "timestamp": "2026-07-14T14:58:19+00:00"}]
+        )
+        result = build_narrative(annotated_by_type, component_timeline, [], [], [], None)
+
+        plain_text = " ".join(result["timeline"])
+        assert "the user opened the folder" not in plain_text.lower()
+        assert "Explorer recorded the folder" in plain_text
+        assert "last updated" in plain_text
+
+
 class TestDescribeReliability:
     def test_no_components_gives_nothing_to_rate(self):
         assert describe_reliability([]) == [
@@ -507,6 +694,22 @@ class TestDescribeReliability:
         lines = describe_reliability(timeline)
         assert len(lines) == 2
         assert "periodic scan" in lines[1]
+
+    def test_shellbags_excluded_from_execution_source_count(self):
+        timeline = [
+            {
+                "basename": "firefox.exe",
+                "seen_in": ["UserAssist", "ShellBags"],
+                "execution_sources": ["UserAssist"],
+            }
+        ]
+        lines = describe_reliability(timeline)
+        assert "Only one Windows record" in lines[0]
+
+    def test_no_execution_sources_states_so_without_overclaiming(self):
+        timeline = [{"basename": "x", "seen_in": ["ShellBags"], "execution_sources": []}]
+        lines = describe_reliability(timeline)
+        assert "No Windows feature that confirms a program actually ran" in lines[0]
 
 
 class TestDescribeNotDetermined:

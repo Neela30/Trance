@@ -82,15 +82,31 @@ modules/<name>/__init__.py:
     def run(config: core.config.TranceConfig, **kwargs) -> core.schema.ModuleResult
 ```
 - `ModuleResult(module, status, artifacts, details, message)`; `status` ∈
-  `ok | skipped | not_implemented | error`.
+  `ok | partial | skipped | not_implemented | error` (`core.schema.MODULE_STATUSES`).
+  `partial` means one or more individual extractors/sub-steps failed but the module still
+  produced real findings — see "Per-extractor isolation" below; `error` is reserved for a
+  whole-module failure (e.g. an integrity-hash mismatch).
 - `artifacts`: flat list of `core.schema.Artifact(module, artifact_type, source, description,
-  sha256, timestamp)` — goes into `findings.json["artifacts"]` for every module.
+  sha256, timestamp, confidence, confidence_reason, category)` — goes into
+  `findings.json["artifacts"]` for every module. The last three fields are Module A-specific
+  (`"high"/"medium"/"low"`, a one-line reason, `"tor-direct"/"context"`); Modules B/C leave
+  them `None`.
 - `details`: arbitrary module-specific dict kept verbatim under
   `findings.json["modules"][name]["details"]` — this is what the report presenters read.
+  By convention `details["warnings"]` is a list of `{"artifact_type", "source", "reason",
+  "traceback"}` dicts for any sub-step that failed without failing the whole module (see
+  below); the root report.py and `report_template.html.j2` render these as a plain-English
+  "could not be read" callout rather than hiding the rest of that module's findings.
 - Heavy analysis imports are done **lazily inside `run()`** so the acquire scripts living in
   the same package stay importable without regipy etc. Keep it that way.
-- A module that raises is caught by `main.run_module()` and recorded as `error`; it never
-  stops the other modules.
+- A module that raises an exception it never catches itself is caught by
+  `main.run_module()` and recorded as `error`; it never stops the other modules. Modules
+  A/B additionally isolate failures **inside** themselves, per extractor/sub-step, so one
+  bad artifact type degrades to `partial` with a warning instead of failing the whole
+  module (Module C's single linear `analyze()` pass has no per-step seams of its own; its
+  `run()` only hardens the outer boundary — `except Exception`, not just its own
+  `TranceError` subclasses — so an unexpected exception still degrades to a clean `error`
+  result rather than propagating).
 
 **Pipeline** (`main.py`):
 - `run_pipeline(config, module_kwargs, progress_cb=None) -> PipelineResult` runs
@@ -114,10 +130,12 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
 
 ### Module A — registry & execution evidence (`modules/module_a_registry/`)
 
-Module A is mid-way through a multi-phase roadmap (Phase 0 "foundations" and Phase 1
-"execution evidence" are done; Phases 2–6 — USB devices, network context,
-persistence/config, report/narrative wiring, SRUM/event logs — are not started). What
-follows describes the current state.
+Module A is mid-way through a multi-phase roadmap (Phase 0 "foundations", Phase 1
+"execution evidence", and Phase 2 "device evidence" — USB/MountedDevices/MountPoints2/
+EMDMgmt/Windows Portable Devices, plus a direct drive-letter → physical-device
+correlation — are done; Phases 3–6 — network context, persistence/config,
+report/narrative wiring for the remaining context facts, SRUM/event logs — are not
+started). What follows describes the current state.
 
 - **Acquire** (`acquire.py`, Windows, admin): `reg save HKLM\SYSTEM`, `reg save
   HKLM\SOFTWARE`, and `reg save HKCU` (current user's NTUSER.DAT); Amcache.hve via a
@@ -128,15 +146,27 @@ follows describes the current state.
   way (VSS copy, no live-registry variant — see `acquire_usrclass()`'s docstring) for
   that same target user (or the current session's username if `--ntuser-user` wasn't
   given). Each hive/flag independent; `--skip-usrclass` etc. opt out.
-- **Analyze** (`pipeline.py`): hash on ingest → extraction → Tor-relevance filter
-  (`constants.py: is_tor_related_entry`) → normalize to `Artifact`s (`normalize.py`) →
-  re-hash and raise `IntegrityError` on mismatch. 19 artifact types total, from three
-  sources:
+- **Analyze** (`pipeline.py`): hash on ingest → extraction (each extractor isolated in its
+  own try/except inside `_process_hive()` — see "Per-extractor isolation" in §3) →
+  Tor-relevance filter (`constants.py: is_tor_related_entry`) → normalize to `Artifact`s
+  (`normalize.py`) → re-hash and raise `IntegrityError` on mismatch. 25 artifact types
+  total, from three sources:
   - **regipy plugins, thin-wrapped in `extractors.py`**: UserAssist, RecentDocs, MUICache,
     RunMRU, WordWheelQuery, ComDlg32, TypedPaths from NTUSER; ShimCache, BAM, ComputerName,
-    TimeZone from SYSTEM; Amcache; InstalledPrograms, WindowsVersion from SOFTWARE;
-    ShellBags from UsrClass.dat (needs the `regipy[full]` extra — `libfwsi-python`/
-    `libfwps-python`, importable as `pyfwsi`/`pyfwps` — see requirements.txt).
+    TimeZone, USBSTOR, generic USB devices, MountedDevices, Windows Portable Devices (WPD,
+    resolved per-ControlSet via `get_control_sets()`, same as ComputerName/TimeZone) from
+    SYSTEM; Amcache; InstalledPrograms, WindowsVersion from SOFTWARE; ShellBags from
+    UsrClass.dat (needs the `regipy[full]` extra — `libfwsi-python`/`libfwps-python`,
+    importable as `pyfwsi`/`pyfwps` — see requirements.txt). ShellBags extraction is
+    additionally patched (`_shellbags_patch.py`, applied via `apply_shellbags_patch()`):
+    `pyfwsi`'s `get_creation_time()`/`get_access_time()` can raise a bare `SystemError`
+    ("invalid format string: %hhu.") on certain real entries that regipy's own
+    `except OSError:` doesn't catch, aborting the *entire* hive's ShellBags extraction over
+    one bad timestamp — confirmed by reproducing it against a real UsrClass.dat, not
+    guessed. The patch widens that to `except (OSError, SystemError):` and additionally
+    isolates each MRU slot in its own try/except (`plugin._shellbags_skip_count` tracks how
+    many were skipped) so one malformed entry degrades gracefully instead of losing the
+    whole hive; applying it twice is a no-op (idempotent).
   - **One regipy *function* reused directly, bypassing a broken plugin *method* for this
     one sub-case** (`extract_last_visited_pidl_mru` in `extractors.py`): ComDlg32Plugin's
     own `LastVisitedPidlMRU` handling reuses OpenSavePidlMRU's "value names are
@@ -148,8 +178,9 @@ follows describes the current state.
   - **Hand-written parsers, no regipy plugin exists at all — `custom_extractors.py`**:
     MUICache from UsrClass.dat (a same-named NTUSER-only plugin exists but can never
     reach this data — see that file's module docstring), Program Compatibility Assistant
-    Store, `Software\Mozilla\Firefox\Launcher`, `FeatureUsage\AppSwitched`, all from
-    NTUSER. Every hive is opened with an **explicit** `hive_type=` (never regipy's own
+    Store, `Software\Mozilla\Firefox\Launcher`, `FeatureUsage\AppSwitched`, MountPoints2,
+    all from NTUSER; EMDMgmt (ReadyBoost device-eligibility test records) from SOFTWARE.
+    Every hive is opened with an **explicit** `hive_type=` (never regipy's own
     auto-detection, which reads the hive's *embedded* header path and is unreliable for
     an acquired/renamed copy — confirmed broken for UsrClass.dat specifically, whose
     check is an exact-equality match no real acquired hive will ever satisfy).
@@ -170,36 +201,130 @@ follows describes the current state.
   justification), and `category` (`"tor-direct"`/`"context"`), all assigned once per
   `artifact_type` in `normalize.py` from `constants.py`'s `ARTIFACT_CONFIDENCE` /
   `ARTIFACT_CONFIDENCE_REASON` / `ARTIFACT_CATEGORY` maps — the single source of truth.
-  Three types (ComputerName, TimeZone, WindowsVersion) are `category="context"`:
-  machine-wide facts, never filtered by `is_tor_related()`, and — per `pipeline.py`'s
-  `run_module_a()` — **only kept in the final findings if the same run also produced at
-  least one "tor-direct" finding** (a bare computer name/time zone isn't interesting on
-  its own). `findings.json`'s per-module `artifacts` stay a superset across all modules;
-  Module B/C artifacts simply leave these three fields `None`.
+  Nine types are `category="context"`: Phase 0's ComputerName/TimeZone/WindowsVersion
+  (machine-wide facts) plus Phase 2's USBStor (HIGH — authoritative USB mass-storage
+  connection history), MountedDevices (HIGH — a direct drive-letter/volume-to-device
+  mapping), USBDevices (MEDIUM — generic enumeration, not mass-storage-specific), EMDMgmt
+  (MEDIUM — an independent ReadyBoost-eligibility test record, best-effort on exact value
+  layout beyond the device-identifying subkey name), MountPoints2 and PortableDevices
+  (LOW — "this volume/MTP device was seen at some point", contextual only). None of these
+  nine are filtered by `is_tor_related()` (no USB device's own data ever says "Tor
+  Browser"), and — per `pipeline.py`'s `run_module_a()` — **all are only kept in the final
+  findings if the same run also produced at least one "tor-direct" finding** (a bare
+  computer name or USB history isn't interesting on its own). `findings.json`'s
+  per-module `artifacts` stay a superset across all modules; Module B/C artifacts simply
+  leave these three fields `None`.
   Program Compatibility Assistant Store's and Firefox Launcher's value **data** (beyond
   the path-bearing value name) are decoded best-effort / low-confidence-on-exact-layout —
   neither has been verified against a real captured hive yet; treat
   `flagged_timestamp`/`raw_value` as supplementary, not authoritative, same caveat
-  ComDlg32's own PIDL decoding already carries.
-- **Report** (`report.py`): dedupes, builds a per-component timeline across hives, and counts
-  components *corroborated by 2+ independent hive sources* — the only real correlation logic
-  in the codebase right now, and only within Module A. `build_context()`'s `system_context`
-  key carries the three context facts separately from the tor-direct `sections` list
-  (structured only so far — no narrative/template prose yet; that's Phase 5). The other
-  per-finding regex field extraction (`_RUN_COUNT_RE`/`_SHA1_RE`/etc.) was deliberately
-  NOT extended for Phase 1's new per-type fields (e.g. `LastVisitedPidlMRU`'s `program`) —
-  still visible in the plain `description` text, just not pulled into its own table
-  column yet; revisit if/when that starts to strain.
+  ComDlg32's own PIDL decoding and EMDMgmt's `device_capacity` already carry.
+- **Report** (`report.py`): dedupes, builds a per-component cross-hive timeline
+  (`_build_component_timeline()`), and counts components *corroborated by 2+ independent
+  execution sources* — the only cross-hive correlation in the codebase, and only within
+  Module A. `build_context()`'s `system_context` key carries Phase 0's three machine
+  facts separately from the tor-direct `sections` list (structured only — no
+  narrative/template prose; that's Phase 5).
+  **`_build_component_timeline()` only ever iterates tor-direct findings**
+  (`_is_tor_direct()`, reading each finding's own `category` field) — a real, confirmed
+  bug that shipped with Phase 2 and was fixed afterward: widening `_PATH_RE` to also
+  match `"device '...'"`/`"entry '...'"` gave every device-evidence type a `path` field
+  too, and this function iterated every artifact_type unconditionally, so every USB
+  device, drive letter and volume GUID on a real machine was being counted as a "Tor
+  Browser component" (one real acquisition showed "58 distinct files" where only 8 were
+  genuinely Tor-related). `narrative.py`'s account-resolution path scan got the same
+  category guard defensively. The table's "N distinct files" count is just
+  `component_timeline`'s length — fixing the filter fixed that count too, nothing else to
+  maintain.
+  Each component also carries `execution_sources` — the subset of `seen_in` in
+  `EXECUTION_SOURCE_TYPES` (`UserAssist`/`Amcache`/`ShimCache`/`BAM`/`MUICache`) — used
+  for the corroboration count and `narrative.py`'s "N independent sources confirm
+  execution" claims instead of the broader `seen_in`: **ShellBags only ever shows a
+  folder was browsed in Explorer, never that anything inside it was executed**, so it
+  must not inflate that count (it still appears in `seen_in` and the table's "Seen in"
+  chips, and still feeds its own plain-English timeline sentence — just not counted as
+  execution corroboration). MUICache *is* in `EXECUTION_SOURCE_TYPES` — the shell actually
+  invokes a program to populate it — even though its own timestamp (the key's shared
+  last-write time, see below) is never used for timing.
+  Also found and fixed while on this: regipy's own `MountedDevicesPlugin` never actually
+  decodes anything, on any machine — `NKRecord.iter_values()` defaults to
+  `trim_values=True`, which returns a **hex string**, not `bytes`, for `REG_BINARY` data
+  (exactly what every `MountedDevices` value is), so the plugin's own
+  `isinstance(data, bytes)` check is always `False` and its `parse_device_data()` call is
+  never reached. `extractors.extract_mounted_devices()` no longer uses that plugin — it
+  reimplements its short categorization logic directly, reading real bytes via
+  `iter_values(trim_values=False)` and calling regipy's own public `parse_device_data()`
+  itself (same "bypass the one broken piece, reuse the rest of the public API" precedent
+  `extract_last_visited_pidl_mru()` already set for a different plugin). This also
+  surfaced that Windows **Dynamic Disk** volumes store `"DMIO:ID:" + a 16-byte LDM object
+  id` as their `MountedDevices` value — a shape `parse_device_data()` doesn't (and
+  shouldn't) recognize; flagged as `entry["dynamic_disk"] = True` without attempting a
+  decode. Windows does not support dynamic disks on removable USB media, so finding this
+  on the Tor install's own drive is itself real, structural evidence it's an
+  internal/fixed-disk partition, not a USB stick — see `devices` below.
+  `devices` (built by `_build_device_correlation()`, modeled on `_build_profiles_table()`'s
+  is-relevant-flagging pattern) resolves the Tor install's own drive letter (via
+  `narrative.find_install_location_path()` + `extract_drive_letter()`, called *before*
+  `build_narrative()` so the result can feed back into its sentences) through a chain,
+  strongest first: (1) a Dynamic Disk identifier on that drive stops resolution right
+  there (see above); (2) the decoded `MountedDevices` value directly names a
+  USBSTOR-shaped path — join its serial against `USBStor`/`PortableDevices` (both embed
+  the same serial; a real Phase 2 bug put PortableDevices in the "never matches" bucket,
+  fixed); (3) the decoded value instead names a bare `\??\Volume{GUID}` — look for a
+  *sibling* `MountedDevices` entry literally named that same `\??\Volume{GUID}` string
+  and retry step 2 against it (exact value-name match only; USBSTOR's own `disk_guid`
+  field was checked against real `MountedDevices` volume GUIDs and never matches, so no
+  fuzzy/near-GUID matching was built — confirmed dead end, not merely unneeded); (4)
+  nothing resolves — state so plainly and offer every `USBStor`/`PortableDevices` entry as
+  a candidate (never `USBDevices` hubs/cameras/sensors, never `MountPoints2`/`EMDMgmt`).
+  Nothing is discarded at any step: every device/volume the machine has ever recorded
+  still renders in the "All connected devices and volumes" appendix, with only the
+  matched row(s) flagged `is_relevant`. Verified end-to-end against a real evidence
+  capture: that machine's `E:`/`C:`/`D:` are genuine Dynamic Disk volumes (confirmed via
+  raw bytes) while its `F:`/`G:` decode cleanly to real USBSTOR paths — proving both the
+  dynamic-disk branch and the decode path itself are sound, not just mocked.
 - **Narrative** (`narrative.py`): deterministic, rule-based plain-English story
-  (`key_finding`/`timeline`/`reliability`/`not_determined` for a non-technical reader, plus
-  a `technical` sub-dict) — unchanged by Phase 0/1; does not yet reference the three
-  context facts or any Phase 1 artifact type.
+  (`key_finding`/`timeline`/`reliability`/`not_determined`/`device_story` for a
+  non-technical reader, plus a `technical` sub-dict) — still doesn't reference Phase 0's
+  three context facts.
+  `describe_drive_device()` is the one shared function behind both
+  `describe_install_location()`'s inline install-location caveat and the dedicated
+  **"Where Tor Browser ran from"** section (`device_story`, new) — so the two can never
+  disagree. Three cases: resolved (names the device, serial, and — `device_story` only,
+  via `include_timing=True` — first/last-connected when USBSTOR provides them), Dynamic
+  Disk (the "Windows does not allow dynamic disks on removable USB drives..." sentence),
+  or unknown (the inline caveat keeps exactly its original pre-Phase-2 generic wording,
+  regression-pinned; `device_story` instead states plainly the device couldn't be
+  identified and lists candidates).
+  ShellBags gets a plain-English timeline sentence too, chronologically interleaved with
+  the launch sentence (both carry real timestamps; everything else in the timeline keeps
+  its fixed logical position). Wording was deliberately checked against
+  `ShellBagUsrclassPlugin.iter_sk()`'s own source first: a ShellBags entry's `timestamp`
+  is the **BagMRU registry key's own last-write time**, shared by every slot under that
+  key — not the folder's own filesystem access time (that field exists in the raw plugin
+  data as `access_time`/`creation_time`/`modification_time` but was never surfaced past
+  extraction, and still isn't). A key-write isn't guaranteed to mean "freshly visited at
+  this exact instant", so the sentence says *"Explorer recorded the folder ... (last
+  updated X)"*, not *"the user opened the folder ... on X"* — the stronger claim the data
+  doesn't actually support.
+- MUICache's Vista+ convention stores **two separate registry values per program**
+  (`<path>.FriendlyAppName` / `<path>.ApplicationCompany`) — both `extract_muicache()`
+  and `extract_muicache_usrclass()` used to treat each as its own finding, so one real
+  program showed up as two fake "files" with the literal suffix stuck onto the basename.
+  Both now call the new `_muicache_grouping.group_muicache_values()` before returning,
+  merging the pair (or passing a bare pre-Vista single-value entry through unchanged) into
+  one record; `normalize.py` renders both fields, e.g. `"... entry for
+  'firefox.exe' — 'Tor Browser', Mozilla Corporation."`. MUICache's timestamp is also the
+  registry key's own shared last-write time, not a per-program run time — the "Raw
+  findings by hive" table labels that column "Registry key last updated" specifically for
+  MUICache's rows, with a one-line caption saying so.
 - Standalone CLI: `python -m modules.module_a_registry.cli` (uses `click`).
-- None of Phase 1's new extractors have been run against a real UsrClass.dat/NTUSER.DAT
-  hive yet (same "mocked-only, never exercised against real data" status every Module A
-  extractor has had since Phase 0) — `pyfwsi`/`pyfwps`'s actual behavior against a real
-  ShellBags key is specifically unverified, flagged the same way Volatility3 is in
-  Module C.
+- Phase 0/1's extractors are still mostly mocked-tested only; `extract_mounted_devices()`
+  and the device-correlation chain above **have** been verified against a real
+  SYSTEM/SOFTWARE/NTUSER/UsrClass.dat capture — `pyfwsi`/`pyfwps`'s actual ShellBags
+  behavior remains the other piece of Phase 1 verified against real data (via the
+  SystemError fix), same "mostly mocked-only" caveat Volatility3 carries in Module C
+  otherwise.
 
 ### Module B — disk (`modules/module_b_disk/`) — mostly written by teammate (branch `Sahe`)
 

@@ -50,16 +50,22 @@ from .constants import (
     ARTIFACT_TYPE_COMDLG32,
     ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE,
     ARTIFACT_TYPE_COMPUTERNAME,
+    ARTIFACT_TYPE_EMDMGMT,
     ARTIFACT_TYPE_FIREFOX_LAUNCHER,
     ARTIFACT_TYPE_INSTALLEDPROGRAMS,
     ARTIFACT_TYPE_LASTVISITEDPIDLMRU,
+    ARTIFACT_TYPE_MOUNTEDDEVICES,
+    ARTIFACT_TYPE_MOUNTPOINTS2,
     ARTIFACT_TYPE_MUICACHE,
+    ARTIFACT_TYPE_PORTABLEDEVICES,
     ARTIFACT_TYPE_RECENTDOCS,
     ARTIFACT_TYPE_RUNMRU,
     ARTIFACT_TYPE_SHELLBAGS,
     ARTIFACT_TYPE_SHIMCACHE,
     ARTIFACT_TYPE_TIMEZONE,
     ARTIFACT_TYPE_TYPEDPATHS,
+    ARTIFACT_TYPE_USBDEVICES,
+    ARTIFACT_TYPE_USBSTOR,
     ARTIFACT_TYPE_USER_ASSIST,
     ARTIFACT_TYPE_WINDOWSVERSION,
     ARTIFACT_TYPE_WORDWHEELQUERY,
@@ -71,8 +77,11 @@ from .constants import (
 from .custom_extractors import (
     extract_app_switched,
     extract_compat_assistant_store,
+    extract_emdmgmt,
     extract_firefox_launcher,
+    extract_mountpoints2,
     extract_muicache_usrclass,
+    extract_portable_devices,
 )
 from .extractors import (
     extract_amcache,
@@ -81,6 +90,7 @@ from .extractors import (
     extract_computer_name,
     extract_installed_programs,
     extract_last_visited_pidl_mru,
+    extract_mounted_devices,
     extract_muicache,
     extract_profiles,
     extract_recentdocs,
@@ -89,6 +99,8 @@ from .extractors import (
     extract_shimcache,
     extract_time_zone,
     extract_typed_paths,
+    extract_usb_devices,
+    extract_usbstor,
     extract_user_assist,
     extract_windows_version,
     extract_word_wheel_query,
@@ -122,6 +134,7 @@ def _ntuser_extractors() -> tuple[_ExtractorSpec, ...]:
         (ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE, extract_compat_assistant_store),
         (ARTIFACT_TYPE_FIREFOX_LAUNCHER, extract_firefox_launcher),
         (ARTIFACT_TYPE_APP_SWITCHED, extract_app_switched),
+        (ARTIFACT_TYPE_MOUNTPOINTS2, extract_mountpoints2),
     )
 
 
@@ -131,6 +144,10 @@ def _system_extractors() -> tuple[_ExtractorSpec, ...]:
         (ARTIFACT_TYPE_BAM, extract_bam),
         (ARTIFACT_TYPE_COMPUTERNAME, extract_computer_name),
         (ARTIFACT_TYPE_TIMEZONE, extract_time_zone),
+        (ARTIFACT_TYPE_USBSTOR, extract_usbstor),
+        (ARTIFACT_TYPE_USBDEVICES, extract_usb_devices),
+        (ARTIFACT_TYPE_MOUNTEDDEVICES, extract_mounted_devices),
+        (ARTIFACT_TYPE_PORTABLEDEVICES, extract_portable_devices),
     )
 
 
@@ -142,6 +159,7 @@ def _software_extractors() -> tuple[_ExtractorSpec, ...]:
     return (
         (ARTIFACT_TYPE_INSTALLEDPROGRAMS, extract_installed_programs),
         (ARTIFACT_TYPE_WINDOWSVERSION, extract_windows_version),
+        (ARTIFACT_TYPE_EMDMGMT, extract_emdmgmt),
     )
 
 

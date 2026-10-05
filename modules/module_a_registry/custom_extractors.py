@@ -14,7 +14,8 @@ extractor in extractors.py.
 Formerly `system_context.py` (Phase 0: computer name/time zone/Windows version) -- those
 three turned out to duplicate real regipy plugins (ComputerNamePlugin/TimezoneDataPlugin2/
 WinVersionPlugin, missed in the first pass) and moved to extractors.py as thin plugin
-wrappers instead. This file is renamed and now holds genuinely plugin-less Phase 1 parsers.
+wrappers instead. This file is renamed and now holds genuinely plugin-less parsers added
+across Phase 1 (execution evidence) and Phase 2 (device evidence) of the roadmap.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ from regipy.registry import RegistryHive
 from regipy.utils import convert_wintime
 
 from core.exceptions import ParsingError
+
+from ._muicache_grouping import group_muicache_values
 
 # MUICache's Vista+ location is `\Software\Classes\Local Settings\Software\Microsoft\
 # Windows\Shell\MuiCache` when read through the LIVE registry's HKCU view -- but that
@@ -42,6 +45,14 @@ _MUICACHE_USRCLASS_PATH = r"\Local Settings\Software\Microsoft\Windows\Shell\Mui
 _COMPAT_ASSISTANT_STORE_PATH = r"\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Store"
 _FIREFOX_LAUNCHER_PATH = r"\Software\Mozilla\Firefox\Launcher"
 _APP_SWITCHED_PATH = r"\Software\Microsoft\Windows\CurrentVersion\Explorer\FeatureUsage\AppSwitched"
+
+# Phase 2 (device evidence) paths.
+_MOUNTPOINTS2_PATH = r"\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2"
+_EMDMGMT_PATH = r"\Microsoft\Windows NT\CurrentVersion\EMDMgmt"
+# Relative (no leading hive root) -- resolved per-ControlSet via RegistryHive.
+# get_control_sets(), the same "every existing ControlSet, not just the active one"
+# approach Phase 0's ComputerNamePlugin/TimezoneDataPlugin2 already use (extractors.py).
+_WPD_RELATIVE_PATH = r"Enum\SWD\WPDBUSENUM"
 
 
 def _load_hive(hive_path: Path, hive_type: str) -> RegistryHive:
@@ -65,7 +76,9 @@ def extract_muicache_usrclass(usrclass_path: Path) -> list[dict]:
     despite a same-named plugin existing. Mirrors that plugin's own value-filtering
     (skip "@..." indirect-string-table references and the "LangID" value) so the two
     sources (this one, and extract_muicache() from NTUSER.DAT) produce directly
-    comparable records."""
+    comparable records -- both also go through group_muicache_values() to merge Vista+'s
+    FriendlyAppName/ApplicationCompany value pair for the same program into one finding
+    (see that module's docstring)."""
     hive = _load_hive(usrclass_path, "usrclass")
     try:
         key = hive.get_key(_MUICACHE_USRCLASS_PATH)
@@ -89,7 +102,7 @@ def extract_muicache_usrclass(usrclass_path: Path) -> list[dict]:
                 "filename": value.name.rsplit("\\", 1)[-1],
             }
         )
-    return flattened
+    return group_muicache_values(flattened)
 
 
 def _best_effort_trailing_filetime(data: bytes) -> str | None:
@@ -199,4 +212,84 @@ def extract_app_switched(ntuser_path: Path) -> list[dict]:
                 "switch_count": count,
             }
         )
+    return flattened
+
+
+def extract_mountpoints2(ntuser_path: Path) -> list[dict]:
+    """Per-user record (one entry per mounted volume this user's session has seen) from
+    NTUSER.DAT's MountPoints2 -- subkey names are typically a volume GUID or, for a USB
+    drive, the same _??_USBSTOR#...#<serial>#{GUID} identifier MountedDevices/USBSTOR
+    also use (report.py's device correlation can match on this)."""
+    hive = _load_hive(ntuser_path, "ntuser")
+    try:
+        key = hive.get_key(_MOUNTPOINTS2_PATH)
+    except RegistryKeyNotFoundException:
+        return []
+    except Exception as exc:
+        raise ParsingError(f"MountPoints2 extraction failed: {exc}") from exc
+
+    flattened: list[dict] = []
+    for subkey in key.iter_subkeys():
+        flattened.append(
+            {
+                "key_path": f"{_MOUNTPOINTS2_PATH}\\{subkey.name}",
+                "path": subkey.name,
+                "last_write": convert_wintime(subkey.header.last_modified, as_json=True),
+            }
+        )
+    return flattened
+
+
+def extract_emdmgmt(software_path: Path) -> list[dict]:
+    """External Mass Device Management (ReadyBoost-eligibility testing) records from
+    SOFTWARE's EMDMgmt -- an independent OS subsystem corroborating removable-device
+    presence. Best-effort on exact value layout (no regipy plugin or sample to verify
+    against, same honesty standard as Phase 1's AppCompatFlags\\Store/Firefox Launcher):
+    the subkey name (device identity, embedding the same vendor/product/serial shape) is
+    reliable; incidental value fields are supplementary."""
+    hive = _load_hive(software_path, "software")
+    try:
+        key = hive.get_key(_EMDMGMT_PATH)
+    except RegistryKeyNotFoundException:
+        return []
+    except Exception as exc:
+        raise ParsingError(f"EMDMgmt extraction failed: {exc}") from exc
+
+    flattened: list[dict] = []
+    for subkey in key.iter_subkeys():
+        flattened.append(
+            {
+                "key_path": f"{_EMDMGMT_PATH}\\{subkey.name}",
+                "path": subkey.name,
+                "device_capacity": subkey.get_value("DeviceCapacity"),
+                "last_write": convert_wintime(subkey.header.last_modified, as_json=True),
+            }
+        )
+    return flattened
+
+
+def extract_portable_devices(system_path: Path) -> list[dict]:
+    """Windows Portable Devices (MTP device history, e.g. phones/cameras) from SYSTEM's
+    Enum\\SWD\\WPDBUSENUM -- tangential to a mass-storage Tor install but still
+    device-connection context. Resolved per existing ControlSet via
+    RegistryHive.get_control_sets(), same approach extractors.py's ComputerNamePlugin/
+    TimezoneDataPlugin2 wrappers already rely on."""
+    hive = _load_hive(system_path, "system")
+    flattened: list[dict] = []
+    for control_set_path in hive.get_control_sets(_WPD_RELATIVE_PATH):
+        try:
+            key = hive.get_key(control_set_path)
+        except RegistryKeyNotFoundException:
+            continue
+        except Exception as exc:
+            raise ParsingError(f"PortableDevices extraction failed: {exc}") from exc
+        for device_key in key.iter_subkeys():
+            flattened.append(
+                {
+                    "key_path": f"{control_set_path}\\{device_key.name}",
+                    "path": device_key.name,
+                    "friendly_name": device_key.get_value("FriendlyName"),
+                    "last_write": convert_wintime(device_key.header.last_modified, as_json=True),
+                }
+            )
     return flattened

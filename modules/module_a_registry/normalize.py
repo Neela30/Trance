@@ -34,16 +34,22 @@ from .constants import (
     ARTIFACT_TYPE_COMDLG32,
     ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE,
     ARTIFACT_TYPE_COMPUTERNAME,
+    ARTIFACT_TYPE_EMDMGMT,
     ARTIFACT_TYPE_FIREFOX_LAUNCHER,
     ARTIFACT_TYPE_INSTALLEDPROGRAMS,
     ARTIFACT_TYPE_LASTVISITEDPIDLMRU,
+    ARTIFACT_TYPE_MOUNTEDDEVICES,
+    ARTIFACT_TYPE_MOUNTPOINTS2,
     ARTIFACT_TYPE_MUICACHE,
+    ARTIFACT_TYPE_PORTABLEDEVICES,
     ARTIFACT_TYPE_RECENTDOCS,
     ARTIFACT_TYPE_RUNMRU,
     ARTIFACT_TYPE_SHELLBAGS,
     ARTIFACT_TYPE_SHIMCACHE,
     ARTIFACT_TYPE_TIMEZONE,
     ARTIFACT_TYPE_TYPEDPATHS,
+    ARTIFACT_TYPE_USBDEVICES,
+    ARTIFACT_TYPE_USBSTOR,
     ARTIFACT_TYPE_USER_ASSIST,
     ARTIFACT_TYPE_WINDOWSVERSION,
     ARTIFACT_TYPE_WORDWHEELQUERY,
@@ -127,10 +133,21 @@ def _normalize_bam(entry: dict) -> tuple[str, str | None]:
 
 
 def _normalize_muicache(entry: dict) -> tuple[str, str | None]:
+    # entry has already been through _muicache_grouping.group_muicache_values() (called
+    # from the extractor itself) -- "display_name"/"application_company" here are the
+    # Vista+ FriendlyAppName/ApplicationCompany value pair for the SAME program merged
+    # into one record, not two separate findings. "path" is the base executable path with
+    # the ".FriendlyAppName"/".ApplicationCompany" suffix already stripped.
     path = candidate_path(ARTIFACT_TYPE_MUICACHE, entry) or "<unknown>"
     display_name = entry.get("display_name")
-    name_suffix = f", display_name={display_name!r}" if display_name else ""
-    description = f"MUICache entry for '{path}'{name_suffix}."
+    company = entry.get("application_company")
+    details = []
+    if display_name:
+        details.append(repr(display_name))
+    if company:
+        details.append(company)
+    detail_suffix = f" — {', '.join(details)}" if details else ""
+    description = f"MUICache entry for '{path}'{detail_suffix}."
     return description, entry.get("last_write")
 
 
@@ -255,6 +272,108 @@ def _normalize_last_visited_pidl_mru(entry: dict) -> tuple[str, str | None]:
     return description, entry.get("last_write")
 
 
+def _normalize_usbstor(entry: dict) -> tuple[str, str | None]:
+    # No candidate_path() entry (deliberate -- context-category types read their own
+    # named fields directly, same precedent as Phase 0/1's context facts). device_name
+    # is the Properties subkey's friendly name when present; title is USBSTOR's own
+    # parsed-from-subkey-name fallback (e.g. "Cruzer_Blade"). manufacturer=/serial=/
+    # first_connected=/last_connected= are ALWAYS present in the description (never
+    # dropped as an optional suffix) so report.py's device correlation
+    # (_build_device_correlation()) can parse them with a single unconditional regex
+    # rather than guessing which optional clauses are there. first_connected is the raw
+    # entry's own "first_installed" field (USBSTOR's closest equivalent to "first seen" --
+    # when Windows first set up a driver for this device), named "first_connected" here to
+    # match the plain-English vocabulary the device-correlation narrative uses.
+    name = entry.get("device_name") or entry.get("title") or "<unknown>"
+    serial = entry.get("serial_number") or "unknown"
+    manufacturer = entry.get("manufacturer") or "unknown"
+    first_connected = entry.get("first_installed") or "unknown"
+    last_connected = entry.get("last_connected") or "unknown"
+    description = (
+        f"USBSTOR device '{name}' (manufacturer={manufacturer}, serial={serial}, "
+        f"first_connected={first_connected}, last_connected={last_connected}) "
+        "— USB mass-storage connection history."
+    )
+    timestamp = _first(entry, ("last_connected", "last_installed", "first_installed", "last_write"))
+    return description, timestamp
+
+
+def _normalize_usb_devices(entry: dict) -> tuple[str, str | None]:
+    name = (
+        entry.get("friendly_name")
+        or entry.get("device_desc")
+        or entry.get("vid_pid")
+        or "<unknown>"
+    )
+    vid = entry.get("vid") or "unknown"
+    pid = entry.get("pid") or "unknown"
+    description = f"USB device '{name}' (vid={vid}, pid={pid}) enumerated by Windows."
+    return description, entry.get("last_write")
+
+
+def _normalize_mounted_devices(entry: dict) -> tuple[str, str | None]:
+    mount_point = entry.get("mount_point") or entry.get("value_name") or "<unknown>"
+    mount_type = entry.get("mount_type") or "other"
+    # "dynamic_disk_identifier" is a literal sentinel report.py's device correlation
+    # checks for by exact string match (_build_device_correlation()) -- set by
+    # extractors.extract_mounted_devices() when a value's raw bytes start with the
+    # Windows Dynamic Disk ("DMIO:ID:") prefix, a format regipy's own parse_device_data()
+    # doesn't recognize (nor should it -- it's an undocumented LDM object id, not a path/
+    # signature/GUID). Distinguished from the honest "not decoded" case (bytes present but
+    # genuinely unrecognized) so the correlation logic can tell "this drive is structurally
+    # not a USB stick" (Windows disallows dynamic disks on removable media) apart from
+    # "we simply don't know".
+    if entry.get("dynamic_disk"):
+        decoded = "dynamic_disk_identifier"
+    else:
+        decoded = (
+            entry.get("path")
+            or entry.get("disk_signature")
+            or entry.get("disk_guid")
+            or "not decoded"
+        )
+    volume_guid = entry.get("volume_guid") or "none"
+    description = (
+        f"MountedDevices entry '{mount_point}' (mount_type={mount_type}, decoded={decoded}, "
+        f"volume_guid={volume_guid})."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_mountpoints2(entry: dict) -> tuple[str, str | None]:
+    path = entry.get("path") or "<unknown>"
+    description = f"MountPoints2 entry '{path}' — volume mounted by this user's session."
+    return description, entry.get("last_write")
+
+
+def _normalize_emdmgmt(entry: dict) -> tuple[str, str | None]:
+    path = entry.get("path") or "<unknown>"
+    capacity = entry.get("device_capacity")
+    capacity_str = capacity if capacity is not None else "unknown"
+    description = (
+        f"EMDMgmt entry '{path}' (device_capacity={capacity_str}) "
+        "— ReadyBoost device-eligibility test record."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_portable_devices(entry: dict) -> tuple[str, str | None]:
+    # `path` (the raw WPD subkey name) often embeds the same USBSTOR-shaped identifier
+    # (including the serial number) MountedDevices/USBSTOR/MountPoints2 also use --
+    # confirmed against real evidence for a USB mass-storage device also enumerated via
+    # WPD. When a human-readable `friendly_name` is present it's shown as the quoted
+    # name instead (more useful to a reader), which would otherwise hide that raw
+    # identifier entirely -- so it's always rendered separately via device_id= (never
+    # omitted) for report.py's device correlation to join on.
+    raw_path = entry.get("path") or "<unknown>"
+    name = entry.get("friendly_name") or raw_path
+    description = (
+        f"Windows Portable Devices entry '{name}' (device_id={raw_path}) "
+        "— MTP/portable device history."
+    )
+    return description, entry.get("last_write")
+
+
 _NORMALIZERS = {
     ARTIFACT_TYPE_USER_ASSIST: _normalize_user_assist,
     ARTIFACT_TYPE_SHIMCACHE: _normalize_shimcache,
@@ -275,6 +394,12 @@ _NORMALIZERS = {
     ARTIFACT_TYPE_APP_SWITCHED: _normalize_app_switched,
     ARTIFACT_TYPE_TYPEDPATHS: _normalize_typed_paths,
     ARTIFACT_TYPE_LASTVISITEDPIDLMRU: _normalize_last_visited_pidl_mru,
+    ARTIFACT_TYPE_USBSTOR: _normalize_usbstor,
+    ARTIFACT_TYPE_USBDEVICES: _normalize_usb_devices,
+    ARTIFACT_TYPE_MOUNTEDDEVICES: _normalize_mounted_devices,
+    ARTIFACT_TYPE_MOUNTPOINTS2: _normalize_mountpoints2,
+    ARTIFACT_TYPE_EMDMGMT: _normalize_emdmgmt,
+    ARTIFACT_TYPE_PORTABLEDEVICES: _normalize_portable_devices,
 }
 
 

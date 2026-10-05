@@ -50,6 +50,21 @@ ARTIFACT_TYPE_APP_SWITCHED = "AppSwitched"
 ARTIFACT_TYPE_TYPEDPATHS = "TypedPaths"
 ARTIFACT_TYPE_LASTVISITEDPIDLMRU = "LastVisitedPidlMRU"
 
+# Phase 2 of the Module A roadmap -- device evidence. All six are CATEGORY_CONTEXT (see
+# below): none of them have anything Tor-specific in their own content (a USB stick's
+# manufacturer string doesn't say "Tor Browser"), so is_tor_related() would never
+# usefully match them -- they're only interesting *alongside* a tor-direct finding, same
+# treatment as the three Phase 0 context facts above. report.py's device correlation
+# (_build_device_correlation()) additionally flags whichever of these specifically
+# matches the Tor install's drive letter, rather than relying on category alone to
+# separate "the Tor drive" from "every USB device this machine has ever seen".
+ARTIFACT_TYPE_USBSTOR = "USBStor"
+ARTIFACT_TYPE_USBDEVICES = "USBDevices"
+ARTIFACT_TYPE_MOUNTEDDEVICES = "MountedDevices"
+ARTIFACT_TYPE_MOUNTPOINTS2 = "MountPoints2"
+ARTIFACT_TYPE_EMDMGMT = "EMDMgmt"
+ARTIFACT_TYPE_PORTABLEDEVICES = "PortableDevices"
+
 # Bare executable/basename matches. Kept deliberately short: only binaries
 # that are unique to the Tor ecosystem belong here. Notably, "firefox.exe"
 # is NOT listed — Tor Browser's firefox.exe is indistinguishable by name
@@ -321,6 +336,12 @@ ARTIFACT_CONFIDENCE: dict[str, str] = {
     ARTIFACT_TYPE_APP_SWITCHED: CONFIDENCE_LOW,
     ARTIFACT_TYPE_TYPEDPATHS: CONFIDENCE_LOW,
     ARTIFACT_TYPE_LASTVISITEDPIDLMRU: CONFIDENCE_MEDIUM,
+    ARTIFACT_TYPE_USBSTOR: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_USBDEVICES: CONFIDENCE_MEDIUM,
+    ARTIFACT_TYPE_MOUNTEDDEVICES: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_MOUNTPOINTS2: CONFIDENCE_LOW,
+    ARTIFACT_TYPE_EMDMGMT: CONFIDENCE_MEDIUM,
+    ARTIFACT_TYPE_PORTABLEDEVICES: CONFIDENCE_LOW,
 }
 
 # The exact justification wording normalize.py used to append to `description` as
@@ -390,6 +411,29 @@ ARTIFACT_CONFIDENCE_REASON: dict[str, str] = {
         "dialog -- stronger than a bare Open/Save entry alone, still not confirmed "
         "execution."
     ),
+    ARTIFACT_TYPE_USBSTOR: (
+        "authoritative OS record of USB mass-storage connection history, an independent "
+        "subsystem from UserAssist/ShimCache/Amcache."
+    ),
+    ARTIFACT_TYPE_USBDEVICES: (
+        "shows a USB device was enumerated by Windows, not specific to mass-storage or "
+        "drive-letter correlation."
+    ),
+    ARTIFACT_TYPE_MOUNTEDDEVICES: (
+        "a direct, unambiguous OS record of a drive-letter-to-device mapping."
+    ),
+    ARTIFACT_TYPE_MOUNTPOINTS2: (
+        "a per-user record that this volume was mounted at some point -- contextual only, "
+        "same tier as TypedPaths."
+    ),
+    ARTIFACT_TYPE_EMDMGMT: (
+        "an independent OS subsystem (ReadyBoost-eligibility testing) corroborating "
+        "device presence, not execution evidence."
+    ),
+    ARTIFACT_TYPE_PORTABLEDEVICES: (
+        "MTP/portable-device connection history -- tangential to a mass-storage Tor "
+        "install, contextual only."
+    ),
 }
 
 # Only context types need an entry -- everything else defaults to CATEGORY_TOR_DIRECT via
@@ -400,4 +444,10 @@ ARTIFACT_CATEGORY: dict[str, str] = {
     ARTIFACT_TYPE_COMPUTERNAME: CATEGORY_CONTEXT,
     ARTIFACT_TYPE_TIMEZONE: CATEGORY_CONTEXT,
     ARTIFACT_TYPE_WINDOWSVERSION: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_USBSTOR: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_USBDEVICES: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_MOUNTEDDEVICES: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_MOUNTPOINTS2: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_EMDMGMT: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_PORTABLEDEVICES: CATEGORY_CONTEXT,
 }

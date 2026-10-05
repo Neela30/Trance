@@ -28,7 +28,7 @@ import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .constants import parse_tor_installer_filename
+from .constants import CATEGORY_TOR_DIRECT, parse_tor_installer_filename
 
 # ---------------------------------------------------------------------------
 # Glossary -- merged with other modules' glossaries by the root report.py.
@@ -153,13 +153,114 @@ def describe_run0_with_focus(basename: str, focus_phrase: str) -> str:
 _DRIVE_RE = re.compile(r"^([A-Za-z]):\\")
 
 
-def describe_install_location(path: str | None) -> tuple[str | None, str | None]:
+def extract_drive_letter(path: str | None) -> str | None:
+    """Pulls just the drive letter (e.g. "E") from a path that already names one
+    directly -- shared by describe_install_location() below and report.py's Phase 2
+    device correlation (_build_device_correlation()), which needs the letter *before*
+    build_narrative() runs so it can look up a matching MountedDevices/USBSTOR record
+    and hand the result back in as build_narrative()'s device_match parameter."""
+    if not path:
+        return None
+    match = _DRIVE_RE.match(path.replace("/", "\\"))
+    return match.group(1).upper() if match else None
+
+
+def find_install_location_path(annotated_by_type: dict[str, list[dict]]) -> str | None:
+    """Standalone re-run of the exact "install location" candidate selection
+    build_narrative() does internally (first UserAssist finding with a run_count whose
+    path ends .lnk, else the first non-installer one) -- exposed so report.py can resolve
+    the Tor install's drive letter (via extract_drive_letter() above) for its device
+    correlation before build_narrative() exists to hand it back out. Kept as a second,
+    independent call rather than threading build_narrative()'s internal state out,
+    since both compute the same deterministic answer from the same input."""
+    user_assist = annotated_by_type.get("UserAssist", [])
+    installer_finding = None
+    for finding in user_assist:
+        if parse_tor_installer_filename(finding.get("path")):
+            installer_finding = finding
+            break
+
+    location_candidate = None
+    for finding in user_assist:
+        if not finding.get("run_count"):
+            continue
+        path = finding.get("path") or ""
+        if path.lower().endswith(".lnk"):
+            location_candidate = finding
+            break
+        if location_candidate is None and finding is not installer_finding:
+            location_candidate = finding
+    return location_candidate.get("path") if location_candidate else None
+
+
+def describe_drive_device(
+    drive_letter: str, device_info: dict | None, include_timing: bool = False
+) -> str | None:
+    """Shared wording for what's known about the physical device behind `drive_letter`,
+    used by both describe_install_location()'s inline caveat and build_narrative()'s
+    "Where Tor Browser ran from" section so the two can never disagree. Two cases this
+    function has an opinion on (returns None for anything else -- see each caller for how
+    they fill that gap, which differs by context):
+
+    - Resolved (`device_info["name"]` set): names the specific device. `include_timing`
+      (only passed True from the dedicated device_story section, never the shorter inline
+      note) appends first/last-connected when available -- USBSTOR's own fields; a
+      PortableDevices-only match has neither, so nothing is added for one of those.
+    - Dynamic disk (`device_info["dynamic_disk"]` true): Windows does not support
+      converting a removable USB disk to a dynamic disk, so finding a Dynamic Disk
+      identifier on this drive is itself real, structural evidence it's a partition of an
+      internal/fixed disk, not a USB stick -- a strong inference, phrased as such
+      ("most likely"), not a certainty.
+    """
+    if not device_info:
+        return None
+    if device_info.get("name"):
+        name = device_info["name"]
+        serial = device_info.get("serial")
+        serial_clause = f", serial {serial}" if serial else ""
+        timing_clause = ""
+        if include_timing:
+            times = []
+            if device_info.get("first_connected"):
+                times.append(f"first connected {device_info['first_connected']}")
+            if device_info.get("last_connected"):
+                times.append(f"last connected {device_info['last_connected']}")
+            if times:
+                timing_clause = ", " + ", ".join(times)
+        return (
+            f"{drive_letter}: is a USB drive ({name}{serial_clause}) connected to this "
+            f"computer{timing_clause} — files there may not remain on this machine."
+        )
+    if device_info.get("dynamic_disk"):
+        return (
+            f"{drive_letter}: is a volume on a Windows dynamic disk. Windows does not "
+            "allow dynamic disks on removable USB drives, so "
+            f"{drive_letter}: is most likely a partition of an internal (fixed) disk "
+            "rather than a USB stick."
+        )
+    return None
+
+
+def describe_install_location(
+    path: str | None, device_info: dict | None = None
+) -> tuple[str | None, str | None]:
     """Rule: the folder containing the executable is where it ran from; a drive letter
     other than C: gets an explicit removable/secondary-drive caveat, phrased as "may be"
     since a non-C: drive could just as easily be a second internal disk. Only works on a
     path that already names a drive letter directly -- a "\\Device\\HarddiskVolumeN\\..."
     path must be resolved to a letter by the caller first (see constants.infer_drive_letters);
-    if it can't be, this simply has nothing to say about the drive."""
+    if it can't be, this simply has nothing to say about the drive.
+
+    `device_info` (Phase 2, widened in the components-table-pollution fix round): when
+    report.py's device correlation has directly tied this same drive letter to a physical
+    USB device, or detected it's a Windows Dynamic Disk volume (Windows doesn't support
+    those on removable media), the generic "may be a USB drive" hedge is replaced with
+    the specific finding via the shared describe_drive_device() above (without
+    first/last-connected timing -- that only appears in the dedicated device_story
+    section). Falls back to exactly the pre-Phase-2 generic wording whenever neither
+    applies (device_info is None, doesn't match this path's drive letter, or genuinely
+    couldn't be resolved for some other reason) -- the literal "keep the current ... as
+    fallback" instruction from the Phase 2 roadmap, still honored for this one case."""
     if not path:
         return None, None
     normalized = path.replace("/", "\\")
@@ -169,10 +270,15 @@ def describe_install_location(path: str | None) -> tuple[str | None, str | None]
     note = None
     if match and match.group(1).upper() != "C":
         drive = match.group(1).upper()
-        note = (
-            f"{drive}: is not the main system drive and may be a USB drive or a second "
-            "disk — files there may not remain on this machine."
+        relevant_info = (
+            device_info if device_info and device_info.get("drive_letter") == drive else None
         )
+        note = describe_drive_device(drive, relevant_info)
+        if note is None:
+            note = (
+                f"{drive}: is not the main system drive and may be a USB drive or a second "
+                "disk — files there may not remain on this machine."
+            )
     return folder, note
 
 
@@ -252,10 +358,29 @@ def describe_evidence_strength(component_timeline: list[dict]) -> str:
     """Technical version: a restatement of "how many independent sources agree",
     naming the sources, for the Technical details appendix. component_timeline is
     already sorted strongest-corroborated-first, so its first entry is the strongest
-    claim available."""
+    claim available.
+
+    Reads `execution_sources`, not the broader `seen_in` -- see report.py's
+    EXECUTION_SOURCE_TYPES and _build_component_timeline() docstring for the decision
+    this encodes: ShellBags only shows a folder was browsed in Explorer, not that
+    anything in it was ever executed, so it must not count toward "N independent sources
+    confirm execution" (MUICache, by contrast, is populated by the shell actually
+    invoking a program, so it still counts here even though its own timestamp -- a
+    shared registry-key last-write time -- is never used for timing). Falls back to
+    `seen_in` when a component has no `execution_sources` key at all (an older
+    hand-built fixture that predates this distinction) -- those were always built from
+    execution-only source names anyway, so the fallback changes nothing for them."""
     if not component_timeline:
         return "Strength: no corroborating registry evidence was found."
-    sources = component_timeline[0]["seen_in"]
+    component = component_timeline[0]
+    sources = component.get("execution_sources", component["seen_in"])
+    if not sources:
+        return (
+            "Strength: no execution-confirming source (UserAssist/Amcache/ShimCache/BAM/"
+            "MUICache) was found for the strongest-evidenced file -- only contextual "
+            "records, such as folder-browsing history, which show something was "
+            "accessed but not that it was executed."
+        )
     if len(sources) >= 2:
         return (
             f"Strength: confirmed by {len(sources)} independent sources "
@@ -276,10 +401,14 @@ def describe_reliability(component_timeline: list[dict]) -> list[str]:
     Windows features agree, without naming any of them (that is technical detail, kept
     only in describe_evidence_strength() for the appendix), plus one short, generic
     sentence on why a feature can stay silent without repeating any specific hive's own
-    caveat text here."""
+    caveat text here.
+
+    Counts `execution_sources`, not `seen_in` -- same ShellBags-isn't-execution-evidence
+    reasoning as describe_evidence_strength() above (see that function's docstring)."""
     if not component_timeline:
         return ["No Windows record of this activity was found, so there is nothing to rate here."]
-    count = len(component_timeline[0]["seen_in"])
+    component = component_timeline[0]
+    count = len(component.get("execution_sources", component["seen_in"]))
     if count >= 2:
         number = _NUMBER_WORDS.get(count, "Several")
         sentences = [
@@ -288,12 +417,20 @@ def describe_reliability(component_timeline: list[dict]) -> list[str]:
                 "Browser being opened by this account, which makes this strong evidence."
             )
         ]
-    else:
+    elif count == 1:
         sentences = [
             (
                 "Only one Windows record shows this activity. That is solid evidence "
                 "of use by this account, but it would be stronger if a second, "
                 "independent record agreed."
+            )
+        ]
+    else:
+        sentences = [
+            (
+                "No Windows feature that confirms a program actually ran recorded this "
+                "activity — only contextual records, such as folder-browsing history, "
+                "which show something was accessed but not that it was executed."
             )
         ]
     sentences.append(
@@ -541,6 +678,7 @@ def _empty_result(lines: list[str]) -> dict:
         "reliability": [],
         "not_determined": [],
         "technical": {"account": "", "strength": "", "install_date_detail": ""},
+        "device_story": [],
     }
 
 
@@ -551,6 +689,7 @@ def build_narrative(
     quiet_hive_notes: list[str],
     profiles: list[dict],
     local_tz: str | None,
+    device_info: dict | None = None,
 ) -> dict:
     """Composes the rules above into the report's non-technical story (key_finding,
     timeline, reliability, not_determined -- no registry/hive/SID/run-count/focus
@@ -617,7 +756,7 @@ def build_narrative(
         if location_candidate is None and finding is not installer_finding:
             location_candidate = finding
     if location_candidate is not None:
-        folder, drive_note = describe_install_location(location_candidate.get("path"))
+        folder, drive_note = describe_install_location(location_candidate.get("path"), device_info)
         if folder:
             sentence = f"Tor Browser was set up in {folder}."
             if drive_note:
@@ -675,8 +814,37 @@ def build_narrative(
     install_timestamp = min(amcache_timestamps) if amcache_timestamps else None
     timeline.append(describe_install_date_plain(install_timestamp, latest_use_iso, local_tz))
 
-    if launch_sentence:
-        timeline.append(launch_sentence)
+    # -- ShellBags folder-access events, interleaved chronologically with the launch
+    # sentence (both carry real timestamps) -- everything else in `timeline` keeps its
+    # existing fixed logical position; only ShellBags-vs-launch ordering is genuinely
+    # time-sorted. ShellBags findings are already tor-direct and is_tor_related()-filtered
+    # (folder paths containing a Tor marker), so every one present is relevant -- no
+    # further filtering needed here.
+    #
+    # Wording note: a ShellBags entry's timestamp is the BagMRU registry key's own
+    # last-write time (shared by every program/folder slot under that key), NOT the
+    # folder's own filesystem access time -- that field exists in the raw plugin data but
+    # is never surfaced past extraction. A key-write isn't guaranteed to mean "freshly
+    # visited at this exact instant" (e.g. Explorer can update a key for other reasons),
+    # so this says "Explorer recorded ... (last updated X)", not "the user opened ... on
+    # X" -- the stronger claim the raw data doesn't actually support.
+    dated_events: list[tuple[datetime, str]] = []
+    if launch_sentence and latest_use_iso:
+        dated_events.append((datetime.fromisoformat(latest_use_iso), launch_sentence))
+    for finding in annotated_by_type.get("ShellBags", []):
+        sb_path = finding.get("path")
+        sb_timestamp = finding.get("timestamp")
+        if not sb_path or not sb_timestamp:
+            continue
+        when = format_dual_time_plain(sb_timestamp, local_tz)
+        dated_events.append(
+            (
+                datetime.fromisoformat(sb_timestamp),
+                f"Explorer recorded the folder {sb_path} (last updated {when}).",
+            )
+        )
+    dated_events.sort(key=lambda event: event[0])
+    timeline.extend(sentence for _, sentence in dated_events)
 
     # -- non-installer run_count==0-with-focus entries (e.g. a different unlaunched app) -
     for finding in user_assist:
@@ -691,12 +859,62 @@ def build_narrative(
         basename = path.replace("/", "\\").rsplit("\\", 1)[-1] or path
         timeline.append(describe_run0_with_focus(basename, focus_phrase))
 
+    # Same category guard as report.py's _is_tor_direct(): a context-category finding
+    # (USB/MountedDevices/ComputerName/etc.) must never feed account resolution's
+    # \Users\<name>\ path scan -- defensive scoping alongside Fix 1's component-table fix,
+    # even though no context-category path has ever actually matched that pattern in
+    # practice (confirmed against real evidence).
     all_paths = [f.get("path") for f in user_assist if f.get("path")]
     for findings in annotated_by_type.values():
-        all_paths.extend(f.get("path") for f in findings if f.get("path"))
+        all_paths.extend(
+            f.get("path")
+            for f in findings
+            if f.get("path") and f.get("category", CATEGORY_TOR_DIRECT) == CATEGORY_TOR_DIRECT
+        )
     all_paths = [p for p in all_paths if p]
 
     bam_sid = next((f.get("sid") for f in annotated_by_type.get("BAM", []) if f.get("sid")), None)
+
+    # -- "Where Tor Browser ran from": resolve the install drive to a physical device
+    # when possible, else state so plainly and list possible candidates (item 2's own
+    # wording) -- never alongside a resolved or dynamic-disk result. Shares
+    # describe_drive_device() with describe_install_location()'s inline caveat above so
+    # the two can never disagree; this section additionally shows first/last-connected
+    # timing when available (include_timing=True) and the standalone "couldn't be
+    # identified" + candidates text the shorter inline note has no room for.
+    device_story: list[str] = []
+    if location_candidate is not None:
+        install_drive = extract_drive_letter(location_candidate.get("path"))
+        if install_drive and install_drive != "C":
+            relevant_info = (
+                device_info
+                if device_info and device_info.get("drive_letter") == install_drive
+                else None
+            )
+            resolved_sentence = describe_drive_device(
+                install_drive, relevant_info, include_timing=True
+            )
+            if resolved_sentence:
+                device_story.append(resolved_sentence)
+            else:
+                device_story.append(
+                    f"The device behind {install_drive}: could not be identified from the registry."
+                )
+                candidates = (relevant_info or {}).get("candidates") or []
+                if candidates:
+                    parts = []
+                    for candidate in candidates:
+                        name = candidate.get("name") or "an unidentified device"
+                        serial = candidate.get("serial")
+                        serial_clause = f" (serial {serial})" if serial else ""
+                        last_connected = candidate.get("last_connected")
+                        connected_clause = (
+                            f", last connected {last_connected}" if last_connected else ""
+                        )
+                        parts.append(f"{name}{serial_clause}{connected_clause}")
+                    device_story.append(
+                        "Possible candidates connected to this computer: " + "; ".join(parts) + "."
+                    )
 
     strongest = component_timeline[0]
     technical = {
@@ -707,6 +925,9 @@ def build_narrative(
         ),
         "last_use_summary": describe_last_use_summary(strongest, local_tz),
         "time_gap": describe_source_time_gap(strongest, local_tz),
+        "install_drive_letter": (
+            extract_drive_letter(location_candidate.get("path")) if location_candidate else None
+        ),
     }
 
     return {
@@ -723,4 +944,5 @@ def build_narrative(
         "not_determined": describe_not_determined(install_timestamp, launch_count > 1),
         "technical": technical,
         "account_sid": bam_sid,
+        "device_story": device_story,
     }

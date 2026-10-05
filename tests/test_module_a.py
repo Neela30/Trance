@@ -26,16 +26,22 @@ from modules.module_a_registry.constants import (
     ARTIFACT_TYPE_COMDLG32,
     ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE,
     ARTIFACT_TYPE_COMPUTERNAME,
+    ARTIFACT_TYPE_EMDMGMT,
     ARTIFACT_TYPE_FIREFOX_LAUNCHER,
     ARTIFACT_TYPE_INSTALLEDPROGRAMS,
     ARTIFACT_TYPE_LASTVISITEDPIDLMRU,
+    ARTIFACT_TYPE_MOUNTEDDEVICES,
+    ARTIFACT_TYPE_MOUNTPOINTS2,
     ARTIFACT_TYPE_MUICACHE,
+    ARTIFACT_TYPE_PORTABLEDEVICES,
     ARTIFACT_TYPE_RECENTDOCS,
     ARTIFACT_TYPE_RUNMRU,
     ARTIFACT_TYPE_SHELLBAGS,
     ARTIFACT_TYPE_SHIMCACHE,
     ARTIFACT_TYPE_TIMEZONE,
     ARTIFACT_TYPE_TYPEDPATHS,
+    ARTIFACT_TYPE_USBDEVICES,
+    ARTIFACT_TYPE_USBSTOR,
     ARTIFACT_TYPE_USER_ASSIST,
     ARTIFACT_TYPE_WINDOWSVERSION,
     ARTIFACT_TYPE_WORDWHEELQUERY,
@@ -249,6 +255,34 @@ class TestNormalizeEntry:
         assert artifact.confidence == "medium"
         assert "not confirmed execution" in artifact.confidence_reason
 
+    def test_muicache_renders_both_friendly_name_and_company_when_grouped(self):
+        """entry here is what group_muicache_values() produces -- the Vista+
+        FriendlyAppName/ApplicationCompany pair for one program merged into one record,
+        not two separate findings."""
+        entry = {
+            "path": r"E:\Tor Browser\Browser\firefox.exe",
+            "display_name": "Tor Browser",
+            "application_company": "Mozilla Corporation",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MUICACHE, entry, "NTUSER.DAT")
+
+        assert "'Tor Browser'" in artifact.description
+        assert "Mozilla Corporation" in artifact.description
+        assert r"E:\Tor Browser\Browser\firefox.exe" in artifact.description
+
+    def test_muicache_omits_company_clause_when_absent(self):
+        entry = {
+            "path": r"C:\Program Files\App\app.exe",
+            "display_name": "My App",
+            "application_company": None,
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MUICACHE, entry, "NTUSER.DAT")
+
+        assert "'My App'" in artifact.description
+        assert "Corporation" not in artifact.description
+
     def test_runmru_is_low_confidence(self):
         entry = {
             "command": r"C:\Tor Browser\Browser\firefox.exe",
@@ -379,6 +413,79 @@ class TestNormalizeEntry:
         assert "for 'C:\\Users\\bob\\Downloads'" in artifact.description
         assert r"E:\Tor Browser\Browser\firefox.exe" in artifact.description
 
+    def test_usbstor_is_high_confidence_and_names_device_and_serial(self):
+        entry = {
+            "device_name": "SanDisk Cruzer Blade",
+            "manufacturer": "SanDisk",
+            "serial_number": "4C53000012345678&0",
+            "last_connected": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_USBSTOR, entry, "SYSTEM")
+
+        assert artifact.confidence == "high"
+        assert "SanDisk Cruzer Blade" in artifact.description
+        assert "manufacturer=SanDisk" in artifact.description
+        assert "serial=4C53000012345678&0" in artifact.description
+        assert artifact.timestamp == "2026-07-14T00:00:00+00:00"
+
+    def test_usbstor_missing_fields_fall_back_to_unknown(self):
+        entry = {}
+        artifact = normalize_entry(ARTIFACT_TYPE_USBSTOR, entry, "SYSTEM")
+
+        assert "manufacturer=unknown" in artifact.description
+        assert "serial=unknown" in artifact.description
+
+    def test_usb_devices_is_medium_confidence(self):
+        entry = {"friendly_name": "USB Keyboard", "vid": "046D", "pid": "C31C"}
+        artifact = normalize_entry(ARTIFACT_TYPE_USBDEVICES, entry, "SYSTEM")
+
+        assert artifact.confidence == "medium"
+        assert "USB Keyboard" in artifact.description
+        assert "vid=046D" in artifact.description
+        assert "pid=C31C" in artifact.description
+
+    def test_mounted_devices_is_high_confidence_and_decodes_mount_type(self):
+        entry = {
+            "mount_point": "E:",
+            "mount_type": "drive_letter",
+            "path": "_??_USBSTOR#Disk&Ven_SanDisk&Prod_Cruzer_Blade#4C53&0#{guid}",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MOUNTEDDEVICES, entry, "SYSTEM")
+
+        assert artifact.confidence == "high"
+        assert "entry 'E:'" in artifact.description
+        assert "mount_type=drive_letter" in artifact.description
+        assert "decoded=_??_USBSTOR#" in artifact.description
+
+    def test_mountpoints2_is_low_confidence(self):
+        entry = {"path": "{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}", "last_write": None}
+        artifact = normalize_entry(ARTIFACT_TYPE_MOUNTPOINTS2, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "low"
+        assert "entry '{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}'" in artifact.description
+
+    def test_emdmgmt_is_medium_confidence_and_best_effort_on_capacity(self):
+        entry = {"path": "SanDisk_Cruzer_Blade", "device_capacity": 8192}
+        artifact = normalize_entry(ARTIFACT_TYPE_EMDMGMT, entry, "SOFTWARE")
+
+        assert artifact.confidence == "medium"
+        assert "entry 'SanDisk_Cruzer_Blade'" in artifact.description
+        assert "device_capacity=8192" in artifact.description
+
+    def test_emdmgmt_missing_capacity_is_honest_not_a_guess(self):
+        entry = {"path": "SanDisk_Cruzer_Blade"}
+        artifact = normalize_entry(ARTIFACT_TYPE_EMDMGMT, entry, "SOFTWARE")
+
+        assert "device_capacity=unknown" in artifact.description
+
+    def test_portable_devices_is_low_confidence(self):
+        entry = {"friendly_name": "My Phone", "path": "5&abc123"}
+        artifact = normalize_entry(ARTIFACT_TYPE_PORTABLEDEVICES, entry, "SYSTEM")
+
+        assert artifact.confidence == "low"
+        assert "entry 'My Phone'" in artifact.description
+
     def test_unknown_artifact_type_raises(self):
         with pytest.raises(ValueError):
             normalize_entry("NotARealType", {}, "NTUSER.DAT")
@@ -488,6 +595,101 @@ class TestLastVisitedPidlMru:
             result = extract_last_visited_pidl_mru(ntuser_path)
 
         assert result == []
+
+
+class TestExtractMountedDevices:
+    """Deliberately does NOT use regipy's own MountedDevicesPlugin -- see
+    extract_mounted_devices()'s own docstring for the confirmed real-world bug this
+    reimplementation fixes (iter_values()'s default trim_values=True returns a hex
+    string, not bytes, for REG_BINARY data, so the plugin's own parse_device_data() call
+    is never reached). Fake values here supply real bytes via iter_values(trim_values=False),
+    exactly as the fix expects."""
+
+    def _fake_value(self, name: str, value: bytes) -> MagicMock:
+        v = MagicMock()
+        v.name = name
+        v.value = value
+        return v
+
+    def _fake_hive(self, values: list) -> MagicMock:
+        key = MagicMock()
+        key.header.last_modified = 0
+        key.iter_values.return_value = values
+        hive = MagicMock()
+        hive.hive_type = "system"
+        hive.get_key.return_value = key
+        return hive
+
+    def test_plain_usbstor_shaped_value_decodes_normally(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        usbstor_path = (
+            "_??_USBSTOR#Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00"
+            "#4C53000012345678&0#{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}"
+        )
+        value = self._fake_value(r"\DosDevices\E:", usbstor_path.encode("utf-16-le"))
+        fake_hive = self._fake_hive([value])
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_mounted_devices(system_path)
+
+        assert len(result) == 1
+        assert result[0]["mount_type"] == "drive_letter"
+        assert result[0]["mount_point"] == "E:"
+        assert result[0]["path"] == usbstor_path
+        assert "dynamic_disk" not in result[0]
+
+    def test_dynamic_disk_identifier_is_flagged_not_mangled(self, tmp_path):
+        """Confirmed real shape: Windows Dynamic Disk volumes store "DMIO:ID:" + a
+        16-byte LDM object id -- parse_device_data() would otherwise try to UTF-16-decode
+        this into garbled text; it must not even be attempted."""
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        dynamic_disk_bytes = b"DMIO:ID:" + bytes(range(16))
+        value = self._fake_value(r"\DosDevices\C:", dynamic_disk_bytes)
+        fake_hive = self._fake_hive([value])
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_mounted_devices(system_path)
+
+        assert result[0]["dynamic_disk"] is True
+        assert "path" not in result[0]
+
+    def test_missing_key_returns_empty_list(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        fake_hive = MagicMock()
+        fake_hive.hive_type = "system"
+        fake_hive.get_key.side_effect = RegistryKeyNotFoundException("missing")
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_mounted_devices(system_path)
+
+        assert result == []
+
+    def test_wrong_hive_type_raises_parsing_error(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        fake_hive = MagicMock()
+        fake_hive.hive_type = "ntuser"
+
+        with (
+            patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive),
+            pytest.raises(ParsingError),
+        ):
+            extract_mounted_devices(system_path)
 
 
 class TestIsTorRelatedEntry:
@@ -824,6 +1026,73 @@ class TestContextGating:
                 return_value=[{"name": "DESKTOP-ABC123", "timestamp": None}],
             ),
             patch("modules.module_a_registry.pipeline.extract_time_zone", return_value=[]),
+        ):
+            result = run_module_a(config, system=system)
+
+        assert result.findings == []
+
+    def test_device_evidence_included_when_a_tor_direct_finding_exists(self, tmp_path):
+        """Phase 2's six device-evidence types get exactly the same gating treatment as
+        Phase 0's three machine-fact types above -- a bare USB history isn't interesting
+        on its own, only as context *for* a Tor finding."""
+        ntuser = tmp_path / "NTUSER.DAT"
+        system = tmp_path / "SYSTEM"
+        for f in (ntuser, system):
+            f.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                return_value=[
+                    {
+                        "name": r"C:\Tor Browser\Browser\firefox.exe",
+                        "timestamp": "2026-07-14T14:15:22+00:00",
+                        "run_counter": 1,
+                    }
+                ],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_shimcache", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_bam", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_computer_name", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_time_zone", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_usbstor",
+                return_value=[{"device_name": "SanDisk Cruzer Blade", "serial_number": "4C53"}],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_usb_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_mounted_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_portable_devices", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser, system=system)
+
+        types = {f.artifact_type for f in result.findings}
+        assert ARTIFACT_TYPE_USBSTOR in types
+        usbstor_finding = next(
+            f for f in result.findings if f.artifact_type == ARTIFACT_TYPE_USBSTOR
+        )
+        assert usbstor_finding.category == "context"
+
+    def test_device_evidence_dropped_when_no_tor_direct_finding_exists(self, tmp_path):
+        system = tmp_path / "SYSTEM"
+        system.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_shimcache", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_bam", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_computer_name", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_time_zone", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_usbstor",
+                return_value=[{"device_name": "SanDisk Cruzer Blade", "serial_number": "4C53"}],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_usb_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_mounted_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_portable_devices", return_value=[]),
         ):
             result = run_module_a(config, system=system)
 

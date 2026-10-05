@@ -29,8 +29,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from .constants import harddiskvolume_number, infer_drive_letters
-from .narrative import GLOSSARY, build_narrative
+from .constants import CATEGORY_TOR_DIRECT, harddiskvolume_number, infer_drive_letters
+from .narrative import GLOSSARY, build_narrative, extract_drive_letter, find_install_location_path
 
 # Strongest evidence first: UserAssist/Amcache/BAM/InstalledPrograms/CompatAssistantStore/
 # FirefoxLauncher are HIGH confidence, ShimCache/MUICache/ShellBags/LastVisitedPidlMRU
@@ -88,17 +88,62 @@ HIVE_LABELS = {
 # The three CATEGORY_CONTEXT artifact types (see constants.py) -- kept out of the
 # tor-direct `sections` list entirely and surfaced separately via system_context() below.
 CONTEXT_ARTIFACT_TYPES = ("ComputerName", "TimeZone", "WindowsVersion")
+# Phase 2's six CATEGORY_CONTEXT device-evidence types -- also kept out of `sections`
+# (ARTIFACT_TYPE_ORDER), surfaced instead via the dedicated devices appendix built by
+# _build_device_correlation() below, same separation CONTEXT_ARTIFACT_TYPES already has.
+DEVICE_ARTIFACT_TYPES = (
+    "USBStor",
+    "USBDevices",
+    "MountedDevices",
+    "MountPoints2",
+    "EMDMgmt",
+    "PortableDevices",
+)
+# Which of a component's "seen_in" sources actually corroborate EXECUTION (vs. merely
+# contextual evidence) -- used by _build_component_timeline()'s "execution_sources" field
+# and narrative.py's describe_evidence_strength()/describe_reliability() (the "N
+# independent sources confirm Tor Browser was opened" claims). UserAssist/Amcache/
+# ShimCache/BAM are the three-plus-one independent OS subsystems this module has always
+# treated as execution evidence; MUICache is included too -- it's populated when the
+# shell actually invokes a program, not merely by browsing to it -- but ShellBags is
+# deliberately excluded: it only ever shows a folder was browsed in Explorer, never that
+# anything inside it was executed, so it must not inflate an execution-corroboration
+# count (a real bug this constant fixes -- see _build_component_timeline()'s docstring).
+EXECUTION_SOURCE_TYPES = frozenset({"UserAssist", "Amcache", "ShimCache", "BAM", "MUICache"})
 
 # normalize.py's own description formats, matched here rather than re-plumbed as raw
 # fields — see module docstring. "for '...'" covers UserAssist/ShimCache/Amcache;
-# "entry '...'" covers RecentDocs.
-_PATH_RE = re.compile(r"(?:for|entry) '([^']+)'")
+# "entry '...'" covers RecentDocs/MountedDevices/MountPoints2/EMDMgmt/PortableDevices;
+# "device '...'" covers Phase 2's USBStor/USBDevices.
+_PATH_RE = re.compile(r"(?:for|entry|device) '([^']+)'")
 _RUN_COUNT_RE = re.compile(r"run_count=(\d+)")
 _FOCUS_COUNT_RE = re.compile(r"focus_count=(\d+)")
 _FOCUS_TIME_RE = re.compile(r"total_focus_time_ms=(\d+)")
 _SHA1_RE = re.compile(r"sha1=([0-9a-fA-F]+)")
 _SIZE_RE = re.compile(r"size=(\d+)")
 _SID_RE = re.compile(r"sid=([\w-]+)")
+# Phase 2 device-evidence fields -- normalize.py always renders these unconditionally
+# (never an optional suffix that may be absent), so each regex can assume a match exists
+# whenever its artifact_type is present; "unknown" is a real string value in that case,
+# not a missing-match sentinel. Each field (other than the last one in its parenthesized
+# group) must stop at the following comma, not the closing paren -- these are NOT
+# necessarily the last field any more (e.g. USBSTOR's serial= is followed by
+# first_connected=/last_connected=).
+_MANUFACTURER_RE = re.compile(r"manufacturer=([^,]+),")
+_SERIAL_RE = re.compile(r"serial=([^,]+),")
+_FIRST_CONNECTED_RE = re.compile(r"first_connected=([^,]+),")
+_LAST_CONNECTED_RE = re.compile(r"last_connected=([^)]+)\)")
+_VID_RE = re.compile(r"vid=([^,]+),")
+_PID_RE = re.compile(r"pid=([^)]+)\)")
+_MOUNT_TYPE_RE = re.compile(r"mount_type=([^,]+),")
+_DECODED_RE = re.compile(r"decoded=([^,]+),")
+_VOLUME_GUID_RE = re.compile(r"volume_guid=([^)]+)\)")
+_DEVICE_CAPACITY_RE = re.compile(r"device_capacity=([^)]+)\)")
+_DEVICE_ID_RE = re.compile(r"device_id=([^)]+)\)")
+# The serial number embedded in a USBSTOR-shaped device path/subkey-name, shared by
+# MountedDevices' decoded value and MountPoints2/EMDMgmt's own subkey names -- e.g.
+# "...USBSTOR#Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00#4C53...&0#{GUID}" -> "4C53...&0".
+_DEVICE_SERIAL_FROM_PATH_RE = re.compile(r"#([^#]+)#\{[0-9a-fA-F-]+\}\s*$")
 
 
 def _extract_path(description: str) -> str | None:
@@ -106,8 +151,33 @@ def _extract_path(description: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _none_if_unknown(value: str, sentinel: str = "unknown") -> str | None:
+    """normalize.py renders several Phase 2 fields unconditionally with a literal
+    "unknown"/"none" sentinel string rather than omitting them, so every regex above can
+    assume a match always exists (see the module-level comment on those regexes). Once
+    extracted here, the sentinel is converted back to a real `None` so downstream
+    presentation code (e.g. "serial {serial}" clauses) doesn't literally print the word
+    "unknown" as if it were a value read from the registry."""
+    return None if value == sentinel else value
+
+
 def _basename(path: str) -> str:
     return path.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+
+
+def _is_tor_direct(finding: dict) -> bool:
+    """True unless this finding is explicitly category="context" (ComputerName/TimeZone/
+    WindowsVersion, or Phase 2's six device-evidence types). Defaults to True for a
+    finding with no "category" key at all (an older hand-built test fixture that never
+    went through normalize.py) -- same default normalize.py itself uses for
+    Artifact.category. Confirmed root cause of a real bug: Phase 2 widened _PATH_RE to
+    give every device-evidence type a "path" field too, and _build_component_timeline()
+    below used to iterate every artifact_type unconditionally -- so every USB device,
+    drive letter and MountedDevices/MountPoints2 entry was being treated as a "Tor
+    Browser component" the moment any one of them had a path-shaped description. This is
+    the single choke point that keeps context-category findings out of anywhere this
+    module infers Tor-related facts from "all known paths"."""
+    return finding.get("category", CATEGORY_TOR_DIRECT) == CATEGORY_TOR_DIRECT
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -158,6 +228,33 @@ def _annotate(findings: list[dict], artifact_type: str) -> list[dict]:
         elif artifact_type == "BAM":
             m = _SID_RE.search(finding["description"])
             entry["sid"] = m.group(1) if m else None
+        elif artifact_type == "USBStor":
+            m = _MANUFACTURER_RE.search(finding["description"])
+            entry["manufacturer"] = _none_if_unknown(m.group(1)) if m else None
+            m = _SERIAL_RE.search(finding["description"])
+            entry["serial_number"] = _none_if_unknown(m.group(1)) if m else None
+            m = _FIRST_CONNECTED_RE.search(finding["description"])
+            entry["first_connected"] = _none_if_unknown(m.group(1)) if m else None
+            m = _LAST_CONNECTED_RE.search(finding["description"])
+            entry["last_connected"] = _none_if_unknown(m.group(1)) if m else None
+        elif artifact_type == "USBDevices":
+            m = _VID_RE.search(finding["description"])
+            entry["vid"] = m.group(1) if m else None
+            m = _PID_RE.search(finding["description"])
+            entry["pid"] = m.group(1) if m else None
+        elif artifact_type == "MountedDevices":
+            m = _MOUNT_TYPE_RE.search(finding["description"])
+            entry["mount_type"] = m.group(1) if m else None
+            m = _DECODED_RE.search(finding["description"])
+            entry["decoded"] = m.group(1) if m else None
+            m = _VOLUME_GUID_RE.search(finding["description"])
+            entry["volume_guid"] = _none_if_unknown(m.group(1), sentinel="none") if m else None
+        elif artifact_type == "EMDMgmt":
+            m = _DEVICE_CAPACITY_RE.search(finding["description"])
+            entry["device_capacity"] = m.group(1) if m else None
+        elif artifact_type == "PortableDevices":
+            m = _DEVICE_ID_RE.search(finding["description"])
+            entry["device_id"] = m.group(1) if m else None
         annotated.append(entry)
     return annotated
 
@@ -168,10 +265,27 @@ def _build_component_timeline(annotated_by_type: dict[str, list[dict]]) -> list[
     different OS subsystems recording different things (GUI launch, cache insertion,
     install) about what's very often the same file -- seeing them agree is stronger
     evidence than any one alone, and is the actual finding a flat per-hive dump misses.
+
+    Only iterates tor-direct findings (`_is_tor_direct()`) -- a real, confirmed bug this
+    fixes: Phase 2 widened _PATH_RE so every device-evidence type (USB/MountedDevices/
+    MountPoints2/etc.) also gets a `path` field, and this function used to iterate every
+    artifact_type in `annotated_by_type` unconditionally, so every USB device, drive
+    letter and volume GUID on the machine was being treated as a "Tor Browser component"
+    the moment it had a path-shaped description -- confirmed against a real acquisition
+    (58 "distinct files" where only 8 were genuinely Tor-related).
+
+    `seen_in` lists every source that mentioned this basename (still useful context, e.g.
+    "this file was also browsed to in Explorer"); `execution_sources` is the subset of
+    those in EXECUTION_SOURCE_TYPES -- the one used for "N independent sources confirm
+    execution" claims (narrative.py's describe_evidence_strength()/describe_reliability(),
+    and this module's own `corroborated_components` count below), since ShellBags showing
+    up in `seen_in` must never inflate that specific claim.
     """
     components: dict[str, dict] = {}
     for artifact_type, findings in annotated_by_type.items():
         for finding in findings:
+            if not _is_tor_direct(finding):
+                continue
             path = finding.get("path")
             if not path:
                 continue
@@ -211,6 +325,9 @@ def _build_component_timeline(annotated_by_type: dict[str, list[dict]]) -> list[
                 "basename": component["basename"],
                 "paths": sorted(component["paths"]),
                 "seen_in": sorted(sources.keys(), key=type_rank),
+                "execution_sources": sorted(
+                    (s for s in sources if s in EXECUTION_SOURCE_TYPES), key=type_rank
+                ),
                 "amcache_first_seen": min((t for t in amcache_ts if t), default=None),
                 "userassist_run_count": sum(
                     f.get("run_count") or 0 for f in sources.get("UserAssist", [])
@@ -384,6 +501,147 @@ def _annotate_harddiskvolume_notes(
                 )
 
 
+def _build_device_correlation(
+    annotated_by_type: dict[str, list[dict]], install_drive_letter: str | None
+) -> dict:
+    """Maps the Tor install's drive letter directly to a physical device, when possible,
+    by decoding SYSTEM's MountedDevices entry for that letter and joining its embedded
+    USBSTOR-shaped serial number against USBSTOR/MountPoints2/EMDMgmt/PortableDevices
+    findings -- a real structural correlation (the same serial number independently
+    present in multiple OS subsystems), not the coincidental same-evidence path-suffix
+    guessing constants.infer_drive_letters() does for a different problem
+    (HarddiskVolumeN -> letter, kept unchanged). Modeled on _build_profiles_table()'s
+    is_relevant flagging: nothing is discarded -- every USBStor/USBDevices/
+    MountedDevices/MountPoints2/EMDMgmt/PortableDevices row the machine has ever recorded
+    is still returned, just with the one (or few) rows tied to the Tor install's own
+    drive letter flagged `is_relevant` rather than presented as equally significant as
+    the machine's entire USB history.
+
+    Resolution chain, strongest/most-specific first:
+    1. The drive-letter's own MountedDevices value is a Windows Dynamic Disk identifier
+       ("DMIO:ID:...", see extractors.extract_mounted_devices()) -- Windows does not
+       support dynamic disks on removable USB media, so this is itself real, structural
+       evidence the drive is a fixed/internal-disk partition, not a USB stick. Resolution
+       stops here (device_info["dynamic_disk"] = True); no USBSTOR/PortableDevices
+       matching is attempted and no candidates are offered.
+    2. The decoded value directly names a USBSTOR-shaped path -- extract its serial via
+       _DEVICE_SERIAL_FROM_PATH_RE and match against USBStor/PortableDevices.
+    3. The decoded value instead names a bare \\??\\Volume{GUID} -- look for another
+       MountedDevices entry whose own mount_point is exactly that \\??\\Volume{GUID}
+       string (same decode, different value), and retry step 2 against it. Exact
+       value-name match only -- no fuzzy/near-GUID matching (proven to be a dead end:
+       USBSTOR's own disk_guid never matches a real MountedDevices volume GUID on
+       verified real evidence).
+    4. Neither: device_info carries no name and no dynamic_disk -- the caller states
+       plainly the device could not be identified and offers every USBStor/
+       PortableDevices entry on the machine as a "possible candidate" (never USBDevices
+       hubs/cameras/sensors, never MountPoints2/EMDMgmt).
+    """
+    mounted_rows = annotated_by_type.get("MountedDevices", [])
+    usbstor_rows = annotated_by_type.get("USBStor", [])
+    portable_rows = annotated_by_type.get("PortableDevices", [])
+    mountpoints2_rows = annotated_by_type.get("MountPoints2", [])
+    emdmgmt_rows = annotated_by_type.get("EMDMgmt", [])
+    usb_devices_rows = annotated_by_type.get("USBDevices", [])
+
+    direct_row = None
+    if install_drive_letter:
+        target = f"{install_drive_letter}:"
+        for row in mounted_rows:
+            row["is_relevant"] = row.get("path") == target
+            if row["is_relevant"]:
+                direct_row = row
+    else:
+        for row in mounted_rows:
+            row["is_relevant"] = False
+
+    dynamic_disk = False
+    device_serial: str | None = None
+    if direct_row is not None:
+        if direct_row.get("decoded") == "dynamic_disk_identifier":
+            dynamic_disk = True
+        else:
+            match = _DEVICE_SERIAL_FROM_PATH_RE.search(direct_row.get("decoded") or "")
+            if match:
+                device_serial = match.group(1)
+            elif direct_row.get("volume_guid"):
+                # Volume-GUID hop: a sibling MountedDevices entry literally named
+                # "\??\Volume{<that GUID>}" may carry the USBSTOR-shaped decode instead.
+                hop_name = f"\\??\\Volume{direct_row['volume_guid']}"
+                hop_row = next((r for r in mounted_rows if r.get("path") == hop_name), None)
+                if hop_row is not None:
+                    hop_row["is_relevant"] = True
+                    hop_match = _DEVICE_SERIAL_FROM_PATH_RE.search(hop_row.get("decoded") or "")
+                    if hop_match:
+                        device_serial = hop_match.group(1)
+
+    matched_device: dict | None = None
+    matched_kind: str | None = None
+    for row in usbstor_rows:
+        row["is_relevant"] = bool(device_serial) and row.get("serial_number") == device_serial
+        if row["is_relevant"] and matched_device is None:
+            matched_device = row
+            matched_kind = "usbstor"
+
+    for row in portable_rows:
+        row["is_relevant"] = bool(device_serial) and device_serial in (row.get("device_id") or "")
+        if row["is_relevant"] and matched_device is None:
+            matched_device = row
+            matched_kind = "portable"
+
+    for row in mountpoints2_rows:
+        row["is_relevant"] = bool(device_serial) and device_serial in (row.get("path") or "")
+    for row in emdmgmt_rows:
+        row["is_relevant"] = bool(device_serial) and device_serial in (row.get("path") or "")
+
+    # USBDevices (generic enumeration -- hubs/cameras/sensors/etc.) has no serial-shaped
+    # identifier to join on and is never a candidate either (see item 2's own wording).
+    for row in usb_devices_rows:
+        row["is_relevant"] = False
+
+    device_info = None
+    if install_drive_letter:
+        device_info = {
+            "drive_letter": install_drive_letter,
+            "name": matched_device.get("path") if matched_device else None,
+            "serial": (matched_device.get("serial_number") if matched_kind == "usbstor" else None),
+            "first_connected": (
+                matched_device.get("first_connected") if matched_kind == "usbstor" else None
+            ),
+            "last_connected": (
+                matched_device.get("last_connected") if matched_kind == "usbstor" else None
+            ),
+            "dynamic_disk": dynamic_disk,
+            "candidates": (
+                []
+                if (matched_device is not None or dynamic_disk)
+                else [
+                    {
+                        "name": row.get("path"),
+                        "serial": row.get("serial_number"),
+                        "last_connected": row.get("last_connected"),
+                    }
+                    for row in usbstor_rows
+                ]
+                + [
+                    {"name": row.get("path"), "serial": None, "last_connected": None}
+                    for row in portable_rows
+                ]
+            ),
+        }
+
+    return {
+        "install_drive_letter": install_drive_letter,
+        "device_match": device_info,
+        "usbstor": usbstor_rows,
+        "usb_devices": usb_devices_rows,
+        "mounted_devices": mounted_rows,
+        "mountpoints2": mountpoints2_rows,
+        "emdmgmt": emdmgmt_rows,
+        "portable_devices": portable_rows,
+    }
+
+
 def build_context(details: dict, local_tz: str | None = None) -> dict:
     """Presentation context for the registry section of the case report.
 
@@ -427,6 +685,15 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
     bam_sid = next((f.get("sid") for f in annotated_by_type.get("BAM", []) if f.get("sid")), None)
     profiles = _build_profiles_table(details.get("profiles", []), bam_sid)
 
+    # Phase 2: resolve the Tor install's drive letter *before* build_narrative() runs (it
+    # needs the letter to build install_drive_letter itself) so device correlation can
+    # hand build_narrative() a direct device match to fold into the install-location
+    # sentence -- see narrative.find_install_location_path()'s docstring for why this is
+    # a second, independent call rather than threading build_narrative()'s internal state
+    # out.
+    install_drive_letter = extract_drive_letter(find_install_location_path(annotated_by_type))
+    devices = _build_device_correlation(annotated_by_type, install_drive_letter)
+
     return {
         "details": details,
         "summary": details.get("summary", ""),
@@ -436,12 +703,15 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
         "sections": sections,
         "total_findings": sum(len(s["findings"]) for s in sections),
         "component_timeline": component_timeline,
-        "corroborated_components": sum(1 for c in component_timeline if len(c["seen_in"]) > 1),
+        "corroborated_components": sum(
+            1 for c in component_timeline if len(c["execution_sources"]) > 1
+        ),
         "linked_launches": linked_launches,
         "quiet_hive_notes": quiet_hive_notes,
         "extraction_warnings": _build_extraction_warnings(details.get("warnings", [])),
         "profiles": profiles,
         "system_context": _build_system_context(findings_by_type),
+        "devices": devices,
         "narrative": build_narrative(
             annotated_by_type,
             component_timeline,
@@ -449,6 +719,7 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
             quiet_hive_notes,
             profiles,
             local_tz,
+            devices["device_match"],
         ),
         "glossary": GLOSSARY,
     }
