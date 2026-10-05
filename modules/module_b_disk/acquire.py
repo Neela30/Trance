@@ -30,6 +30,9 @@ find_tor_browser_installations().
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import json
+import os
 import shutil
 import sys
 import time
@@ -106,47 +109,136 @@ def discover_tor_browser_paths(tor_browser_dir: Path) -> tuple[Path, Path]:
     return candidates[0], tor_dir
 
 
+METADATA_FILENAME = "filesystem_metadata.json"
+DOWNLOADS_SCAN_FILENAME = "zone_identifier_scan.json"
+
+
+def _iso_utc(epoch: float | None) -> str | None:
+    if epoch is None:
+        return None
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).isoformat()
+
+
+def source_file_metadata(path: Path) -> dict:
+    """The source file's own timestamps, read before copying. A copy gets new
+    timestamps on the examiner side (and again on every later copy), so these are
+    the only record of when tor/Firefox actually wrote the file -- the daemon
+    window in module_b_disk.daemon_window() is built from them. stat() works even
+    on a file the running tor.exe holds locked."""
+    st = path.stat()
+    created = getattr(st, "st_birthtime", None)
+    if created is None and os.name == "nt":
+        created = st.st_ctime  # creation time on Windows before Python 3.12
+    return {
+        "inode": str(st.st_ino),
+        "size": st.st_size,
+        "created_utc": _iso_utc(created),
+        "modified_utc": _iso_utc(st.st_mtime),
+        "accessed_utc": _iso_utc(st.st_atime),
+    }
+
+
+def _copy_one(source: Path, target: Path, relative: str, result: dict) -> None:
+    """Copy one file, recording its source metadata first. A file that can't be read
+    (tor.exe keeps `lock` locked while running) is recorded under "failed" with its
+    metadata kept, rather than aborting every file after it."""
+    result["metadata"][relative] = source_file_metadata(source)
+    try:
+        shutil.copy2(source, target)
+    except OSError as exc:
+        result["failed"][relative] = f"{type(exc).__name__}: {exc}"
+        result["metadata"][relative]["copied"] = False
+        return
+    result["metadata"][relative]["copied"] = True
+    result["copied"].append(relative)
+
+
+def _new_copy_result() -> dict:
+    return {"copied": [], "missing": [], "failed": {}, "metadata": {}}
+
+
 def _copy_known_files(src: Path, dest: Path, filenames: tuple[str, ...]) -> dict:
-    """Best-effort copy: each filename is attempted independently, missing ones
-    are recorded and skipped rather than failing the whole step."""
+    """Best-effort copy: each filename is attempted independently, missing or
+    unreadable ones are recorded and skipped rather than failing the whole step."""
     dest.mkdir(parents=True, exist_ok=True)
-    copied: list[str] = []
-    missing: list[str] = []
+    result = _new_copy_result()
     for name in filenames:
         source = src / name
         if not source.is_file():
-            missing.append(name)
+            result["missing"].append(name)
             continue
-        shutil.copyfile(source, dest / name)
-        copied.append(name)
-    return {"copied": copied, "missing": missing}
+        _copy_one(source, dest / name, name, result)
+    return result
+
+
+def _copy_glob(src_dir: Path, dest_dir: Path, pattern: str, result: dict) -> list[str]:
+    copied = []
+    if not src_dir.is_dir():
+        return copied
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for source in sorted(src_dir.glob(pattern)):
+        relative = f"{src_dir.name}/{source.name}"
+        _copy_one(source, dest_dir / source.name, relative, result)
+        if relative in result["copied"]:
+            result["copied"].remove(relative)
+            copied.append(source.name)
+    return copied
+
+
+def tor_daemon_running(tor_dir_src: Path) -> bool:
+    """Whether a tor.exe from this install is running right now. If it is, the
+    daemon's session hasn't ended: the analysis side extends the session window to
+    the capture time instead of stopping at tor's last file write."""
+    try:
+        import psutil
+    except ImportError:
+        return False
+    parents = tor_dir_src.resolve().parents
+    # .../Browser/TorBrowser/Data/Tor -> .../Browser, which also holds TorBrowser/Tor/tor.exe
+    install_root = parents[2] if len(parents) > 2 else tor_dir_src.resolve()
+    for proc in psutil.process_iter(["name", "exe"]):
+        name = (proc.info.get("name") or "").lower()
+        if name not in ("tor.exe", "tor"):
+            continue
+        exe = proc.info.get("exe")
+        if not exe:
+            return True  # can't read its path; a running tor is still a running tor
+        try:
+            if Path(exe).resolve().is_relative_to(install_root):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def write_metadata(dest: Path, src: Path, copy_result: dict, **extra: object) -> Path:
+    """Persist source timestamps next to the copy, in the format
+    analyze_tor_datadir._load_filesystem_metadata() reads. Written before
+    hashes.sha256 so the manifest covers it."""
+    path = dest / METADATA_FILENAME
+    payload = {
+        "captured_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "source_dir": str(src),
+        **extra,
+        "files": copy_result.pop("metadata"),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
 
 
 def copy_profile(src: Path, dest: Path) -> dict:
     result = _copy_known_files(src, dest, PROFILE_FILENAMES)
-    backups_src = src / "bookmarkbackups"
-    backups_dest = dest / "bookmarkbackups"
-    backups_copied = []
-    if backups_src.is_dir():
-        backups_dest.mkdir(parents=True, exist_ok=True)
-        for backup in sorted(backups_src.glob("*.jsonlz4")):
-            shutil.copyfile(backup, backups_dest / backup.name)
-            backups_copied.append(backup.name)
-    result["bookmark_backups_copied"] = backups_copied
+    result["bookmark_backups_copied"] = _copy_glob(
+        src / "bookmarkbackups", dest / "bookmarkbackups", "*.jsonlz4", result
+    )
     return result
 
 
 def copy_tor_datadir(src: Path, dest: Path) -> dict:
     result = _copy_known_files(src, dest, TOR_DATADIR_FILENAMES)
-    auth_src = src / "onion-auth"
-    auth_dest = dest / "onion-auth"
-    auth_copied = []
-    if auth_src.is_dir():
-        auth_dest.mkdir(parents=True, exist_ok=True)
-        for credential in sorted(auth_src.glob("*.auth_private")):
-            shutil.copyfile(credential, auth_dest / credential.name)
-            auth_copied.append(credential.name)
-    result["onion_auth_copied"] = auth_copied
+    result["onion_auth_copied"] = _copy_glob(
+        src / "onion-auth", dest / "onion-auth", "*.auth_private", result
+    )
     return result
 
 
@@ -171,6 +263,7 @@ def _timestamp() -> str:
 def acquire_profile(src: Path, output_dir: Path, custody: CustodyLog) -> dict:
     dest = output_dir / "profile"
     copy_result = copy_profile(src, dest)
+    write_metadata(dest, src, copy_result)
     manifest = write_hash_manifest(dest)
     for name, digest in _manifest_entries(manifest):
         custody.record(
@@ -186,7 +279,9 @@ def acquire_profile(src: Path, output_dir: Path, custody: CustodyLog) -> dict:
 
 def acquire_tor_datadir(src: Path, output_dir: Path, custody: CustodyLog) -> dict:
     dest = output_dir / "tor_dir"
+    running = tor_daemon_running(src)
     copy_result = copy_tor_datadir(src, dest)
+    write_metadata(dest, src, copy_result, tor_running_at_capture=running)
     manifest = write_hash_manifest(dest)
     for name, digest in _manifest_entries(manifest):
         custody.record(
@@ -197,7 +292,42 @@ def acquire_tor_datadir(src: Path, output_dir: Path, custody: CustodyLog) -> dic
                 notes="Tor daemon data directory file, plain copy (not VSS)",
             )
         )
-    return {"path": str(dest), **copy_result}
+    return {"path": str(dest), "tor_running_at_capture": running, **copy_result}
+
+
+def acquire_downloads(
+    output_dir: Path, custody: CustodyLog, scan_roots: list[Path] | None = None
+) -> dict:
+    """Live Zone.Identifier scan for the downloads-vs-Tor-session correlation. Only
+    meaningful on Windows (NTFS streams); skipped elsewhere unless roots are given."""
+    from modules.module_b_disk.acquire_downloads import scan_live
+
+    if scan_roots is None:
+        if sys.platform != "win32":
+            return {"status": "skipped", "message": "Zone.Identifier scan needs a Windows target"}
+        scan_roots = fs_scan.drive_search_roots()
+    dest = output_dir / "downloads"
+    dest.mkdir(parents=True, exist_ok=True)
+    print(f"[*] downloads: scanning {', '.join(map(str, scan_roots))} for Zone.Identifier ...")
+    report = scan_live(scan_roots, exclude=[output_dir.parent])
+    report_path = dest / DOWNLOADS_SCAN_FILENAME
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    manifest = write_hash_manifest(dest)
+    for name, digest in _manifest_entries(manifest):
+        custody.record(
+            CustodyEntry(
+                artifact_path=str(dest / name),
+                sha256=digest,
+                action="acquire",
+                notes="live Zone.Identifier scan; marked files hashed in place, not copied",
+            )
+        )
+    return {
+        "status": "ok",
+        "path": str(report_path),
+        "files_walked": report["files_walked"],
+        "internet_origin_files": len(report["internet_origin_files"]),
+    }
 
 
 def _manifest_entries(manifest_path: Path) -> list[tuple[str, str]]:
@@ -222,6 +352,7 @@ def acquire_all(
     profile_src: Path | None = None,
     tor_dir_src: Path | None = None,
     output_dir: Path = Path("captures/disk"),
+    downloads_scan_roots: list[Path] | None = None,
 ) -> dict:
     """Best-effort: profile and Tor data dir are attempted independently, same
     isolation philosophy as module_a_registry.acquire.acquire_all(). Explicit
@@ -276,6 +407,12 @@ def acquire_all(
     except (AcquisitionError, OSError) as exc:
         results["tor_dir"] = {"status": "error", "message": str(exc)}
         print(f"[!] tor_dir failed: {exc}", file=sys.stderr)
+
+    try:
+        results["downloads"] = acquire_downloads(output_dir, custody, downloads_scan_roots)
+    except OSError as exc:
+        results["downloads"] = {"status": "error", "message": str(exc)}
+        print(f"[!] downloads scan failed: {exc}", file=sys.stderr)
 
     custody.save()
     results["custody_log_path"] = str(custody.log_path)

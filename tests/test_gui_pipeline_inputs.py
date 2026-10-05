@@ -33,3 +33,12 @@ def test_module_kwargs_from_resolved_empty_fields_become_none():
     assert kwargs["module_a_registry"] == {"ntuser": None, "system": None, "amcache": None}
     assert kwargs["module_c_memory"]["onion"] is None
     assert kwargs["module_c_memory"]["source_type"] == "process"
+
+
+def test_module_kwargs_from_resolved_passes_the_downloads_scan():
+    kwargs = module_kwargs_from_resolved(
+        {"downloads_scan": "disk/downloads/zone_identifier_scan.json"}, "", "", ""
+    )
+    assert kwargs["module_b_disk"]["downloads_scan"] == Path(
+        "disk/downloads/zone_identifier_scan.json"
+    )

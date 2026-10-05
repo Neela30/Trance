@@ -14,6 +14,7 @@ def _base_args(**overrides):
         "amcache": None,
         "disk_profile": None,
         "tor_dir": None,
+        "downloads_scan": None,
         "disk_image": None,
         "disk_root": None,
         "dump": None,
@@ -238,3 +239,68 @@ def test_main_delegates_to_main_module(tmp_path, monkeypatch):
     assert exit_code == 0
     assert "--disk-profile" in captured["argv"]
     assert "--case" in captured["argv"]
+
+
+def _write_manifest(tmp_path, manifest):
+    (tmp_path / "acquire_manifest.json").write_text(json.dumps(manifest))
+
+
+def test_resolve_from_manifest_recovers_a_live_dump_recorded_as_none(tmp_path):
+    # trance-acquire before the dumper fix wrote "path": "None" for a successful dump.
+    (tmp_path / "memory").mkdir()
+    dump = tmp_path / "memory" / "firefox_4448_20261004T185028Z.bin"
+    dump.write_bytes(b"x")
+    _write_manifest(
+        tmp_path,
+        {
+            "memory": {
+                "live_dump": {"status": "ok", "path": "None", "source_type": "process"},
+                "full_image": {"status": "skipped", "message": "no winpmem"},
+            }
+        },
+    )
+    resolved = analyze_evidence.resolve_evidence(tmp_path)
+    assert resolved["dump"] == str(dump)
+    assert resolved["source_type"] == "process"
+
+
+def test_resolve_from_manifest_does_not_invent_a_dump_when_memory_failed(tmp_path):
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "firefox_1_x.bin").write_bytes(b"x")
+    _write_manifest(
+        tmp_path,
+        {"memory": {"live_dump": {"status": "error", "message": "no firefox.exe running"}}},
+    )
+    assert "dump" not in analyze_evidence.resolve_evidence(tmp_path)
+
+
+def test_resolve_from_manifest_finds_the_downloads_scan(tmp_path):
+    downloads = tmp_path / "disk" / "downloads"
+    downloads.mkdir(parents=True)
+    scan = downloads / analyze_evidence.DOWNLOADS_SCAN_FILENAME
+    scan.write_text("{}")
+    _write_manifest(
+        tmp_path,
+        {
+            "disk": {
+                "downloads": {"status": "ok", "path": "disk/downloads/zone_identifier_scan.json"}
+            }
+        },
+    )
+    assert analyze_evidence.resolve_evidence(tmp_path)["downloads_scan"] == str(scan)
+
+
+def test_resolve_from_manifest_uses_a_partially_copied_tor_dir_from_the_same_folder(tmp_path):
+    # Older builds reported tor_dir "error" when the locked `lock` file stopped the copy,
+    # though every file before it had been copied into this same evidence folder.
+    tor_dir = tmp_path / "disk" / "tor_dir"
+    tor_dir.mkdir(parents=True)
+    _write_manifest(
+        tmp_path, {"disk": {"tor_dir": {"status": "error", "message": "Permission denied"}}}
+    )
+    assert analyze_evidence.resolve_evidence(tmp_path)["tor_dir"] == str(tor_dir)
+
+
+def test_build_argv_passes_the_downloads_scan(tmp_path):
+    argv = analyze_evidence.build_argv(_base_args(), {"downloads_scan": "disk/downloads/s.json"})
+    assert argv[argv.index("--downloads-scan") + 1] == "disk/downloads/s.json"

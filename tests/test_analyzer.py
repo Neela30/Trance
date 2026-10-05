@@ -34,6 +34,18 @@ def test_credential_host_anchoring_applies_only_to_full_memory(tmp_path):
     assert full_report["host_anchoring"]["unanchored"]["credentials"]["count"] == 1
 
 
+def test_targeting_reports_the_given_host_not_the_last_url_host(tmp_path):
+    # Regression: the URL loop variable used to shadow the `host` parameter, so the
+    # reported targeting host became whichever URL host was scanned last.
+    dump = make_dump(tmp_path, b"https://go.microsoft.com/fwlink/?linkid=1\x00")
+
+    report = analyze(dump, onion=None, host="1.2.3.4:5000", username=None)
+    assert report["targeting"]["host"] == "1.2.3.4:5000"
+
+    report = analyze(dump, onion="target.onion", host=None, username=None)
+    assert report["targeting"]["host"] is None
+
+
 def test_search_query_host_anchoring_keeps_real_drops_unrelated(tmp_path):
     real = b"http://target.onion/search?q=tharaka\x00"
     noise = b"some_unrelated_app.exe ?q=randomjunkterm\x00"
