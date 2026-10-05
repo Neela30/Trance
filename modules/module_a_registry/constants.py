@@ -65,6 +65,23 @@ ARTIFACT_TYPE_MOUNTPOINTS2 = "MountPoints2"
 ARTIFACT_TYPE_EMDMGMT = "EMDMgmt"
 ARTIFACT_TYPE_PORTABLEDEVICES = "PortableDevices"
 
+# Phase 3 of the Module A roadmap -- network context. Both CATEGORY_CONTEXT (see below):
+# a network's own name/MAC/lease data never says "Tor" by itself, same reasoning as Phase
+# 2's device-evidence types -- only interesting *alongside* a tor-direct finding.
+ARTIFACT_TYPE_NETWORK_PROFILE = "NetworkProfile"
+ARTIFACT_TYPE_NETWORK_INTERFACE = "NetworkInterface"
+
+# Phase 4 of the Module A roadmap -- persistence and configuration. All three are
+# CATEGORY_TOR_DIRECT (filtered by is_tor_related_entry(), same as the original ten) --
+# unlike Phase 2/3's device/network context types, these ARE Tor evidence in their own
+# right once they reference Tor at all (a scheduled autostart or a configured proxy is a
+# deliberate, Tor-specific configuration choice, not a generic machine fact); an entry
+# that doesn't reference Tor is simply never kept (see is_tor_related_entry() below and
+# pipeline.py's module docstring) -- Module A never reports "every autostart entry".
+ARTIFACT_TYPE_RUNKEY = "RunKey"
+ARTIFACT_TYPE_SERVICE = "Service"
+ARTIFACT_TYPE_PROXY_SETTINGS = "ProxySettings"
+
 # Bare executable/basename matches. Kept deliberately short: only binaries
 # that are unique to the Tor ecosystem belong here. Notably, "firefox.exe"
 # is NOT listed — Tor Browser's firefox.exe is indistinguishable by name
@@ -133,6 +150,14 @@ _CANDIDATE_PATH_FIELDS: dict[str, tuple[str, ...]] = {
     ARTIFACT_TYPE_APP_SWITCHED: ("path",),
     ARTIFACT_TYPE_TYPEDPATHS: ("path",),
     ARTIFACT_TYPE_LASTVISITEDPIDLMRU: ("path",),
+    # RunKey/Service match on "executable" -- the command/ImagePath value with any quoting
+    # and arguments already stripped (see extract_command_executable() below), not the raw
+    # "command"/"image_path" field. is_tor_related()'s basename check needs a bare
+    # executable path to match "tor.exe" at all; a raw value like
+    # '"C:\\Tor\\tor.exe" --service' would never match otherwise (confirmed against a real
+    # SYSTEM hive -- see this module's "Command-line executable extraction" section).
+    ARTIFACT_TYPE_RUNKEY: ("executable",),
+    ARTIFACT_TYPE_SERVICE: ("executable",),
 }
 
 
@@ -184,12 +209,98 @@ _ADDITIONAL_TOR_CHECK_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Command-line executable extraction (Phase 4 of the Module A roadmap).
+# ---------------------------------------------------------------------------
+#
+# Run/RunOnce values and a service's ImagePath are full command lines, not bare paths --
+# e.g. '"C:\Tor\tor.exe" --service' or '%SystemRoot%\System32\svchost.exe -k Group' --
+# confirmed against a real SYSTEM hive (RtkAudUService's real ImagePath has exactly this
+# quoted-path-plus-arguments shape). is_tor_related()'s basename check
+# (normalized.rsplit("\\", 1)[-1]) assumes the whole string IS the path, so on a raw
+# command line it would extract 'tor.exe" --service' instead of 'tor.exe' and never match
+# TOR_EXECUTABLE_NAMES at all -- a real, confirmed gap, not a hypothetical one. This
+# mimics Windows' own CreateProcess command-line parsing just enough to isolate the
+# executable: a leading quote runs to the next quote; otherwise the token runs to the
+# first space.
+def extract_command_executable(command: str | None) -> str | None:
+    if not command:
+        return None
+    stripped = command.strip()
+    if stripped.startswith('"'):
+        end = stripped.find('"', 1)
+        return stripped[1:end] if end != -1 else stripped[1:]
+    return stripped.split(" ", 1)[0]
+
+
+# A Tor Expert Bundle service is very often literally named "tor" (or a close variant)
+# regardless of what its ImagePath looks like (e.g. nssm-wrapped, where the image is
+# nssm.exe, not tor.exe) -- checked as a second, independent signal alongside the
+# executable-path check in is_tor_related_entry() below, since neither alone is reliable
+# for every real-world install shape.
+_SERVICE_NAME_TOR_MARKERS = frozenset({"tor", "tor service", "tor windows service"})
+
+
+def is_tor_service_name(name: str | None) -> bool:
+    return bool(name) and name.strip().lower() in _SERVICE_NAME_TOR_MARKERS
+
+
+# ---------------------------------------------------------------------------
+# Tor SOCKS proxy configuration (Phase 4 of the Module A roadmap).
+# ---------------------------------------------------------------------------
+#
+# "Is this proxy configuration Tor-related" isn't a path-substring question like every
+# other artifact type here -- it's "enabled AND pointing at Tor's own SOCKS port", so it
+# gets its own predicate rather than a candidate_path()/is_tor_related() entry. Per the
+# project brief: only claim "other programs were set to route traffic through Tor" when
+# BOTH conditions hold -- a disabled proxy, or one pointing elsewhere, is not Tor evidence
+# (and per pipeline.py's filtering, no ProxySettings finding is produced at all for either
+# case -- Module A doesn't report "every" proxy configuration, same as RunKey/Service).
+TOR_SOCKS_PORTS = frozenset({"9050", "9150"})
+_TOR_PROXY_HOSTS = frozenset({"127.0.0.1", "localhost"})
+
+
+def _proxy_server_has_tor_socks_port(proxy_server: str | None) -> bool:
+    """ProxyServer can be a single "host:port" (all protocols) or a multi-protocol string
+    like "ftp=1.2.3.4:21;http=1.2.3.4:80;socks=127.0.0.1:9050" -- Windows' own documented
+    shape for per-protocol proxies. Checks every ';'-separated segment (stripping a
+    leading "protocol=" if present) rather than assuming the single-proxy shape, since a
+    SOCKS-only Tor proxy is commonly configured as just one segment among several."""
+    if not proxy_server:
+        return False
+    segments = proxy_server.split(";") if ";" in proxy_server else [proxy_server]
+    for segment in segments:
+        segment = segment.strip()
+        if "=" in segment:
+            _, _, segment = segment.partition("=")
+        host, _, port = segment.strip().rpartition(":")
+        if host and host.lower() in _TOR_PROXY_HOSTS and port in TOR_SOCKS_PORTS:
+            return True
+    return False
+
+
+def is_tor_proxy_config(entry: dict) -> bool:
+    if entry.get("proxy_enable") != 1:
+        return False
+    return _proxy_server_has_tor_socks_port(entry.get("proxy_server"))
+
+
 def is_tor_related_entry(artifact_type: str, entry: dict) -> bool:
     """Like is_tor_related(candidate_path(artifact_type, entry)), but ORs in any
     additional type-specific fields from _ADDITIONAL_TOR_CHECK_FIELDS -- see that dict's
     docstring. This is what pipeline.py's _process_hive() calls for the keep/discard
     filtering decision; candidate_path() itself is unchanged and still used on its own
-    wherever only the single "display" path is needed (e.g. _update_stats())."""
+    wherever only the single "display" path is needed (e.g. _update_stats()).
+
+    Two Phase 4 artifact types need a predicate other than the generic path check:
+    ProxySettings (is_tor_proxy_config() -- "enabled AND pointing at a Tor SOCKS port" is
+    not a path-substring question) and Service (also true if the service's own name is a
+    literal Tor marker, independent of what its ImagePath looks like -- see
+    is_tor_service_name())."""
+    if artifact_type == ARTIFACT_TYPE_PROXY_SETTINGS:
+        return is_tor_proxy_config(entry)
+    if artifact_type == ARTIFACT_TYPE_SERVICE and is_tor_service_name(entry.get("name")):
+        return True
     if is_tor_related(candidate_path(artifact_type, entry)):
         return True
     for field in _ADDITIONAL_TOR_CHECK_FIELDS.get(artifact_type, ()):
@@ -342,6 +453,20 @@ ARTIFACT_CONFIDENCE: dict[str, str] = {
     ARTIFACT_TYPE_MOUNTPOINTS2: CONFIDENCE_LOW,
     ARTIFACT_TYPE_EMDMGMT: CONFIDENCE_MEDIUM,
     ARTIFACT_TYPE_PORTABLEDEVICES: CONFIDENCE_LOW,
+    # Phase 3 -- direct, authoritative OS records (same tier as USBSTOR/MountedDevices):
+    # HIGH means "this is what the OS says", not "this proves Tor ran" (these are
+    # CATEGORY_CONTEXT, never Tor evidence by themselves -- see ARTIFACT_CATEGORY below).
+    ARTIFACT_TYPE_NETWORK_PROFILE: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_NETWORK_INTERFACE: CONFIDENCE_HIGH,
+    # Phase 4 -- a direct, authoritative read of what's configured (HIGH), but evidence of
+    # CONFIGURATION, not of a specific run -- see each reason string below and the
+    # project brief ("a Tor service/Run entry is evidence of configuration, not of a
+    # specific run"). Only ever present at all when it already references Tor (see
+    # is_tor_related_entry()'s ARTIFACT_TYPE_SERVICE/ARTIFACT_TYPE_PROXY_SETTINGS
+    # special cases) -- CATEGORY_TOR_DIRECT, unlike Phase 2/3's context types.
+    ARTIFACT_TYPE_RUNKEY: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_SERVICE: CONFIDENCE_HIGH,
+    ARTIFACT_TYPE_PROXY_SETTINGS: CONFIDENCE_HIGH,
 }
 
 # The exact justification wording normalize.py used to append to `description` as
@@ -434,6 +559,26 @@ ARTIFACT_CONFIDENCE_REASON: dict[str, str] = {
         "MTP/portable-device connection history -- tangential to a mass-storage Tor "
         "install, contextual only."
     ),
+    ARTIFACT_TYPE_NETWORK_PROFILE: (
+        "a direct OS record of a network connection, but the registry only keeps the "
+        "first/last connection time per network, not a connection history."
+    ),
+    ARTIFACT_TYPE_NETWORK_INTERFACE: (
+        "a direct OS record of this interface's IP/DHCP configuration at last update, "
+        "not a log of every address this interface has ever held."
+    ),
+    ARTIFACT_TYPE_RUNKEY: (
+        "evidence of configuration (set to start automatically), not evidence of any "
+        "specific run."
+    ),
+    ARTIFACT_TYPE_SERVICE: (
+        "evidence of configuration (installed as a Windows service), not evidence of any "
+        "specific run."
+    ),
+    ARTIFACT_TYPE_PROXY_SETTINGS: (
+        "a direct read of the configured proxy; evidence that other programs were set up "
+        "to route through Tor, not evidence that they did."
+    ),
 }
 
 # Only context types need an entry -- everything else defaults to CATEGORY_TOR_DIRECT via
@@ -450,4 +595,11 @@ ARTIFACT_CATEGORY: dict[str, str] = {
     ARTIFACT_TYPE_MOUNTPOINTS2: CATEGORY_CONTEXT,
     ARTIFACT_TYPE_EMDMGMT: CATEGORY_CONTEXT,
     ARTIFACT_TYPE_PORTABLEDEVICES: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_NETWORK_PROFILE: CATEGORY_CONTEXT,
+    ARTIFACT_TYPE_NETWORK_INTERFACE: CATEGORY_CONTEXT,
+    # RunKey/Service/ProxySettings are NOT listed here -- they default to
+    # CATEGORY_TOR_DIRECT via ARTIFACT_CATEGORY.get(artifact_type, CATEGORY_TOR_DIRECT),
+    # same as UserAssist/Amcache/etc. (see the "Phase 4" comment on their ARTIFACT_TYPE_*
+    # constants above for why these three are tor-direct, unlike Phase 2/3's device/
+    # network context types).
 }

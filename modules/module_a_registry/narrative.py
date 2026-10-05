@@ -25,7 +25,7 @@ quiet_hive_notes from report.py) and folds the result into its build_context() o
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .constants import CATEGORY_TOR_DIRECT, parse_tor_installer_filename
@@ -71,6 +71,40 @@ GLOSSARY: dict[str, str] = {
         "letter shown in File Explorer. TRANCE shows the matching drive letter when it "
         "can be inferred from another record of the same file; otherwise it is shown "
         "as-is, with a note that the letter could not be determined."
+    ),
+    "NetworkList": (
+        "A part of the Windows Registry that records every network (Wi-Fi, wired, or "
+        "mobile hotspot) this computer has ever connected to, including when it was "
+        "first and last connected to."
+    ),
+    "SSID": ("The name of a Wi-Fi network, as it appears when choosing a network to join."),
+    "gateway MAC address": (
+        "A unique hardware identifier for the router a network connection went through — "
+        "useful for telling apart two different networks that happen to share the same "
+        "name."
+    ),
+    "DHCP lease": (
+        "A temporary IP address assignment a network hands out to a device, valid for a "
+        "limited time window (from when it was obtained until it expires)."
+    ),
+    "Run key": (
+        "A part of the Windows Registry listing programs set to start automatically, "
+        "either when any user signs in (machine-wide) or when a specific user signs in."
+    ),
+    "service": (
+        "A Windows program registered to start automatically in the background, usually "
+        "without any visible window, often starting with the computer itself rather than "
+        "waiting for a user to sign in."
+    ),
+    "proxy": (
+        "A configuration that tells a program to send its network traffic through "
+        "another address first, rather than directly to its destination."
+    ),
+    "SOCKS port": (
+        "The network port a program connects to in order to route its traffic through "
+        "Tor. Tor Browser's own Tor process listens on port 9150 (or 9050 for a "
+        "standalone Tor install); another program configured to use that port is routing "
+        "its own traffic through Tor."
     ),
 }
 
@@ -446,9 +480,17 @@ def describe_reliability(component_timeline: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def describe_not_determined(install_timestamp: str | None, multiple_launches: bool) -> list[str]:
+def describe_not_determined(
+    install_timestamp: str | None,
+    multiple_launches: bool,
+    has_network_profiles: bool = False,
+) -> list[str]:
     """Rule: a fixed, short bullet list of known gaps -- never phrased as "nothing more
     to find", since Module A only ever looks at the registry; Modules B/C cover the rest.
+
+    `has_network_profiles` (Phase 3) gates the network-timing bullet below -- only worth
+    stating when there was network data to be ambiguous about in the first place; defaults
+    to False so existing callers/tests that predate Phase 3 are unaffected.
     """
     bullets: list[str] = []
     if not install_timestamp:
@@ -456,6 +498,12 @@ def describe_not_determined(install_timestamp: str | None, multiple_launches: bo
     if multiple_launches:
         bullets.append(
             "The dates of earlier uses — Windows only keeps a record of the most recent one."
+        )
+    if has_network_profiles:
+        bullets.append(
+            "Which network was in use at the exact moment Tor Browser was opened — the "
+            "registry only records when each network was first and last connected, not a "
+            "connection history."
         )
     bullets.append(
         "What websites were visited or what was done inside Tor Browser — this comes "
@@ -527,6 +575,323 @@ def format_dual_time_plain(iso_timestamp: str, local_tz: str | None) -> str:
         return f"{dt.day} {dt.strftime('%b %Y')}, {utc_24h} UTC"
     local_str = local_dt.strftime("%I:%M %p").lstrip("0")
     return f"{local_dt.day} {local_dt.strftime('%b %Y')}, {local_str} ({utc_24h} UTC)"
+
+
+# ---------------------------------------------------------------------------
+# Rule: network context (Phase 3 of the Module A roadmap)
+# ---------------------------------------------------------------------------
+
+
+def local_systemtime_to_utc(local_iso: str, bias_minutes: int) -> str:
+    """Converts a NetworkList DateCreated/DateLastConnected value (a naive local-time ISO
+    string -- see extract_network_profiles()'s docstring) to UTC using the target
+    machine's own recorded TimeZoneInformation Bias (Phase 0's TimeZone fact).
+
+    Per the Windows TIME_ZONE_INFORMATION documentation (and confirmed against this
+    project's own real evidence: Sri Lanka Standard Time, UTC+5:30, recorded Bias=-330):
+    UTC = local time + Bias (minutes). Deliberately does NOT use ZoneInfo/the examiner's
+    own `local_tz` display preference here -- that is a *different* time zone concept
+    (see format_dual_time()'s docstring: the examiner's configured display zone, for
+    showing an already-UTC timestamp conveniently) from the TARGET machine's own recorded
+    Bias, which is what Windows actually used to produce this local SYSTEMTIME value in
+    the first place."""
+    dt = datetime.fromisoformat(local_iso)
+    utc_dt = (dt + timedelta(minutes=bias_minutes)).replace(tzinfo=timezone.utc)
+    return utc_dt.isoformat()
+
+
+def find_latest_tor_use_iso(
+    annotated_by_type: dict[str, list[dict]], component_timeline: list[dict]
+) -> str | None:
+    """Standalone re-run of build_narrative()'s own "most recent Tor use" computation
+    (UserAssist run_count candidates, extended by the strongest component's BAM time if
+    later) -- exposed so report.py can resolve the Tor launch instant for network
+    correlation before build_narrative() exists to hand it back out. Same "second,
+    independent call rather than threading internal state out" precedent as
+    find_install_location_path()'s own docstring (both compute the same deterministic
+    answer from the same input)."""
+    user_assist = annotated_by_type.get("UserAssist", [])
+    installer_finding = None
+    for finding in user_assist:
+        if parse_tor_installer_filename(finding.get("path")):
+            installer_finding = finding
+            break
+
+    launch_candidates = [
+        f
+        for f in user_assist
+        if f is not installer_finding and f.get("run_count") and f.get("timestamp")
+    ]
+    if not launch_candidates:
+        return None
+    latest = max(launch_candidates, key=lambda f: f["timestamp"])
+    latest_use_iso = latest["timestamp"]
+
+    bam_dt = component_timeline[0].get("bam_last_run") if component_timeline else None
+    if bam_dt:
+        latest_ua_dt = datetime.fromisoformat(latest_use_iso)
+        if bam_dt > latest_ua_dt:
+            latest_use_iso = bam_dt.isoformat()
+    return latest_use_iso
+
+
+_NETWORK_HISTORY_CAVEAT = (
+    "Windows only keeps one first-connected and one last-connected time per network, not "
+    "a connection history — so this cannot show whether the computer was connected to a "
+    "particular network for the whole time Tor Browser was open, only the closest "
+    "recorded connection before it was last opened."
+)
+
+_TIMEZONE_UNKNOWN_CAVEAT = (
+    "The computer's own time zone setting could not be determined, so the times below are "
+    "shown exactly as recorded — in the computer's own local time, not UTC — and have not "
+    "been compared against the UTC-timestamped Tor Browser activity elsewhere in this "
+    "report."
+)
+
+
+def _parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def describe_closest_network_before_launch(
+    profiles_utc: list[dict], latest_tor_use_iso: str | None
+) -> str | None:
+    """Rule: among every network profile with a decodable UTC last-connected time at or
+    before the Tor launch instant, the one with the LATEST such time is "the most recent
+    network connection recorded before Tor Browser was last opened" -- phrased exactly
+    this way (never "while using Tor") per the project brief, since the registry only
+    keeps one first/last connection per network, not a history (see
+    _NETWORK_HISTORY_CAVEAT, stated once by the caller, not repeated here)."""
+    if not latest_tor_use_iso:
+        return None
+    launch_dt = _parse_utc(latest_tor_use_iso)
+    if launch_dt is None:
+        return None
+
+    candidates = [
+        (p["_last_connected_utc_dt"], p)
+        for p in profiles_utc
+        if p.get("_last_connected_utc_dt") and p["_last_connected_utc_dt"] <= launch_dt
+    ]
+    if not candidates:
+        return None
+    _, profile = max(candidates, key=lambda c: c[0])
+    name = profile.get("profile_name") or "an unnamed network"
+    mac = profile.get("gateway_mac")
+    mac_clause = f" (router {mac})" if mac else ""
+    when = profile["_last_connected_utc_dt"].isoformat()
+    return (
+        f"The most recent network connection recorded before Tor Browser was last opened "
+        f"was to {name}{mac_clause} at {when}."
+    )
+
+
+def describe_networks_created_same_day_as_launch(
+    profiles_utc: list[dict], latest_tor_use_iso: str | None
+) -> list[str]:
+    """Rule: a network whose DateCreated (converted to UTC) falls on the same UTC
+    calendar day as the most recent Tor launch is worth surfacing as context -- phrased as
+    an observation ("was also set up"), never implying causation. A fixed, auditable
+    same-calendar-day rule rather than an arbitrary time window."""
+    if not latest_tor_use_iso:
+        return []
+    launch_dt = _parse_utc(latest_tor_use_iso)
+    if launch_dt is None:
+        return []
+    sentences = []
+    for profile in profiles_utc:
+        created_dt = profile.get("_created_utc_dt")
+        if created_dt and created_dt.date() == launch_dt.date():
+            name = profile.get("profile_name") or "an unnamed network"
+            sentences.append(
+                f"The network {name} was also set up for the first time on the same day "
+                "Tor Browser was last opened."
+            )
+    return sentences
+
+
+def describe_dhcp_leases_covering_launch(
+    interfaces: list[dict], latest_tor_use_iso: str | None
+) -> list[str]:
+    """Rule: if an interface's DHCP lease window [obtained, expires] contains the Tor
+    launch instant, the interface held that IP address at the time Tor Browser was last
+    opened -- stated as exactly that (an IP address held at the time), never as "this
+    network was used for Tor traffic", which the lease data does not show."""
+    if not latest_tor_use_iso:
+        return []
+    launch_dt = _parse_utc(latest_tor_use_iso)
+    if launch_dt is None:
+        return []
+    sentences = []
+    for interface in interfaces:
+        obtained = _parse_utc(interface.get("lease_obtained_utc"))
+        terminates = _parse_utc(interface.get("lease_terminates_utc"))
+        if obtained and terminates and obtained <= launch_dt <= terminates:
+            ip = interface.get("ip") or "an unknown address"
+            sentences.append(
+                f"The network interface held IP address {ip} from {obtained.isoformat()} "
+                f"to {terminates.isoformat()}, which includes the moment Tor Browser was "
+                "last opened. This shows the computer's own address during that window, "
+                "not which network it was routed through or what it was used for."
+            )
+    return sentences
+
+
+def build_network_narrative(
+    profiles: list[dict],
+    interfaces: list[dict],
+    bias_minutes: int | None,
+    latest_tor_use_iso: str | None,
+) -> dict:
+    """Composes Phase 3's "Network context at time of use" section. Returns
+    {"correlation": [...], "caveats": [...]} -- empty lists (not a missing key) when there
+    is nothing to say, so report.py can decide whether to render the section at all.
+
+    When the system's time zone is unknown (bias_minutes is None), per the project brief
+    this deliberately does NOT attempt any local-to-UTC comparison -- profiles are left
+    with no "_*_utc_dt" fields, so describe_closest_network_before_launch() and
+    describe_networks_created_same_day_as_launch() both correctly find nothing to say,
+    and _TIMEZONE_UNKNOWN_CAVEAT explains why.
+    """
+    profiles_utc = []
+    for profile in profiles:
+        enriched = dict(profile)
+        if bias_minutes is not None:
+            if profile.get("created_local"):
+                try:
+                    enriched["_created_utc_dt"] = _parse_utc(
+                        local_systemtime_to_utc(profile["created_local"], bias_minutes)
+                    )
+                except ValueError:
+                    pass
+            if profile.get("last_connected_local"):
+                try:
+                    enriched["_last_connected_utc_dt"] = _parse_utc(
+                        local_systemtime_to_utc(profile["last_connected_local"], bias_minutes)
+                    )
+                except ValueError:
+                    pass
+        profiles_utc.append(enriched)
+
+    correlation: list[str] = []
+    caveats: list[str] = []
+
+    if profiles_utc:
+        caveats.append(_NETWORK_HISTORY_CAVEAT)
+    if bias_minutes is None and profiles_utc:
+        caveats.append(_TIMEZONE_UNKNOWN_CAVEAT)
+
+    closest = describe_closest_network_before_launch(profiles_utc, latest_tor_use_iso)
+    if closest:
+        correlation.append(closest)
+    correlation.extend(
+        describe_networks_created_same_day_as_launch(profiles_utc, latest_tor_use_iso)
+    )
+    correlation.extend(describe_dhcp_leases_covering_launch(interfaces, latest_tor_use_iso))
+
+    return {"correlation": correlation, "caveats": caveats}
+
+
+# ---------------------------------------------------------------------------
+# Rule: automatic start and proxy configuration (Phase 4 of the Module A roadmap)
+# ---------------------------------------------------------------------------
+
+
+def describe_run_key_autostart(run_keys: list[dict]) -> list[str]:
+    """Rule: a RunKey finding only exists at all when it already references Tor (see
+    constants.is_tor_related_entry() -- Module A never reports every autostart entry), so
+    every one of these is evidence of deliberate, ongoing configuration, not a one-off
+    session."""
+    sentences = []
+    for finding in run_keys:
+        path = finding.get("path") or "A Tor-related program"
+        value_name = finding.get("value_name")
+        name_clause = f" (listed as {value_name!r})" if value_name else ""
+        sentences.append(
+            f"{path} is configured to start automatically when this user signs "
+            f"in{name_clause} — indicating deliberate, ongoing use, not just a one-off "
+            "session."
+        )
+    return sentences
+
+
+def describe_service_autostart(services: list[dict]) -> list[str]:
+    """Rule: same reasoning as describe_run_key_autostart() above, for a Windows service
+    instead of a per-user Run key -- a service starts with the computer itself, often
+    before any user signs in at all."""
+    sentences = []
+    for finding in services:
+        path = finding.get("path") or "A Tor-related program"
+        name = finding.get("service_name")
+        name_clause = f" (service {name!r})" if name else ""
+        sentences.append(
+            f"{path} is installed as a Windows service{name_clause}, configured to "
+            "start automatically with the computer — indicating deliberate, ongoing Tor "
+            "use set up ahead of time, not just a one-off session."
+        )
+    return sentences
+
+
+def describe_proxy_configuration(proxy_settings: list[dict]) -> list[str]:
+    """Rule: a ProxySettings finding only exists when it's already confirmed enabled AND
+    pointing at a Tor SOCKS port (constants.is_tor_proxy_config()) -- so every one of
+    these means other programs were set up to route their own traffic through Tor, not
+    merely that a proxy was available."""
+    sentences = []
+    for finding in proxy_settings:
+        server = finding.get("proxy_server") or "a Tor SOCKS port"
+        sentences.append(
+            f"Other programs on this computer were configured to send their network "
+            f"traffic through {server} — Tor's own proxy — meaning programs other than "
+            "Tor Browser itself may have been set up to use Tor."
+        )
+    return sentences
+
+
+def build_autostart_narrative(
+    run_keys: list[dict], services: list[dict], proxy_settings: list[dict]
+) -> list[str]:
+    """Composes Phase 4's "Automatic start and proxy settings" section -- empty when
+    there's nothing to say (no RunKey/Service/ProxySettings findings at all), so
+    report.py/the template can skip rendering the section entirely rather than showing an
+    empty one."""
+    sentences: list[str] = []
+    sentences.extend(describe_run_key_autostart(run_keys))
+    sentences.extend(describe_service_autostart(services))
+    sentences.extend(describe_proxy_configuration(proxy_settings))
+    return sentences
+
+
+# ---------------------------------------------------------------------------
+# Rule: portable-install absence from InstalledPrograms (Phase 5 of the Module A roadmap)
+# ---------------------------------------------------------------------------
+
+
+def describe_portable_install_note(installed_programs_present: bool) -> str | None:
+    """Rule: Tor Browser is normally run portable -- no installer, no entry in the
+    Windows list of installed programs -- so InstalledPrograms having nothing for it is
+    the EXPECTED case, not a gap in the evidence. Returns None when InstalledPrograms DID
+    find something (a traditional, non-portable install) -- the note would be misleading
+    there, since it did register."""
+    if installed_programs_present:
+        return None
+    return (
+        "Tor Browser is normally run as a portable app, with no installer and no entry "
+        "in the Windows list of installed programs — its absence from that list is "
+        "expected, not a sign anything is missing."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -941,7 +1306,11 @@ def build_narrative(
         ),
         "timeline": timeline,
         "reliability": describe_reliability(component_timeline),
-        "not_determined": describe_not_determined(install_timestamp, launch_count > 1),
+        "not_determined": describe_not_determined(
+            install_timestamp,
+            launch_count > 1,
+            has_network_profiles=bool(annotated_by_type.get("NetworkProfile")),
+        ),
         "technical": technical,
         "account_sid": bam_sid,
         "device_story": device_story,

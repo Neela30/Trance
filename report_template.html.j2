@@ -188,6 +188,106 @@
   </section>
   {% endif %}
 
+  {% if registry.network_context and (registry.network_context.profiles or registry.network_context.interfaces) %}
+  {% set net = registry.network_context %}
+  <section>
+    <div class="section-head"><h2>Network context at time of use</h2></div>
+    {% if net.narrative.correlation %}
+    <ul class="narrative-list">
+      {% for line in net.narrative.correlation %}
+      <li>{{ line }}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="note">No network connection could be correlated with Tor Browser's use.</p>
+    {% endif %}
+    {% for line in net.narrative.caveats %}
+    <p class="note">{{ line }}</p>
+    {% endfor %}
+    {% if net.profiles %}
+    <details class="appendix" style="margin-top:12px;">
+      <summary>Show all {{ net.profiles|length }} network{{ "s" if net.profiles|length != 1 }} this computer has recorded</summary>
+      <div class="table-scroll" style="margin-top:10px;">
+        <table class="evidence-table">
+          <thead><tr><th>Network</th><th>Type</th><th>Category</th><th>First connected</th><th>Last connected</th><th>Router MAC</th></tr></thead>
+          <tbody>
+            {% for p in net.profiles %}
+            <tr>
+              <td class="val">{{ p.profile_name or "(unnamed)" }}</td>
+              <td class="off">{{ p.name_type or "—" }}</td>
+              <td class="off">{{ p.category or "—" }}</td>
+              <td class="off">{{ p.created_local or "—" }}{% if p.created_local %} <span class="off">(local)</span>{% endif %}</td>
+              <td class="off">{{ p.last_connected_local or "—" }}{% if p.last_connected_local %} <span class="off">(local)</span>{% endif %}</td>
+              <td class="off">{{ p.gateway_mac or "—" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="note" style="margin-top:8px;">Times above are shown exactly as Windows recorded them, in this computer's own local time{% if net.bias_minutes is none %} — the computer's time zone could not be determined, so these have not been converted to or compared against UTC{% endif %}.</p>
+    </details>
+    {% endif %}
+    {% if net.interfaces %}
+    <details class="appendix" style="margin-top:12px;">
+      <summary>Show all {{ net.interfaces|length }} network interface{{ "s" if net.interfaces|length != 1 }} this computer has recorded</summary>
+      <div class="table-scroll" style="margin-top:10px;">
+        <table class="evidence-table">
+          <thead><tr><th>Interface</th><th>DHCP</th><th>IP address</th><th>Gateway</th><th>Lease obtained</th><th>Lease expires</th><th>Domain</th></tr></thead>
+          <tbody>
+            {% for i in net.interfaces %}
+            <tr>
+              <td class="val">{{ i.interface_name }}</td>
+              <td class="off">{{ "Yes" if i.dhcp_enabled else "No" }}</td>
+              <td class="off">{{ i.ip or "—" }}</td>
+              <td class="off">{{ i.gateway or "—" }}</td>
+              <td class="off">{{ i.lease_obtained_utc or "—" }}</td>
+              <td class="off">{{ i.lease_terminates_utc or "—" }}</td>
+              <td class="off">{{ i.domain or "—" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="note" style="margin-top:8px;">DHCP lease times above are in UTC.</p>
+    </details>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {% if registry.autostart_context and registry.autostart_context.narrative %}
+  <section>
+    <div class="section-head"><h2>Automatic start and proxy settings</h2></div>
+    <ul class="narrative-list">
+      {% for line in registry.autostart_context.narrative %}
+      <li>{{ line }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if registry.files_involved %}
+  <section>
+    <div class="section-head">
+      <h2>Files involved</h2>
+      <span class="count">{{ registry.files_involved|length }} file{{ "s" if registry.files_involved|length != 1 }} opened, saved, or browsed to by Tor Browser or inside its folder</span>
+    </div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Path</th><th>Source</th><th>Timestamp</th></tr></thead>
+        <tbody>
+          {% for f in registry.files_involved %}
+          <tr>
+            <td class="val">{{ f.path|wrap_path }}</td>
+            <td class="off">{{ f.source }}</td>
+            <td class="off">{{ f.timestamp|fmt_ts }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
   {% if registry.errors %}
   <section>
     <div class="callout">

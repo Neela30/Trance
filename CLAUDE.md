@@ -130,12 +130,13 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
 
 ### Module A — registry & execution evidence (`modules/module_a_registry/`)
 
-Module A is mid-way through a multi-phase roadmap (Phase 0 "foundations", Phase 1
-"execution evidence", and Phase 2 "device evidence" — USB/MountedDevices/MountPoints2/
+Module A is mid-way through a multi-phase roadmap: Phase 0 "foundations", Phase 1
+"execution evidence", Phase 2 "device evidence" (USB/MountedDevices/MountPoints2/
 EMDMgmt/Windows Portable Devices, plus a direct drive-letter → physical-device
-correlation — are done; Phases 3–6 — network context, persistence/config,
-report/narrative wiring for the remaining context facts, SRUM/event logs — are not
-started). What follows describes the current state.
+correlation), Phase 3 "network context" (NetworkList/Tcpip), Phase 4 "persistence and
+configuration" (Run/RunOnce, services, Internet Settings proxy), and Phase 5 "report
+integration" for all of the above are done; Phase 6 (SRUM/event logs) is not started.
+What follows describes the current state.
 
 - **Acquire** (`acquire.py`, Windows, admin): `reg save HKLM\SYSTEM`, `reg save
   HKLM\SOFTWARE`, and `reg save HKCU` (current user's NTUSER.DAT); Amcache.hve via a
@@ -149,15 +150,16 @@ started). What follows describes the current state.
 - **Analyze** (`pipeline.py`): hash on ingest → extraction (each extractor isolated in its
   own try/except inside `_process_hive()` — see "Per-extractor isolation" in §3) →
   Tor-relevance filter (`constants.py: is_tor_related_entry`) → normalize to `Artifact`s
-  (`normalize.py`) → re-hash and raise `IntegrityError` on mismatch. 25 artifact types
-  total, from three sources:
+  (`normalize.py`) → re-hash and raise `IntegrityError` on mismatch. 30 artifact types
+  total, from three sources (plus one bypassed-plugin reimplementation, see below):
   - **regipy plugins, thin-wrapped in `extractors.py`**: UserAssist, RecentDocs, MUICache,
     RunMRU, WordWheelQuery, ComDlg32, TypedPaths from NTUSER; ShimCache, BAM, ComputerName,
     TimeZone, USBSTOR, generic USB devices, MountedDevices, Windows Portable Devices (WPD,
-    resolved per-ControlSet via `get_control_sets()`, same as ComputerName/TimeZone) from
-    SYSTEM; Amcache; InstalledPrograms, WindowsVersion from SOFTWARE; ShellBags from
-    UsrClass.dat (needs the `regipy[full]` extra — `libfwsi-python`/`libfwps-python`,
-    importable as `pyfwsi`/`pyfwps` — see requirements.txt). ShellBags extraction is
+    resolved per-ControlSet via `get_control_sets()`, same as ComputerName/TimeZone),
+    network interfaces (Tcpip, Phase 3) from SYSTEM; Amcache; InstalledPrograms,
+    WindowsVersion from SOFTWARE; ShellBags from UsrClass.dat (needs the `regipy[full]`
+    extra — `libfwsi-python`/`libfwps-python`, importable as `pyfwsi`/`pyfwps` — see
+    requirements.txt). ShellBags extraction is
     additionally patched (`_shellbags_patch.py`, applied via `apply_shellbags_patch()`):
     `pyfwsi`'s `get_creation_time()`/`get_access_time()` can raise a bare `SystemError`
     ("invalid format string: %hhu.") on certain real entries that regipy's own
@@ -179,11 +181,19 @@ started). What follows describes the current state.
     MUICache from UsrClass.dat (a same-named NTUSER-only plugin exists but can never
     reach this data — see that file's module docstring), Program Compatibility Assistant
     Store, `Software\Mozilla\Firefox\Launcher`, `FeatureUsage\AppSwitched`, MountPoints2,
-    all from NTUSER; EMDMgmt (ReadyBoost device-eligibility test records) from SOFTWARE.
-    Every hive is opened with an **explicit** `hive_type=` (never regipy's own
-    auto-detection, which reads the hive's *embedded* header path and is unreliable for
-    an acquired/renamed copy — confirmed broken for UsrClass.dat specifically, whose
-    check is an exact-equality match no real acquired hive will ever satisfy).
+    Run/RunOnce (Phase 4), Internet Settings proxy config (Phase 4) all from NTUSER;
+    EMDMgmt (ReadyBoost device-eligibility test records), Run/RunOnce (HKLM + WOW6432Node,
+    Phase 4) from SOFTWARE; services (Phase 4) from SYSTEM. Every hive is opened with an
+    **explicit** `hive_type=` (never regipy's own auto-detection, which reads the hive's
+    *embedded* header path and is unreliable for an acquired/renamed copy — confirmed
+    broken for UsrClass.dat specifically, whose check is an exact-equality match no real
+    acquired hive will ever satisfy).
+  - **A fourth source — a regipy plugin that exists but is bypassed and reimplemented
+    using its own public helper functions**, same pattern as the `extract_mounted_devices()`/
+    `extract_last_visited_pidl_mru()` precedent below: network profiles (NetworkList,
+    Phase 3) from SOFTWARE, via `NetworkListPlugin`'s own `parse_network_date()`/
+    `format_mac_address()` against real bytes (its own `run()` is broken the same
+    `trim_values=True` way MountedDevicesPlugin was — see the Phase 3 writeup below).
   - MUICache-from-UsrClass deliberately shares the `MUICache` artifact type with the
     NTUSER-sourced one (same kind of evidence, two possible source hives depending on
     Windows version; merged into one report section, `Artifact.source` differentiates).
@@ -318,12 +328,110 @@ started). What follows describes the current state.
   registry key's own shared last-write time, not a per-program run time — the "Raw
   findings by hive" table labels that column "Registry key last updated" specifically for
   MUICache's rows, with a one-line caption saying so.
+- **Phase 3 — network context.** `extractors.extract_network_profiles()` joins SOFTWARE's
+  `NetworkList\Profiles` with `NetworkList\Signatures\{Managed,Unmanaged}` (on
+  `ProfileGuid`), new `ARTIFACT_TYPE_NETWORK_PROFILE` (`CATEGORY_CONTEXT`, same "only kept
+  alongside a tor-direct finding" gate as Phase 2's device types). Deliberately does NOT
+  use regipy's own `NetworkListPlugin`, despite one existing: confirmed against a real
+  SOFTWARE hive (59 real profiles) that its `run()` reads every value through
+  `extract_values()`'s default `iter_values()` (`trim_values=True`), which returns a HEX
+  STRING, not bytes, for `DateCreated`/`DateLastConnected`/`DefaultGatewayMac` (REG_BINARY)
+  — the same bug class already fixed for `MountedDevicesPlugin`. Confirmed real-world
+  effect: `date_created`/`date_last_connected` came back `None` for every one of 59 real
+  profiles, and `default_gateway_mac` came back a raw hex string (`"e47deb7a4551"`)
+  instead of a formatted MAC. Fixed the same way as `extract_mounted_devices()`: bypass
+  the plugin's `run()`, reuse its own public `parse_network_date()`/`format_mac_address()`
+  against real bytes read via `iter_values(trim_values=False)`. `DateCreated`/
+  `DateLastConnected` decode to a **naive local-time** ISO string (confirmed by manually
+  decoding a real SYSTEMTIME blob against the known acquisition date) — never promoted to
+  `Artifact.timestamp` (which every other type treats as UTC); report.py converts to UTC
+  explicitly via `narrative.local_systemtime_to_utc()` using the system's own recorded
+  `TimeZoneInformation` Bias (`UTC = local + bias_minutes`, confirmed against this
+  project's own real evidence: Sri Lanka Standard Time, UTC+5:30, recorded `Bias=-330`) —
+  deliberately NOT the examiner's own `local_tz` display preference, a different concept
+  (see `format_dual_time()`). `extractors.extract_network_interfaces()` thin-wraps
+  regipy's `NetworkDataPlugin` (SYSTEM's `Services\Tcpip\Parameters\Interfaces`, resolved
+  per existing ControlSet) — unlike NetworkListPlugin, this one works correctly against
+  real evidence (DHCP lease times are Unix-epoch DWORDs, not FILETIME, and the plugin
+  converts them correctly); its own recursive `sub_interface` field is dropped (confirmed
+  against real data to be leftover WLAN-profile-shaped garbage, not real nested
+  interfaces). `report.py`'s `_build_network_context()` resolves the Tor launch instant via
+  `narrative.find_latest_tor_use_iso()` (same "second, independent call" precedent as
+  `find_install_location_path()`) and produces the brief's required careful wording —
+  *"The most recent network connection recorded before Tor Browser was last opened was to
+  [SSID] (router [MAC]) at [time]"* — never "connected while using Tor"; plus same-day
+  network-creation notes and DHCP-lease-covers-launch sentences
+  (`narrative.build_network_narrative()`). When the system's time zone is unknown, no
+  local→UTC comparison is attempted at all (profiles shown local-time-only, explicitly
+  labeled, per the brief) — see `_TIMEZONE_UNKNOWN_CAVEAT`. **Found and fixed along the
+  way** (blocking this phase, since it needs a working Bias value): `normalize.py`'s
+  `_normalize_time_zone()`/`_normalize_windows_version()` read the wrong-cased field names
+  (`time_zone_key_name`/`bias`/`product_name`/... vs. the real
+  `TimeZoneKeyName`/`Bias`/`ProductName`/... regipy plugins actually return, confirmed
+  against real hives) — every real report said *"Windows time zone configured as
+  '\<unknown\>'."* and *"Windows version recorded as '\<unknown\>'."* since Phase 0; the
+  hand-built test fixtures used the same wrong casing, which is why ~210 passing tests
+  never caught it.
+- **Phase 4 — persistence and configuration.** Three new `CATEGORY_TOR_DIRECT` types
+  (unlike Phase 2/3's context types, only ever present at all once they reference Tor —
+  Module A still never reports "every autostart entry"): `ARTIFACT_TYPE_RUNKEY`
+  (`custom_extractors.extract_run_keys_ntuser/_software()` — HKCU Run/RunOnce plus HKLM
+  Run/RunOnce/WOW6432Node, no regipy plugin exists), `ARTIFACT_TYPE_SERVICE`
+  (`extract_services()`, SYSTEM's `Services`), `ARTIFACT_TYPE_PROXY_SETTINGS`
+  (`extract_proxy_settings()`, NTUSER's Internet Settings). A shared
+  `constants.extract_command_executable()` strips quoting/arguments from a Run value or a
+  service's ImagePath before matching — confirmed real gap: a real ImagePath like
+  `'"C:\...\RtkAudUService64.exe" -background'` would otherwise defeat
+  `is_tor_related()`'s basename check entirely (it would extract `'...exe" -background'`,
+  never matching `TOR_EXECUTABLE_NAMES`). `extract_services()` is NOT a plain "read every
+  service" loop: regipy's own `ServicesPlugin` (recursive per-service parameter walk) took
+  **~76 seconds** against a real SYSTEM hive (858 services); even a bare `iter_values()`
+  per service with no recursion took **~30 seconds** — regipy parses every value's data
+  unconditionally, confirmed by timing a bare `iter_subkeys()` pass (instant) against one
+  that also touches values. A naive `"tor" in name.lower()` substring filter was also
+  tried and rejected: `DriverStore`-shaped ImagePaths (hundreds of real services) contain
+  `"tor"` as a substring of `"Store"`. The shipped design does a cheap first pass reading
+  only each service's `ImagePath` (one `get_value()` call, confirmed ~7.5s for 858 real
+  services) applying the same `is_tor_service_name()`/`is_tor_related()` predicates
+  `is_tor_related_entry()` uses downstream, and only does the fuller `iter_values()`-style
+  read for an actual match. `is_tor_related_entry()` gained two special cases (not a
+  generic path check): `ARTIFACT_TYPE_PROXY_SETTINGS` dispatches to
+  `constants.is_tor_proxy_config()` (`ProxyEnable==1` AND `ProxyServer` resolves to
+  127.0.0.1/localhost on port 9050/9150 — handles Windows' multi-protocol
+  `"socks=host:port;http=..."` shape too; disabled or wrong-port never produces a finding
+  at all, per the brief), and `ARTIFACT_TYPE_SERVICE` also matches on the service's own
+  name (`is_tor_service_name()`, exact `"tor"`/`"tor service"`/`"tor windows service"`) —
+  independent of `ImagePath`, since an nssm-wrapped Tor service's image is `nssm.exe`, not
+  `tor.exe`.
+- **Phase 5 — report integration.** Three new sections, each rendered only when non-empty:
+  "Network context at time of use" (Phase 3's correlation sentences/caveats plus a
+  collapsed full network/interface table), "Automatic start and proxy settings" (Phase 4's
+  `narrative.build_autostart_narrative()`), "Files involved" (`report._build_files_involved()`
+  — a plain merge of already-tor-direct-filtered ComDlg32/RecentDocs/ShellBags findings; no
+  new filtering needed since every one of those already passed `is_tor_related_entry()`).
+  `narrative.describe_not_determined()` gained an opt-in `has_network_profiles` bullet
+  ("which network was in use at the exact moment..."). The "portable Tor Browser never
+  appears in Installed Programs" sentence (`narrative.describe_portable_install_note()`)
+  was added to `report._quiet_hive_notes()` — same "silence doesn't mean absence" mechanism
+  already used there for Amcache/ShimCache/BAM, gated on SOFTWARE being supplied and no
+  `InstalledPrograms` finding existing. `EXECUTION_SOURCE_TYPES`/`corroborated_components`
+  deliberately untouched — RunKey/Service/ProxySettings findings can still appear in a
+  component's `seen_in` (real corroborating context, e.g. a RunKey entry for the same
+  `firefox.exe` UserAssist already found), but never count toward the execution-source
+  tally; verified end-to-end against the real evidence capture that the "Confirmed Tor
+  Browser components" count (4 files, 2 corroborated) is byte-for-byte unchanged by all of
+  Phase 3–5.
 - Standalone CLI: `python -m modules.module_a_registry.cli` (uses `click`).
-- Phase 0/1's extractors are still mostly mocked-tested only; `extract_mounted_devices()`
-  and the device-correlation chain above **have** been verified against a real
-  SYSTEM/SOFTWARE/NTUSER/UsrClass.dat capture — `pyfwsi`/`pyfwps`'s actual ShellBags
-  behavior remains the other piece of Phase 1 verified against real data (via the
-  SystemError fix), same "mostly mocked-only" caveat Volatility3 carries in Module C
+- Phase 0/1's extractors are still mostly mocked-tested only; `extract_mounted_devices()`,
+  the device-correlation chain above, and Phase 3's `extract_network_profiles()`/
+  `extract_network_interfaces()` **have** been verified against a real
+  SYSTEM/SOFTWARE/NTUSER/UsrClass.dat capture (which also turned out to contain genuine
+  Tor Browser usage — 3 launches, last run confirmed against UserAssist+BAM+MUICache) —
+  `pyfwsi`/`pyfwps`'s actual ShellBags behavior remains the other piece of Phase 1 verified
+  against real data (via the SystemError fix). Phase 4's RunKey/Service/ProxySettings
+  extractors are mocked-tested only so far — this machine's real evidence has none of the
+  three (no Tor service/autostart/proxy configured), which is a useful negative check but
+  not a positive one; same "mostly mocked-only" caveat Volatility3 carries in Module C
   otherwise.
 
 ### Module B — disk (`modules/module_b_disk/`) — mostly written by teammate (branch `Sahe`)

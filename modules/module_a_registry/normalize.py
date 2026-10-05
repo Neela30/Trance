@@ -41,9 +41,14 @@ from .constants import (
     ARTIFACT_TYPE_MOUNTEDDEVICES,
     ARTIFACT_TYPE_MOUNTPOINTS2,
     ARTIFACT_TYPE_MUICACHE,
+    ARTIFACT_TYPE_NETWORK_INTERFACE,
+    ARTIFACT_TYPE_NETWORK_PROFILE,
     ARTIFACT_TYPE_PORTABLEDEVICES,
+    ARTIFACT_TYPE_PROXY_SETTINGS,
     ARTIFACT_TYPE_RECENTDOCS,
+    ARTIFACT_TYPE_RUNKEY,
     ARTIFACT_TYPE_RUNMRU,
+    ARTIFACT_TYPE_SERVICE,
     ARTIFACT_TYPE_SHELLBAGS,
     ARTIFACT_TYPE_SHIMCACHE,
     ARTIFACT_TYPE_TIMEZONE,
@@ -204,20 +209,33 @@ def _normalize_computer_name(entry: dict) -> tuple[str, str | None]:
 
 
 def _normalize_time_zone(entry: dict) -> tuple[str, str | None]:
-    tz_name = entry.get("time_zone_key_name") or "<unknown>"
-    bias = entry.get("bias")
+    # TimezoneDataPlugin2's own entry keys are "TimeZoneKeyName"/"Bias" (PascalCase, as
+    # regipy emits them) -- NOT "time_zone_key_name"/"bias". A real-hive check (Phase 3
+    # of the Module A roadmap) found this function had always read the wrong-cased keys
+    # since Phase 0, so it silently fell back to "<unknown>" with no bias on every real
+    # acquisition; the hand-built test fixtures used the same wrong casing, which is why
+    # ~210 passing tests never caught it. Fixed here to match extract_time_zone()'s real
+    # output (see extractors.py) -- Phase 3's local-time-to-UTC conversion for NetworkList
+    # timestamps depends on a working Bias value, which is what surfaced this.
+    tz_name = entry.get("TimeZoneKeyName") or "<unknown>"
+    bias = entry.get("Bias")
     bias_suffix = f", bias={bias} minutes from UTC" if bias is not None else ""
     description = f"Windows time zone configured as '{tz_name}'{bias_suffix}."
     return description, entry.get("last_write")
 
 
 def _normalize_windows_version(entry: dict) -> tuple[str, str | None]:
-    product = entry.get("product_name") or "<unknown>"
+    # Same real-hive-confirmed bug as _normalize_time_zone() above: WinVersionPlugin's own
+    # entry keys are "ProductName"/"CurrentVersion"/"CurrentBuildNumber" (PascalCase), not
+    # the snake_case names this function read since Phase 0 -- always fell back to
+    # "<unknown>" against real evidence. Fixed to match extract_windows_version()'s real
+    # output.
+    product = entry.get("ProductName") or "<unknown>"
     details = []
-    if entry.get("display_version"):
-        details.append(f"version={entry['display_version']}")
-    if entry.get("current_build_number"):
-        details.append(f"build={entry['current_build_number']}")
+    if entry.get("CurrentVersion"):
+        details.append(f"version={entry['CurrentVersion']}")
+    if entry.get("CurrentBuildNumber"):
+        details.append(f"build={entry['CurrentBuildNumber']}")
     detail_suffix = f" ({', '.join(details)})" if details else ""
     description = f"Windows version recorded as '{product}'{detail_suffix}."
     return description, entry.get("last_write")
@@ -374,6 +392,111 @@ def _normalize_portable_devices(entry: dict) -> tuple[str, str | None]:
     return description, entry.get("last_write")
 
 
+def _stringify(value: object) -> str | None:
+    """Several NetworkData/NetworkList fields come back as a list (e.g.
+    dhcp_default_gateway=['192.168.1.1'], confirmed against a real SYSTEM hive -- Windows
+    allows more than one gateway per interface even though only one is typically
+    configured) -- joined here into a single comma-separated string so every description
+    below can treat it as plain text."""
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value) if value else None
+    return str(value)
+
+
+def _normalize_network_profile(entry: dict) -> tuple[str, str | None]:
+    # Every field rendered unconditionally with an "unknown" sentinel (never an optional
+    # suffix that may be absent) -- same convention Phase 2's USBStor/MountedDevices
+    # normalizers use, so report.py's own regex-based parsing (the only way a `description`
+    # string round-trips structured data back to the report layer) can assume a match
+    # always exists. date_created_local/date_last_connected_local are deliberately NOT
+    # promoted to Artifact.timestamp (which every other artifact type treats as UTC) --
+    # these are SYSTEMTIME values in the machine's own LOCAL time (confirmed by decoding a
+    # real value), and silently treating a local time as UTC elsewhere (sorting, "most
+    # recent" comparisons) would misrepresent it by the system's own UTC offset. report.py/
+    # narrative.py convert these explicitly using the system's recorded TimeZone bias
+    # (Phase 0) wherever they're compared against a UTC timestamp.
+    name = entry.get("profile_name") or entry.get("profile_guid") or "<unknown>"
+    name_type = entry.get("name_type") or "unknown"
+    category = entry.get("category") or "unknown"
+    created = entry.get("date_created_local") or "unknown"
+    last_connected = entry.get("date_last_connected_local") or "unknown"
+    mac = entry.get("default_gateway_mac") or "unknown"
+    dns_suffix = entry.get("dns_suffix") or "unknown"
+    description = (
+        f"Network profile '{name}' (type={name_type}, category={category}, "
+        f"created_local={created}, last_connected_local={last_connected}, "
+        f"gateway_mac={mac}, dns_suffix={dns_suffix})."
+    )
+    return description, None
+
+
+def _normalize_network_interface(entry: dict) -> tuple[str, str | None]:
+    # Unlike NetworkProfile's local-time fields above, dhcp_lease_obtained_time/
+    # dhcp_lease_terminates_time genuinely ARE UTC already -- regipy's NetworkDataPlugin
+    # converts the raw Unix-epoch DWORD via datetime.fromtimestamp(..., timezone.utc)
+    # (confirmed by reading its source and cross-checking against a real lease on a real
+    # hive) -- so, unlike NetworkProfile, Artifact.timestamp here (last_modified, the
+    # interface key's own last-write time) is a normal UTC value like every other type.
+    name = entry.get("interface_name") or "<unknown>"
+    if entry.get("dhcp_enabled"):
+        ip = _stringify(entry.get("dhcp_ip_address")) or "unknown"
+        gateway = _stringify(entry.get("dhcp_default_gateway")) or "unknown"
+        dhcp_server = _stringify(entry.get("dhcp_server")) or "unknown"
+        lease_obtained = entry.get("dhcp_lease_obtained_time") or "unknown"
+        lease_terminates = entry.get("dhcp_lease_terminates_time") or "unknown"
+        domain = entry.get("dhcp_domain") or "unknown"
+        description = (
+            f"Network interface '{name}' (dhcp=yes, ip={ip}, gateway={gateway}, "
+            f"dhcp_server={dhcp_server}, lease_obtained_utc={lease_obtained}, "
+            f"lease_terminates_utc={lease_terminates}, domain={domain})."
+        )
+    else:
+        ip = _stringify(entry.get("ip_address")) or "unknown"
+        gateway = _stringify(entry.get("default_gateway")) or "unknown"
+        domain = entry.get("domain") or "unknown"
+        description = (
+            f"Network interface '{name}' (dhcp=no, ip={ip}, gateway={gateway}, "
+            f"domain={domain})."
+        )
+    return description, entry.get("last_modified")
+
+
+def _normalize_run_key(entry: dict) -> tuple[str, str | None]:
+    path = candidate_path(ARTIFACT_TYPE_RUNKEY, entry) or "<unknown>"
+    name = entry.get("name") or "<unknown>"
+    key_path = entry.get("key_path") or "unknown"
+    description = (
+        f"RunKey entry '{path}' (value name={name!r}, key={key_path}) "
+        "— configured to start automatically."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_service(entry: dict) -> tuple[str, str | None]:
+    path = candidate_path(ARTIFACT_TYPE_SERVICE, entry) or "<unknown>"
+    name = entry.get("name") or "<unknown>"
+    start = entry.get("start")
+    start_suffix = f", start={start}" if start is not None else ""
+    description = (
+        f"Service entry for '{path}' (service name={name!r}{start_suffix}) "
+        "— installed as a Windows service."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_proxy_settings(entry: dict) -> tuple[str, str | None]:
+    proxy_server = entry.get("proxy_server") or "unknown"
+    enabled = "yes" if entry.get("proxy_enable") == 1 else "no"
+    auto_config = entry.get("auto_config_url") or "none"
+    description = (
+        f"Internet Settings proxy configuration (enabled={enabled}, server={proxy_server}, "
+        f"auto_config_url={auto_config}) — other programs routed through this proxy."
+    )
+    return description, entry.get("last_write")
+
+
 _NORMALIZERS = {
     ARTIFACT_TYPE_USER_ASSIST: _normalize_user_assist,
     ARTIFACT_TYPE_SHIMCACHE: _normalize_shimcache,
@@ -400,6 +523,11 @@ _NORMALIZERS = {
     ARTIFACT_TYPE_MOUNTPOINTS2: _normalize_mountpoints2,
     ARTIFACT_TYPE_EMDMGMT: _normalize_emdmgmt,
     ARTIFACT_TYPE_PORTABLEDEVICES: _normalize_portable_devices,
+    ARTIFACT_TYPE_NETWORK_PROFILE: _normalize_network_profile,
+    ARTIFACT_TYPE_NETWORK_INTERFACE: _normalize_network_interface,
+    ARTIFACT_TYPE_RUNKEY: _normalize_run_key,
+    ARTIFACT_TYPE_SERVICE: _normalize_service,
+    ARTIFACT_TYPE_PROXY_SETTINGS: _normalize_proxy_settings,
 }
 
 

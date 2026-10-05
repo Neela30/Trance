@@ -57,9 +57,14 @@ from .constants import (
     ARTIFACT_TYPE_MOUNTEDDEVICES,
     ARTIFACT_TYPE_MOUNTPOINTS2,
     ARTIFACT_TYPE_MUICACHE,
+    ARTIFACT_TYPE_NETWORK_INTERFACE,
+    ARTIFACT_TYPE_NETWORK_PROFILE,
     ARTIFACT_TYPE_PORTABLEDEVICES,
+    ARTIFACT_TYPE_PROXY_SETTINGS,
     ARTIFACT_TYPE_RECENTDOCS,
+    ARTIFACT_TYPE_RUNKEY,
     ARTIFACT_TYPE_RUNMRU,
+    ARTIFACT_TYPE_SERVICE,
     ARTIFACT_TYPE_SHELLBAGS,
     ARTIFACT_TYPE_SHIMCACHE,
     ARTIFACT_TYPE_TIMEZONE,
@@ -82,6 +87,10 @@ from .custom_extractors import (
     extract_mountpoints2,
     extract_muicache_usrclass,
     extract_portable_devices,
+    extract_proxy_settings,
+    extract_run_keys_ntuser,
+    extract_run_keys_software,
+    extract_services,
 )
 from .extractors import (
     extract_amcache,
@@ -92,6 +101,8 @@ from .extractors import (
     extract_last_visited_pidl_mru,
     extract_mounted_devices,
     extract_muicache,
+    extract_network_interfaces,
+    extract_network_profiles,
     extract_profiles,
     extract_recentdocs,
     extract_runmru,
@@ -135,6 +146,8 @@ def _ntuser_extractors() -> tuple[_ExtractorSpec, ...]:
         (ARTIFACT_TYPE_FIREFOX_LAUNCHER, extract_firefox_launcher),
         (ARTIFACT_TYPE_APP_SWITCHED, extract_app_switched),
         (ARTIFACT_TYPE_MOUNTPOINTS2, extract_mountpoints2),
+        (ARTIFACT_TYPE_RUNKEY, extract_run_keys_ntuser),
+        (ARTIFACT_TYPE_PROXY_SETTINGS, extract_proxy_settings),
     )
 
 
@@ -148,6 +161,8 @@ def _system_extractors() -> tuple[_ExtractorSpec, ...]:
         (ARTIFACT_TYPE_USBDEVICES, extract_usb_devices),
         (ARTIFACT_TYPE_MOUNTEDDEVICES, extract_mounted_devices),
         (ARTIFACT_TYPE_PORTABLEDEVICES, extract_portable_devices),
+        (ARTIFACT_TYPE_NETWORK_INTERFACE, extract_network_interfaces),
+        (ARTIFACT_TYPE_SERVICE, extract_services),
     )
 
 
@@ -160,6 +175,8 @@ def _software_extractors() -> tuple[_ExtractorSpec, ...]:
         (ARTIFACT_TYPE_INSTALLEDPROGRAMS, extract_installed_programs),
         (ARTIFACT_TYPE_WINDOWSVERSION, extract_windows_version),
         (ARTIFACT_TYPE_EMDMGMT, extract_emdmgmt),
+        (ARTIFACT_TYPE_NETWORK_PROFILE, extract_network_profiles),
+        (ARTIFACT_TYPE_RUNKEY, extract_run_keys_software),
     )
 
 

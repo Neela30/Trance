@@ -336,25 +336,44 @@ class TestNormalizeEntry:
         assert "DESKTOP-ABC123" in artifact.description
 
     def test_time_zone_is_high_confidence_context(self):
-        entry = {"time_zone_key_name": "Sri Lanka Standard Time", "bias": -330}
+        # "TimeZoneKeyName"/"Bias" are TimezoneDataPlugin2's own entry keys (regipy,
+        # PascalCase) -- confirmed against a real SYSTEM hive; the previous snake_case
+        # fixture here matched neither the plugin nor normalize.py's old (also-wrong)
+        # lookup, so this real bug went undetected. See normalize.py's
+        # _normalize_time_zone() docstring.
+        entry = {"TimeZoneKeyName": "Sri Lanka Standard Time", "Bias": -330}
         artifact = normalize_entry(ARTIFACT_TYPE_TIMEZONE, entry, "SYSTEM")
 
         assert artifact.confidence == "high"
         assert artifact.category == "context"
         assert "Sri Lanka Standard Time" in artifact.description
+        assert "bias=-330" in artifact.description
+
+    def test_time_zone_unknown_when_fields_missing(self):
+        artifact = normalize_entry(ARTIFACT_TYPE_TIMEZONE, {}, "SYSTEM")
+        assert "<unknown>" in artifact.description
 
     def test_windows_version_is_high_confidence_context(self):
+        # "ProductName"/"CurrentVersion"/"CurrentBuildNumber" are WinVersionPlugin's own
+        # entry keys (regipy, PascalCase) -- confirmed against a real SOFTWARE hive. Same
+        # real bug as the TimeZone fixture above: the old snake_case fixture never matched
+        # the plugin's real output.
         entry = {
-            "product_name": "Windows 11 Pro",
-            "display_version": "23H2",
-            "current_build_number": "22631",
+            "ProductName": "Windows 11 Pro",
+            "CurrentVersion": "6.3",
+            "CurrentBuildNumber": "22631",
         }
         artifact = normalize_entry(ARTIFACT_TYPE_WINDOWSVERSION, entry, "SOFTWARE")
 
         assert artifact.confidence == "high"
         assert artifact.category == "context"
         assert "Windows 11 Pro" in artifact.description
-        assert "23H2" in artifact.description
+        assert "6.3" in artifact.description
+        assert "22631" in artifact.description
+
+    def test_windows_version_unknown_when_fields_missing(self):
+        artifact = normalize_entry(ARTIFACT_TYPE_WINDOWSVERSION, {}, "SOFTWARE")
+        assert "<unknown>" in artifact.description
 
     def test_shellbags_is_medium_confidence_and_tor_direct(self):
         entry = {"path": r"C:\Tor Browser\Browser", "last_write": "2026-07-14T00:00:00+00:00"}

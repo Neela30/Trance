@@ -30,13 +30,25 @@ import re
 from datetime import datetime
 
 from .constants import CATEGORY_TOR_DIRECT, harddiskvolume_number, infer_drive_letters
-from .narrative import GLOSSARY, build_narrative, extract_drive_letter, find_install_location_path
+from .narrative import (
+    GLOSSARY,
+    build_autostart_narrative,
+    build_narrative,
+    build_network_narrative,
+    describe_portable_install_note,
+    extract_drive_letter,
+    find_install_location_path,
+    find_latest_tor_use_iso,
+)
 
 # Strongest evidence first: UserAssist/Amcache/BAM/InstalledPrograms/CompatAssistantStore/
 # FirefoxLauncher are HIGH confidence, ShimCache/MUICache/ShellBags/LastVisitedPidlMRU
 # MEDIUM, RecentDocs/RunMRU/WordWheelQuery/ComDlg32/AppSwitched/TypedPaths LOW
 # (contextual only) — see constants.py's ARTIFACT_CONFIDENCE for the per-type source of
 # truth (this tuple is presentation ordering only, kept consistent with it by hand).
+# RunKey/Service/ProxySettings (Phase 4) are HIGH confidence but evidence of
+# CONFIGURATION, not of a run -- placed last: they corroborate deliberate, ongoing Tor
+# use, but are weaker standalone evidence than an actual recorded execution above them.
 ARTIFACT_TYPE_ORDER = (
     "UserAssist",
     "Amcache",
@@ -54,6 +66,9 @@ ARTIFACT_TYPE_ORDER = (
     "ComDlg32",
     "AppSwitched",
     "TypedPaths",
+    "RunKey",
+    "Service",
+    "ProxySettings",
 )
 ARTIFACT_TYPE_LABELS = {
     "UserAssist": "UserAssist — GUI-launched execution",
@@ -72,6 +87,9 @@ ARTIFACT_TYPE_LABELS = {
     "ComDlg32": "ComDlg32 — Open/Save dialog history",
     "AppSwitched": "AppSwitched — Alt+Tab/taskbar switches",
     "TypedPaths": "TypedPaths — Explorer address bar history",
+    "RunKey": "Run / RunOnce — automatic start configuration",
+    "Service": "Windows Service — automatic start configuration",
+    "ProxySettings": "Internet Settings — proxy configuration",
 }
 # Confidence used to be independently restated here as a static per-type map, duplicating
 # normalize.py's own prose-embedded "Confidence: ..." sentence. As of Phase 0 of the
@@ -144,6 +162,35 @@ _DEVICE_ID_RE = re.compile(r"device_id=([^)]+)\)")
 # MountedDevices' decoded value and MountPoints2/EMDMgmt's own subkey names -- e.g.
 # "...USBSTOR#Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00#4C53...&0#{GUID}" -> "4C53...&0".
 _DEVICE_SERIAL_FROM_PATH_RE = re.compile(r"#([^#]+)#\{[0-9a-fA-F-]+\}\s*$")
+
+# Phase 3 (network context) description fields -- normalize.py always renders these
+# unconditionally (never an optional suffix that may be absent), same convention as Phase
+# 2's device-evidence fields above.
+_NET_PROFILE_NAME_RE = re.compile(r"Network profile '([^']+)'")
+_NET_PROFILE_TYPE_RE = re.compile(r"type=([^,]+),")
+_NET_PROFILE_CATEGORY_RE = re.compile(r"category=([^,]+),")
+_NET_PROFILE_CREATED_RE = re.compile(r"created_local=([^,]+),")
+_NET_PROFILE_LAST_CONNECTED_RE = re.compile(r"last_connected_local=([^,]+),")
+_NET_PROFILE_MAC_RE = re.compile(r"gateway_mac=([^,]+),")
+_NET_PROFILE_DNS_SUFFIX_RE = re.compile(r"dns_suffix=([^)]+)\)")
+
+_NET_IFACE_NAME_RE = re.compile(r"Network interface '([^']+)'")
+_NET_IFACE_DHCP_RE = re.compile(r"dhcp=(yes|no)")
+_NET_IFACE_IP_RE = re.compile(r"ip=([^,]+),")
+_NET_IFACE_GATEWAY_RE = re.compile(r"gateway=([^,]+),")
+_NET_IFACE_DHCP_SERVER_RE = re.compile(r"dhcp_server=([^,]+),")
+_NET_IFACE_LEASE_OBTAINED_RE = re.compile(r"lease_obtained_utc=([^,]+),")
+_NET_IFACE_LEASE_TERMINATES_RE = re.compile(r"lease_terminates_utc=([^,]+),")
+_NET_IFACE_DOMAIN_RE = re.compile(r"domain=([^)]+)\)")
+
+# Phase 4 (persistence/configuration) description fields.
+_RUNKEY_VALUE_NAME_RE = re.compile(r"value name=('.*?'), key=")
+_RUNKEY_KEY_PATH_RE = re.compile(r"key=([^)]+)\)")
+_SERVICE_NAME_RE = re.compile(r"service name=('.*?')(?:, start=|\))")
+_SERVICE_START_RE = re.compile(r"start=([^)]+)\)")
+_PROXY_ENABLED_RE = re.compile(r"enabled=(yes|no)")
+_PROXY_SERVER_RE = re.compile(r"server=([^,]+),")
+_PROXY_AUTOCONFIG_RE = re.compile(r"auto_config_url=([^)]+)\)")
 
 
 def _extract_path(description: str) -> str | None:
@@ -255,6 +302,55 @@ def _annotate(findings: list[dict], artifact_type: str) -> list[dict]:
         elif artifact_type == "PortableDevices":
             m = _DEVICE_ID_RE.search(finding["description"])
             entry["device_id"] = m.group(1) if m else None
+        elif artifact_type == "NetworkProfile":
+            m = _NET_PROFILE_NAME_RE.search(finding["description"])
+            entry["profile_name"] = m.group(1) if m else None
+            m = _NET_PROFILE_TYPE_RE.search(finding["description"])
+            entry["name_type"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_PROFILE_CATEGORY_RE.search(finding["description"])
+            entry["category"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_PROFILE_CREATED_RE.search(finding["description"])
+            entry["created_local"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_PROFILE_LAST_CONNECTED_RE.search(finding["description"])
+            entry["last_connected_local"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_PROFILE_MAC_RE.search(finding["description"])
+            entry["gateway_mac"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_PROFILE_DNS_SUFFIX_RE.search(finding["description"])
+            entry["dns_suffix"] = _none_if_unknown(m.group(1)) if m else None
+        elif artifact_type == "NetworkInterface":
+            m = _NET_IFACE_NAME_RE.search(finding["description"])
+            entry["interface_name"] = m.group(1) if m else None
+            m = _NET_IFACE_DHCP_RE.search(finding["description"])
+            entry["dhcp_enabled"] = m.group(1) == "yes" if m else None
+            m = _NET_IFACE_IP_RE.search(finding["description"])
+            entry["ip"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_IFACE_GATEWAY_RE.search(finding["description"])
+            entry["gateway"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_IFACE_DHCP_SERVER_RE.search(finding["description"])
+            entry["dhcp_server"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_IFACE_LEASE_OBTAINED_RE.search(finding["description"])
+            entry["lease_obtained_utc"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_IFACE_LEASE_TERMINATES_RE.search(finding["description"])
+            entry["lease_terminates_utc"] = _none_if_unknown(m.group(1)) if m else None
+            m = _NET_IFACE_DOMAIN_RE.search(finding["description"])
+            entry["domain"] = _none_if_unknown(m.group(1)) if m else None
+        elif artifact_type == "RunKey":
+            m = _RUNKEY_VALUE_NAME_RE.search(finding["description"])
+            entry["value_name"] = m.group(1).strip("'") if m else None
+            m = _RUNKEY_KEY_PATH_RE.search(finding["description"])
+            entry["key_path"] = m.group(1) if m else None
+        elif artifact_type == "Service":
+            m = _SERVICE_NAME_RE.search(finding["description"])
+            entry["service_name"] = m.group(1).strip("'") if m else None
+            m = _SERVICE_START_RE.search(finding["description"])
+            entry["start"] = m.group(1) if m else None
+        elif artifact_type == "ProxySettings":
+            m = _PROXY_ENABLED_RE.search(finding["description"])
+            entry["proxy_enabled"] = m.group(1) == "yes" if m else None
+            m = _PROXY_SERVER_RE.search(finding["description"])
+            entry["proxy_server"] = _none_if_unknown(m.group(1)) if m else None
+            m = _PROXY_AUTOCONFIG_RE.search(finding["description"])
+            entry["auto_config_url"] = _none_if_unknown(m.group(1), sentinel="none") if m else None
         annotated.append(entry)
     return annotated
 
@@ -399,6 +495,9 @@ def _quiet_hive_notes(hives_provided: dict, annotated_by_type: dict[str, list[di
             "(Background Activity Moderator) only exists from Windows 10 1709 onward "
             "— its absence doesn't rule out execution on an older or unaffected system."
         )
+    portable_note = describe_portable_install_note(bool(annotated_by_type.get("InstalledPrograms")))
+    if hives_provided.get("software") and portable_note:
+        notes.append(portable_note)
     return notes
 
 
@@ -444,6 +543,90 @@ def _build_system_context(findings_by_type: dict[str, list[dict]]) -> dict:
         if findings:
             context[artifact_type] = findings[0]
     return context
+
+
+_TZ_BIAS_RE = re.compile(r"bias=(-?\d+) minutes from UTC")
+
+
+def _extract_timezone_bias(system_context: dict) -> int | None:
+    """Pulls the system's own recorded UTC bias (minutes) back out of TimeZone's
+    normalized description -- the only place it's available from this layer (see this
+    module's docstring on why structured fields are regex-parsed from `description`
+    rather than re-plumbed through pipeline.py/normalize.py). Returns None when TimeZone
+    wasn't found at all, or has no bias recorded -- callers must treat that as "unknown",
+    never default to 0 (UTC), which would silently claim a specific, wrong time zone."""
+    tz_finding = system_context.get("TimeZone")
+    if not tz_finding:
+        return None
+    match = _TZ_BIAS_RE.search(tz_finding.get("description", ""))
+    return int(match.group(1)) if match else None
+
+
+def _build_network_context(
+    annotated_by_type: dict[str, list[dict]],
+    system_context: dict,
+    latest_tor_use_iso: str | None,
+) -> dict:
+    """Phase 3's "Network context at time of use" section -- NetworkProfile/
+    NetworkInterface are CATEGORY_CONTEXT (see constants.py), kept out of the tor-direct
+    `sections` list entirely, same treatment as system_context's three Phase 0 facts and
+    Phase 2's device appendix. `bias_minutes` (the system's own recorded UTC offset, if
+    known) is what lets build_network_narrative() convert NetworkList's local-time
+    timestamps to UTC for comparison against the Tor launch instant -- see
+    narrative.local_systemtime_to_utc()'s docstring for why this must be the TARGET
+    machine's own recorded bias, not the examiner's `local_tz` display preference."""
+    profiles = annotated_by_type.get("NetworkProfile", [])
+    interfaces = annotated_by_type.get("NetworkInterface", [])
+    bias_minutes = _extract_timezone_bias(system_context)
+    return {
+        "profiles": profiles,
+        "interfaces": interfaces,
+        "bias_minutes": bias_minutes,
+        "narrative": build_network_narrative(
+            profiles, interfaces, bias_minutes, latest_tor_use_iso
+        ),
+    }
+
+
+def _build_autostart_context(annotated_by_type: dict[str, list[dict]]) -> dict:
+    """Phase 4's "Automatic start and proxy settings" section. RunKey/Service/
+    ProxySettings are CATEGORY_TOR_DIRECT (see constants.py) and only ever present when
+    they already reference Tor (is_tor_related_entry()'s special cases for these three
+    types) -- so unlike system_context/network_context there's no extra "only kept
+    alongside a tor-direct finding" gate needed here; these ARE the tor-direct findings.
+    Empty narrative (not a missing key) when there's nothing to say, so the template can
+    decide whether to render the section at all."""
+    run_keys = annotated_by_type.get("RunKey", [])
+    services = annotated_by_type.get("Service", [])
+    proxy_settings = annotated_by_type.get("ProxySettings", [])
+    return {
+        "run_keys": run_keys,
+        "services": services,
+        "proxy_settings": proxy_settings,
+        "narrative": build_autostart_narrative(run_keys, services, proxy_settings),
+    }
+
+
+# Artifact types "Files involved" (Phase 5) draws from -- every one of these is already
+# is_tor_related_entry()-filtered at the pipeline level (CATEGORY_TOR_DIRECT), so no
+# further relevance filtering is needed here; this just merges three separate per-hive
+# tables into one plain-English "what files were touched" view.
+_FILES_INVOLVED_TYPES = ("ComDlg32", "RecentDocs", "ShellBags")
+
+
+def _build_files_involved(annotated_by_type: dict[str, list[dict]]) -> list[dict]:
+    files = [
+        {
+            "path": finding.get("path"),
+            "source": artifact_type,
+            "timestamp": finding.get("timestamp"),
+        }
+        for artifact_type in _FILES_INVOLVED_TYPES
+        for finding in annotated_by_type.get(artifact_type, [])
+        if finding.get("path")
+    ]
+    files.sort(key=lambda f: f["timestamp"] or "")
+    return files
 
 
 def _build_profiles_table(profiles: list[dict], relevant_sid: str | None) -> list[dict]:
@@ -694,6 +877,16 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
     install_drive_letter = extract_drive_letter(find_install_location_path(annotated_by_type))
     devices = _build_device_correlation(annotated_by_type, install_drive_letter)
 
+    system_context = _build_system_context(findings_by_type)
+    # Phase 3: resolve the Tor launch instant *before* build_narrative() runs, same
+    # "second, independent call" precedent as install_drive_letter above (see
+    # narrative.find_latest_tor_use_iso()'s own docstring) -- network correlation needs it
+    # to compare against NetworkList/DHCP timestamps.
+    latest_tor_use_iso = find_latest_tor_use_iso(annotated_by_type, component_timeline)
+    network_context = _build_network_context(annotated_by_type, system_context, latest_tor_use_iso)
+    autostart_context = _build_autostart_context(annotated_by_type)
+    files_involved = _build_files_involved(annotated_by_type)
+
     return {
         "details": details,
         "summary": details.get("summary", ""),
@@ -710,7 +903,10 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
         "quiet_hive_notes": quiet_hive_notes,
         "extraction_warnings": _build_extraction_warnings(details.get("warnings", [])),
         "profiles": profiles,
-        "system_context": _build_system_context(findings_by_type),
+        "system_context": system_context,
+        "network_context": network_context,
+        "autostart_context": autostart_context,
+        "files_involved": files_involved,
         "devices": devices,
         "narrative": build_narrative(
             annotated_by_type,

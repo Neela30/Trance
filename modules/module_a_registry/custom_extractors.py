@@ -30,6 +30,7 @@ from regipy.utils import convert_wintime
 from core.exceptions import ParsingError
 
 from ._muicache_grouping import group_muicache_values
+from .constants import extract_command_executable, is_tor_related, is_tor_service_name
 
 # MUICache's Vista+ location is `\Software\Classes\Local Settings\Software\Microsoft\
 # Windows\Shell\MuiCache` when read through the LIVE registry's HKCU view -- but that
@@ -53,6 +54,23 @@ _EMDMGMT_PATH = r"\Microsoft\Windows NT\CurrentVersion\EMDMgmt"
 # get_control_sets(), the same "every existing ControlSet, not just the active one"
 # approach Phase 0's ComputerNamePlugin/TimezoneDataPlugin2 already use (extractors.py).
 _WPD_RELATIVE_PATH = r"Enum\SWD\WPDBUSENUM"
+
+# Phase 4 (persistence/configuration) paths. NTUSER's two Run paths are HKCU-only;
+# SOFTWARE's four cover HKLM's native and WOW6432Node (32-bit-on-64-bit) views -- a 32-bit
+# Tor Expert Bundle installer registers under WOW6432Node on a 64-bit Windows, same as any
+# other 32-bit installer.
+_NTUSER_RUN_PATHS = (
+    r"\Software\Microsoft\Windows\CurrentVersion\Run",
+    r"\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+)
+_SOFTWARE_RUN_PATHS = (
+    r"\Microsoft\Windows\CurrentVersion\Run",
+    r"\Microsoft\Windows\CurrentVersion\RunOnce",
+    r"\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+    r"\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
+)
+_SERVICES_PATH = "Services"
+_INTERNET_SETTINGS_PATH = r"\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 
 
 def _load_hive(hive_path: Path, hive_type: str) -> RegistryHive:
@@ -293,3 +311,142 @@ def extract_portable_devices(system_path: Path) -> list[dict]:
                 }
             )
     return flattened
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 of the Module A roadmap -- persistence and configuration.
+# ---------------------------------------------------------------------------
+
+
+def _extract_run_keys(hive: RegistryHive, paths: tuple[str, ...]) -> list[dict]:
+    """Shared body for the NTUSER/SOFTWARE Run-key extractors below -- each Run/RunOnce
+    key is a flat list of value_name -> command_line pairs with no subkeys. `executable`
+    is the command line with any quoting/arguments stripped (see
+    constants.extract_command_executable()'s docstring for why this step is required --
+    is_tor_related()'s basename check cannot match a raw command line like
+    '"C:\\Tor\\tor.exe" --service' on its own)."""
+    flattened: list[dict] = []
+    for path in paths:
+        try:
+            key = hive.get_key(path)
+        except RegistryKeyNotFoundException:
+            continue
+        except Exception as exc:
+            raise ParsingError(f"RunKey extraction failed at {path}: {exc}") from exc
+        last_write = convert_wintime(key.header.last_modified, as_json=True)
+        for value in key.iter_values():
+            command = value.value if isinstance(value.value, str) else None
+            flattened.append(
+                {
+                    "key_path": path,
+                    "name": value.name,
+                    "command": command,
+                    "executable": extract_command_executable(command),
+                    "last_write": last_write,
+                }
+            )
+    return flattened
+
+
+def extract_run_keys_ntuser(ntuser_path: Path) -> list[dict]:
+    """Run/RunOnce (HKCU, via NTUSER.DAT) -- the per-user autostart locations."""
+    hive = _load_hive(ntuser_path, "ntuser")
+    return _extract_run_keys(hive, _NTUSER_RUN_PATHS)
+
+
+def extract_run_keys_software(software_path: Path) -> list[dict]:
+    """Run/RunOnce (HKLM, via SOFTWARE, native + WOW6432Node) -- the machine-wide autostart
+    locations. Shares ARTIFACT_TYPE_RUNKEY with extract_run_keys_ntuser() above -- same
+    kind of evidence (an autostart entry), just two possible source hives depending on
+    whether the entry is per-user or machine-wide; Artifact.source differentiates."""
+    hive = _load_hive(software_path, "software")
+    return _extract_run_keys(hive, _SOFTWARE_RUN_PATHS)
+
+
+def extract_services(system_path: Path) -> list[dict]:
+    """Tor-related Windows services from SYSTEM's Services key.
+
+    Deliberately NOT regipy's own ServicesPlugin, and deliberately NOT a plain
+    "read every service's full value set" loop either -- both were measured against a
+    real SYSTEM hive (858 services) and are far too slow for what is, in the overwhelming
+    majority of cases, a search that finds nothing: ServicesPlugin's own recursive
+    per-service parameter walk took ~76 seconds; even a single unconditional
+    iter_values() per service (no recursion at all) took ~30 seconds -- regipy parses
+    every value's data unconditionally with no cheaper per-name fast path, confirmed by
+    timing a bare iter_subkeys() pass (instant) against one that also touches values.
+
+    Instead, a cheap first pass reads only each service's own name and ImagePath (a single
+    get_value() call -- confirmed ~7.5s for 858 real services, acceptable for a one-time
+    forensic step) to decide relevance via the exact same predicates
+    is_tor_related_entry() applies afterward (constants.is_tor_service_name() on the name,
+    is_tor_related() on the stripped executable) -- duplicated here deliberately so the
+    expensive full iter_values() read below is skipped for every service that will be
+    filtered out anyway; only a match gets the fuller read (DisplayName/Start/ObjectName/
+    Description). This is a real, measured performance requirement, not a hypothetical
+    one: a naive "tor" substring search was also tried during development and rejected --
+    on a real machine, "DriverStore" alone (present in most driver ImagePaths) contains
+    "tor" as a substring of "Store", producing hundreds of false positives.
+
+    A service that doesn't reference Tor at all is never returned, same "Module A doesn't
+    report every autostart entry" principle as RunKey -- this extractor does its own
+    relevance pre-filtering for performance, but every returned entry would also pass the
+    normal is_tor_related_entry() gate pipeline.py applies afterward (redundant, but
+    harmless given how few entries make it this far).
+    """
+    hive = _load_hive(system_path, "system")
+    flattened: list[dict] = []
+    for control_set_path in hive.get_control_sets(_SERVICES_PATH):
+        try:
+            services_key = hive.get_key(control_set_path)
+        except RegistryKeyNotFoundException:
+            continue
+        except Exception as exc:
+            raise ParsingError(f"Services extraction failed at {control_set_path}: {exc}") from exc
+
+        for service_key in services_key.iter_subkeys():
+            name = service_key.name
+            image_path = service_key.get_value("ImagePath")
+            image_path = image_path if isinstance(image_path, str) else None
+            executable = extract_command_executable(image_path)
+            if not (is_tor_service_name(name) or is_tor_related(executable)):
+                continue
+
+            flattened.append(
+                {
+                    "key_path": f"{control_set_path}\\{name}",
+                    "name": name,
+                    "image_path": image_path,
+                    "executable": executable,
+                    "display_name": service_key.get_value("DisplayName"),
+                    "start": service_key.get_value("Start"),
+                    "object_name": service_key.get_value("ObjectName"),
+                    "last_write": convert_wintime(service_key.header.last_modified, as_json=True),
+                }
+            )
+    return flattened
+
+
+def extract_proxy_settings(ntuser_path: Path) -> list[dict]:
+    """Internet Settings proxy configuration (HKCU, via NTUSER.DAT) -- ProxyEnable/
+    ProxyServer/AutoConfigURL. A single record (at most one per hive, since there's only
+    one Internet Settings key), returned as a one-item list for a uniform shape with every
+    other extractor here. Relevance (is this Tor-related at all) is decided entirely by
+    constants.is_tor_proxy_config() downstream, not here -- see that function's docstring
+    for why "enabled AND pointing at a Tor SOCKS port" isn't a path-substring question."""
+    hive = _load_hive(ntuser_path, "ntuser")
+    try:
+        key = hive.get_key(_INTERNET_SETTINGS_PATH)
+    except RegistryKeyNotFoundException:
+        return []
+    except Exception as exc:
+        raise ParsingError(f"ProxySettings extraction failed: {exc}") from exc
+
+    return [
+        {
+            "key_path": _INTERNET_SETTINGS_PATH,
+            "proxy_enable": key.get_value("ProxyEnable"),
+            "proxy_server": key.get_value("ProxyServer"),
+            "auto_config_url": key.get_value("AutoConfigURL"),
+            "last_write": convert_wintime(key.header.last_modified, as_json=True),
+        }
+    ]

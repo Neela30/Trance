@@ -42,11 +42,20 @@ from regipy.plugins.ntuser.typed_paths import TypedPathsPlugin
 from regipy.plugins.ntuser.user_assist import UserAssistPlugin
 from regipy.plugins.ntuser.word_wheel_query import WordWheelQueryPlugin
 from regipy.plugins.software.installed_programs import InstalledProgramsSoftwarePlugin
+from regipy.plugins.software.networklist import (
+    CATEGORY_TYPES,
+    NAME_TYPES,
+    PROFILES_PATH,
+    SIGNATURES_PATH,
+    format_mac_address,
+    parse_network_date,
+)
 from regipy.plugins.software.profilelist import ProfileListPlugin
 from regipy.plugins.software.winver import WinVersionPlugin
 from regipy.plugins.system.bam import BAMPlugin
 from regipy.plugins.system.computer_name import ComputerNamePlugin
 from regipy.plugins.system.mountdev import MOUNTED_DEVICES_PATH, parse_device_data
+from regipy.plugins.system.network_data import NetworkDataPlugin
 from regipy.plugins.system.shimcache import ShimCachePlugin
 from regipy.plugins.system.timezone_data2 import TimezoneDataPlugin2
 from regipy.plugins.system.usb_devices import USBDevicesPlugin
@@ -645,3 +654,147 @@ def extract_mounted_devices(system_path: Path) -> list[dict]:
 
         entries.append(entry)
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 of the Module A roadmap -- network context.
+# ---------------------------------------------------------------------------
+
+
+def _format_gateway_mac(value: object) -> str | None:
+    mac = format_mac_address(value) if isinstance(value, bytes) else None
+    return mac if isinstance(mac, str) else None
+
+
+def extract_network_profiles(software_path: Path) -> list[dict]:
+    """Network connection history (NetworkList\\Profiles joined with
+    NetworkList\\Signatures\\{Managed,Unmanaged}) from SOFTWARE -- NOT via regipy's own
+    NetworkListPlugin, despite one existing: its run() reads every value through
+    extract_values()'s default iter_values() (trim_values=True), which for REG_BINARY data
+    (exactly what DateCreated/DateLastConnected/DefaultGatewayMac are) returns a HEX
+    STRING, not bytes -- the same confirmed regipy bug class already found and bypassed
+    for MountedDevicesPlugin (see extract_mounted_devices()'s own docstring). Confirmed
+    against a real SOFTWARE hive: running NetworkListPlugin as-is returns
+    date_created=None/date_last_connected=None for every one of 59 real profiles, and a
+    raw hex string (e.g. "e47deb7a4551") instead of a formatted MAC for
+    default_gateway_mac. This reimplements the same two key paths directly, reusing that
+    plugin's own public parse_network_date()/format_mac_address()/CATEGORY_TYPES/
+    NAME_TYPES against real bytes read via iter_values(trim_values=False) -- same
+    "bypass the one broken piece, reuse the rest of the public API" precedent as
+    extract_mounted_devices()'s own docstring describes.
+
+    DateCreated/DateLastConnected are decoded to a NAIVE local-time ISO string (no tzinfo)
+    -- this is SYSTEMTIME in the machine's own local time, not UTC (confirmed by manually
+    decoding a real value and cross-checking against the acquisition's own known local
+    date); report.py/narrative.py are responsible for converting to UTC using the
+    system's own recorded time zone bias (Phase 0's TimeZone fact) before ever comparing
+    this against another (UTC) timestamp.
+
+    Returns one flat dict per profile, joined with its Unmanaged/Managed signature (if
+    any) on ProfileGuid -- a profile with no matching signature, or a signature with no
+    matching profile, is still returned (never silently dropped) with the other half's
+    fields left at their default (None / "unknown-guid").
+    """
+    hive = _load_hive(software_path, "software")
+
+    profiles: dict[str, dict] = {}
+    try:
+        profiles_key = hive.get_key(PROFILES_PATH)
+    except RegistryKeyNotFoundException:
+        profiles_key = None
+    except Exception as exc:
+        raise ParsingError(
+            f"NetworkList Profiles extraction failed for {software_path}: {exc}"
+        ) from exc
+
+    if profiles_key is not None:
+        for subkey in profiles_key.iter_subkeys():
+            entry: dict = {
+                "profile_guid": subkey.name,
+                "last_write": convert_wintime(subkey.header.last_modified, as_json=True),
+            }
+            for value in subkey.iter_values(trim_values=False):
+                if value.name == "ProfileName":
+                    entry["profile_name"] = value.value
+                elif value.name == "Description":
+                    entry["description"] = value.value
+                elif value.name == "NameType" and isinstance(value.value, int):
+                    entry["name_type"] = NAME_TYPES.get(value.value, f"Unknown ({value.value})")
+                elif value.name == "Category" and isinstance(value.value, int):
+                    entry["category"] = CATEGORY_TYPES.get(value.value, f"Unknown ({value.value})")
+                elif value.name == "DateCreated" and isinstance(value.value, bytes):
+                    entry["date_created_local"] = parse_network_date(value.value)
+                elif value.name == "DateLastConnected" and isinstance(value.value, bytes):
+                    entry["date_last_connected_local"] = parse_network_date(value.value)
+            profiles[subkey.name] = entry
+
+    signatures_by_guid: dict[str, dict] = {}
+    for sig_type, sig_label in (("Managed", "managed"), ("Unmanaged", "unmanaged")):
+        try:
+            sig_key = hive.get_key(f"{SIGNATURES_PATH}\\{sig_type}")
+        except RegistryKeyNotFoundException:
+            continue
+        except Exception as exc:
+            raise ParsingError(
+                f"NetworkList Signatures ({sig_type}) extraction failed for {software_path}: {exc}"
+            ) from exc
+
+        for subkey in sig_key.iter_subkeys():
+            sig_entry: dict = {"signature_type": sig_label}
+            profile_guid = None
+            for value in subkey.iter_values(trim_values=False):
+                if value.name == "ProfileGuid":
+                    profile_guid = value.value
+                elif value.name == "DefaultGatewayMac":
+                    sig_entry["default_gateway_mac"] = _format_gateway_mac(value.value)
+                elif value.name == "DnsSuffix":
+                    sig_entry["dns_suffix"] = value.value
+                elif value.name == "FirstNetwork":
+                    sig_entry["first_network"] = value.value
+            if profile_guid:
+                # First signature wins for a given profile -- a profile practically never
+                # has more than one Managed+Unmanaged signature in practice; deterministic
+                # either way since iter_subkeys() order is stable.
+                signatures_by_guid.setdefault(profile_guid, sig_entry)
+
+    flattened: list[dict] = []
+    for guid in sorted(set(profiles) | set(signatures_by_guid)):
+        flattened.append(
+            {**profiles.get(guid, {"profile_guid": guid}), **signatures_by_guid.get(guid, {})}
+        )
+    return flattened
+
+
+def extract_network_interfaces(system_path: Path) -> list[dict]:
+    """Per-interface IP/DHCP/gateway/DNS configuration from SYSTEM's
+    Services\\Tcpip\\Parameters\\Interfaces, via regipy's own NetworkDataPlugin -- unlike
+    NetworkListPlugin above, this one works correctly against a real hive (DHCP lease
+    times are Unix-epoch DWORDs, not FILETIME, and the plugin converts them correctly;
+    confirmed against a real SYSTEM hive with live DHCP lease data).
+
+    Flattened to one dict per top-level interface, resolved per existing ControlSet (same
+    "every ControlSet, not just the active one" approach as extractors.py's
+    ComputerNamePlugin/TimezoneDataPlugin2 wrappers). Deliberately drops the plugin's own
+    recursive "sub_interface" field: on a real hive this recursion walked into leftover
+    WLAN-profile-shaped subkeys with garbage interface names, not real nested network
+    interfaces -- confirmed by inspecting the raw real output, not a documented regipy
+    feature this module relies on.
+    """
+    hive = _load_hive(system_path, "system")
+    plugin = NetworkDataPlugin(hive, as_json=True)
+    if not plugin.can_run():
+        raise ParsingError(
+            f"NetworkData plugin cannot run against {system_path}: not a SYSTEM hive."
+        )
+    try:
+        plugin.run()
+    except Exception as exc:
+        raise ParsingError(f"NetworkData extraction failed for {system_path}: {exc}") from exc
+
+    flattened: list[dict] = []
+    for control_set_path, data in plugin.entries.items():
+        for interface in data.get("interfaces", []):
+            entry = {k: v for k, v in interface.items() if k != "sub_interface"}
+            entry["key_path"] = f"{control_set_path}\\{interface.get('interface_name')}"
+            flattened.append(entry)
+    return flattened
