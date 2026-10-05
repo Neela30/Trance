@@ -68,6 +68,24 @@ def test_acquire_system_writes_sidecar_and_custody(tmp_path, monkeypatch):
     assert custody.entries[0].sha256 == acquire.hash_file(path)
 
 
+def test_acquire_software_writes_sidecar_and_custody(tmp_path, monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout):
+        assert cmd[:3] == ["reg", "save", "HKLM\\SOFTWARE"]
+        out_path = cmd[3]
+        with open(out_path, "wb") as f:
+            f.write(b"fake SOFTWARE hive bytes")
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(acquire.subprocess, "run", fake_run)
+    custody = acquire.CustodyLog(tmp_path / "custody.json")
+    path = acquire.acquire_software(tmp_path, custody)
+
+    assert path.read_bytes() == b"fake SOFTWARE hive bytes"
+    sidecar = path.with_name(path.name + ".sha256")
+    assert sidecar.exists()
+    assert custody.entries[0].sha256 == acquire.hash_file(path)
+
+
 def test_create_shadow_copy_parses_id_and_device_object(monkeypatch):
     # Real shape of the PowerShell/WMI script's stdout (Win32_ShadowCopy.Create(), not
     # vssadmin -- vssadmin's own "create shadow" verb is Server-only, confirmed on a real
@@ -211,6 +229,7 @@ def test_acquire_all_isolates_one_hive_failure_from_the_rest(tmp_path, monkeypat
     assert "SYSTEM export failed" in results["SYSTEM"]["message"]
     assert results["NTUSER.DAT"]["status"] == "ok"
     assert results["Amcache.hve"]["status"] == "ok"
+    assert results["SOFTWARE"]["status"] == "ok"
     assert "custody_log_path" in results
 
 

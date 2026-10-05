@@ -180,20 +180,24 @@ class AnalyseTab(QWidget):
         self._onion_field = QLineEdit(self)
         self._host_field = QLineEdit(self)
         self._username_field = QLineEdit(self)
+        self._timezone_field = QLineEdit(self)
         self._onion_field.setPlaceholderText("e.g. sitename.onion")
         self._host_field.setPlaceholderText("e.g. 1.2.3.4:8080")
         self._username_field.setPlaceholderText("e.g. admin")
+        self._timezone_field.setPlaceholderText("e.g. Asia/Colombo — blank uses this computer's")
 
         self._targeting_box = QGroupBox(self)
         targeting_form = QFormLayout()
         targeting_form.addRow("Onion address", self._onion_field)
         targeting_form.addRow("Host[:port]", self._host_field)
         targeting_form.addRow("Username", self._username_field)
+        targeting_form.addRow("Report timezone", self._timezone_field)
         self._targeting_box.setLayout(targeting_form)
         for label in (
             targeting_form.labelForField(self._onion_field),
             targeting_form.labelForField(self._host_field),
             targeting_form.labelForField(self._username_field),
+            targeting_form.labelForField(self._timezone_field),
         ):
             apply_eyebrow_style(label)
         self._targeting_box.setVisible(False)
@@ -332,7 +336,10 @@ class AnalyseTab(QWidget):
 
         case_output_dir.mkdir(parents=True, exist_ok=True)
         config = TranceConfig(
-            case_name=case_name, output_dir=case_output_dir, evidence_dir=Path(evidence_dir)
+            case_name=case_name,
+            output_dir=case_output_dir,
+            evidence_dir=Path(evidence_dir),
+            report_timezone=self._timezone_field.text().strip() or None,
         )
 
         self._run_button.setEnabled(False)

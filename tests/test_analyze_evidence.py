@@ -9,9 +9,11 @@ def _base_args(**overrides):
         "output_dir": "output",
         "evidence_dir": None,
         "verbose": False,
+        "report_timezone": None,
         "ntuser": None,
         "system": None,
         "amcache": None,
+        "software": None,
         "disk_profile": None,
         "tor_dir": None,
         "disk_image": None,
@@ -196,6 +198,23 @@ def test_build_argv_uses_resolved_paths(tmp_path):
     assert "--source-type" in argv
     assert "--onion" in argv
     assert argv[argv.index("--onion") + 1] == "abc.onion"
+
+
+def test_build_argv_forwards_report_timezone_when_given(tmp_path):
+    args = _base_args(evidence_dir=tmp_path, report_timezone="Asia/Colombo")
+
+    argv = analyze_evidence.build_argv(args, {})
+
+    assert "--report-timezone" in argv
+    assert argv[argv.index("--report-timezone") + 1] == "Asia/Colombo"
+
+
+def test_build_argv_omits_report_timezone_when_not_given(tmp_path):
+    args = _base_args(evidence_dir=tmp_path)
+
+    argv = analyze_evidence.build_argv(args, {})
+
+    assert "--report-timezone" not in argv
 
 
 def test_build_argv_passes_through_disk_root(tmp_path):

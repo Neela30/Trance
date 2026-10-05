@@ -244,9 +244,10 @@ def test_quiet_hive_notes_flag_supplied_but_empty_amcache_and_shimcache():
         "hives_provided": {"ntuser": True, "system": True, "amcache": True},
     }
     ctx = build_context(details)
-    assert len(ctx["quiet_hive_notes"]) == 2
+    assert len(ctx["quiet_hive_notes"]) == 3
     assert any("Amcache" in note for note in ctx["quiet_hive_notes"])
     assert any("ShimCache" in note for note in ctx["quiet_hive_notes"])
+    assert any("BAM" in note for note in ctx["quiet_hive_notes"])
 
 
 def test_quiet_hive_notes_absent_when_hive_not_supplied_or_has_findings():
@@ -260,9 +261,17 @@ def test_quiet_hive_notes_absent_when_hive_not_supplied_or_has_findings():
                     "source": "SYSTEM",
                     "timestamp": None,
                 }
-            ]
+            ],
+            "BAM": [
+                {
+                    "description": "BAM evidence for 'a.exe', sid=S-1-5-21-1.",
+                    "source": "SYSTEM",
+                    "timestamp": None,
+                }
+            ],
         },
-        # amcache not supplied at all -> no note; system supplied and has findings -> no note.
+        # amcache not supplied at all -> no note; system supplied and has findings for
+        # both of its types (ShimCache, BAM) -> no note for either.
         "hives_provided": {"ntuser": False, "system": True, "amcache": False},
     }
     ctx = build_context(details)
@@ -283,3 +292,189 @@ def test_component_timeline_empty_when_no_paths_extractable():
     ctx = build_context(details)
     assert ctx["component_timeline"] == []
     assert ctx["corroborated_components"] == 0
+
+
+def test_bam_corroborates_userassist_and_gets_its_own_timeline_column():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "UserAssist": [
+                {
+                    "description": "UserAssist evidence for 'C:\\Tor Browser\\firefox.exe' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-07-14T14:15:22+00:00",
+                }
+            ],
+            "BAM": [
+                {
+                    "description": "BAM evidence for 'c:\\tor browser\\firefox.exe', sid=S-1-5-21-1-2-3-1001.",
+                    "source": "SYSTEM",
+                    "timestamp": "2026-07-14T15:00:00+00:00",
+                }
+            ],
+        },
+        "hives_provided": {"ntuser": True, "system": True, "amcache": False},
+    }
+    ctx = build_context(details)
+    component = ctx["component_timeline"][0]
+    assert set(component["seen_in"]) == {"UserAssist", "BAM"}
+    assert component["bam_last_run"] is not None
+    assert ctx["corroborated_components"] == 1
+
+
+def test_profiles_table_rendered_sorted_by_path():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {},
+        "hives_provided": {"ntuser": False, "system": False, "amcache": False},
+        "profiles": [
+            {"path": r"C:\Users\Zed", "sid": "S-1-5-21-1-2-3-1002", "last_write": None},
+            {"path": r"C:\Users\Admin", "sid": "S-1-5-21-1-2-3-1001", "last_write": None},
+        ],
+    }
+    ctx = build_context(details)
+    assert [p["path"] for p in ctx["profiles"]] == [r"C:\Users\Admin", r"C:\Users\Zed"]
+
+
+def test_profiles_table_empty_when_none_supplied():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {},
+        "hives_provided": {"ntuser": False, "system": False, "amcache": False},
+    }
+    ctx = build_context(details)
+    assert ctx["profiles"] == []
+
+
+def test_profile_matching_bam_sid_is_flagged_relevant():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "BAM": [
+                {
+                    "description": "BAM evidence for 'c:\\tor browser\\firefox.exe', "
+                    "sid=S-1-5-21-1-2-3-1001.",
+                    "source": "SYSTEM",
+                    "timestamp": "2026-07-14T15:00:00+00:00",
+                }
+            ]
+        },
+        "hives_provided": {"ntuser": False, "system": True, "amcache": False},
+        "profiles": [
+            {"path": r"C:\Users\Admin", "sid": "S-1-5-21-1-2-3-1001", "last_write": None},
+            {
+                "path": r"C:\Windows\ServiceProfiles\LocalService",
+                "sid": "S-1-5-19",
+                "last_write": None,
+            },
+        ],
+    }
+    ctx = build_context(details)
+    relevant = [p for p in ctx["profiles"] if p["is_relevant"]]
+    other = [p for p in ctx["profiles"] if not p["is_relevant"]]
+    assert [p["path"] for p in relevant] == [r"C:\Users\Admin"]
+    assert [p["path"] for p in other] == [r"C:\Windows\ServiceProfiles\LocalService"]
+
+
+def test_no_bam_sid_leaves_every_profile_unflagged():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {},
+        "hives_provided": {"ntuser": False, "system": False, "amcache": False},
+        "profiles": [{"path": r"C:\Users\Admin", "sid": "S-1-5-21-1-2-3-1001", "last_write": None}],
+    }
+    ctx = build_context(details)
+    assert ctx["profiles"][0]["is_relevant"] is False
+
+
+def test_component_timeline_merges_last_activity_from_strongest_source():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "UserAssist": [
+                {
+                    "description": "UserAssist evidence for 'C:\\Tor Browser\\firefox.exe' "
+                    "(run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-10-04T07:30:42+00:00",
+                }
+            ],
+            "BAM": [
+                {
+                    "description": "BAM evidence for 'c:\\tor browser\\firefox.exe', "
+                    "sid=S-1-5-21-1-2-3-1001.",
+                    "source": "SYSTEM",
+                    "timestamp": "2026-10-04T07:31:01+00:00",
+                }
+            ],
+        },
+        "hives_provided": {"ntuser": True, "system": True, "amcache": False},
+    }
+    ctx = build_context(details)
+    component = ctx["component_timeline"][0]
+    # BAM's timestamp is the later of the two -- last_activity must prefer it and say so.
+    assert component["last_activity"]["source"] == "BAM"
+    assert component["last_activity"]["timestamp"] == component["bam_last_run"]
+
+
+def test_harddiskvolume_path_resolved_via_matching_drive_letter_in_another_record():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "UserAssist": [
+                {
+                    "description": "UserAssist evidence for 'E:\\Tor Browser\\Browser"
+                    "\\firefox.exe' (run_count=1).",
+                    "source": "NTUSER.DAT",
+                    "timestamp": "2026-10-04T07:30:42+00:00",
+                }
+            ],
+            "BAM": [
+                {
+                    "description": "BAM evidence for "
+                    "'\\Device\\HarddiskVolume6\\Tor Browser\\Browser\\firefox.exe', "
+                    "sid=S-1-5-21-1-2-3-1001.",
+                    "source": "SYSTEM",
+                    "timestamp": "2026-10-04T07:31:01+00:00",
+                }
+            ],
+        },
+        "hives_provided": {"ntuser": True, "system": True, "amcache": False},
+    }
+    ctx = build_context(details)
+    bam_section = next(s for s in ctx["sections"] if s["type"] == "BAM")
+    note = bam_section["findings"][0]["harddiskvolume_note"]
+    assert "HarddiskVolume6" in note
+    assert "E:" in note
+    assert "inference" in note or "inferred" in note
+
+
+def test_harddiskvolume_path_with_no_matching_letter_states_so_honestly():
+    details = {
+        "summary": "x",
+        "errors": [],
+        "findings_by_type": {
+            "BAM": [
+                {
+                    "description": "BAM evidence for "
+                    "'\\Device\\HarddiskVolume6\\Tor Browser\\Browser\\firefox.exe', "
+                    "sid=S-1-5-21-1-2-3-1001.",
+                    "source": "SYSTEM",
+                    "timestamp": "2026-10-04T07:31:01+00:00",
+                }
+            ],
+        },
+        "hives_provided": {"ntuser": False, "system": True, "amcache": False},
+    }
+    ctx = build_context(details)
+    bam_section = next(s for s in ctx["sections"] if s["type"] == "BAM")
+    note = bam_section["findings"][0]["harddiskvolume_note"]
+    assert "HarddiskVolume6" in note
+    assert "could not be determined" in note

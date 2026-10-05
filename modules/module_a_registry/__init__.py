@@ -43,9 +43,10 @@ def run(
     ntuser: Path | None = None,
     system: Path | None = None,
     amcache: Path | None = None,
+    software: Path | None = None,
     **_: object,
 ) -> ModuleResult:
-    if not any((ntuser, system, amcache)):
+    if not any((ntuser, system, amcache, software)):
         return ModuleResult(
             module=MODULE_NAME, status="skipped", message="no registry hive supplied"
         )
@@ -53,7 +54,9 @@ def run(
     from .pipeline import run_module_a
 
     try:
-        result = run_module_a(config, ntuser=ntuser, system=system, amcache=amcache)
+        result = run_module_a(
+            config, ntuser=ntuser, system=system, amcache=amcache, software=software
+        )
     except IntegrityError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))
 
@@ -73,10 +76,12 @@ def run(
             "errors": result.errors,
             "custody_log_path": result.custody_log_path,
             "findings_by_type": findings_by_type,
+            "profiles": result.profiles,
             "hives_provided": {
                 "ntuser": ntuser is not None,
                 "system": system is not None,
                 "amcache": amcache is not None,
+                "software": software is not None,
             },
         },
         message="; ".join(result.errors) if result.errors else None,

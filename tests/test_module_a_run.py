@@ -25,7 +25,7 @@ def test_run_ok_with_findings_and_no_errors(tmp_path, monkeypatch):
         timestamp="2026-09-01T00:00:00",
     )
 
-    def fake_run_module_a(config, ntuser=None, system=None, amcache=None):
+    def fake_run_module_a(config, ntuser=None, system=None, amcache=None, software=None):
         return ModuleAResult(
             findings=[artifact], summary="Tor Browser executed 3 times.", errors=[]
         )
@@ -41,7 +41,7 @@ def test_run_ok_with_findings_and_no_errors(tmp_path, monkeypatch):
 
 
 def test_run_error_status_when_pipeline_reports_extraction_errors(tmp_path, monkeypatch):
-    def fake_run_module_a(config, ntuser=None, system=None, amcache=None):
+    def fake_run_module_a(config, ntuser=None, system=None, amcache=None, software=None):
         return ModuleAResult(
             findings=[],
             summary="No Tor Browser artifacts found.",
@@ -57,7 +57,7 @@ def test_run_error_status_when_pipeline_reports_extraction_errors(tmp_path, monk
 
 
 def test_run_error_status_on_integrity_mismatch(tmp_path, monkeypatch):
-    def fake_run_module_a(config, ntuser=None, system=None, amcache=None):
+    def fake_run_module_a(config, ntuser=None, system=None, amcache=None, software=None):
         raise IntegrityError("Hash mismatch for NTUSER.DAT")
 
     monkeypatch.setattr(pipeline, "run_module_a", fake_run_module_a)

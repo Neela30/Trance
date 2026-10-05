@@ -27,8 +27,9 @@
   }
   * { box-sizing: border-box; }
   body { background: var(--bg); color: var(--ink); margin: 0; font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.55; }
-  .page { max-width: 800px; margin: 0 auto; padding: 40px 24px 80px; }
+  .page { max-width: 1000px; margin: 0 auto; padding: 40px 24px 80px; }
   h1, h2, h3 { font-family: Georgia, "Iowan Old Style", "Times New Roman", serif; text-wrap: balance; margin: 0; color: var(--ink); }
+  .band-subtitle { font-size: 13.5px; color: var(--ink-muted); margin-top: 6px; }
   .eyebrow { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-muted); }
   code, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, "Liberation Mono", monospace; }
   .masthead { display: flex; flex-direction: column; gap: 18px; padding-bottom: 28px; border-bottom: 2px solid var(--ink); margin-bottom: 32px; }
@@ -44,11 +45,18 @@
   .band { border-top: 2px solid var(--ink); padding-top: 22px; margin-top: 52px; }
   .band .eyebrow { margin-bottom: 4px; }
   .band h2 { font-size: 24px; font-weight: 600; margin-bottom: 20px; }
-  .section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 16px; }
+  .section-head { margin-bottom: 16px; }
   .section-head h2 { font-size: 20px; font-weight: 600; }
-  .section-head .count { font-family: ui-monospace, monospace; font-size: 12px; color: var(--ink-muted); }
-  p { margin: 0 0 12px; color: var(--ink); max-width: 66ch; }
-  .note { font-size: 13.5px; color: var(--ink-muted); max-width: 62ch; }
+  .section-head .count { display: block; margin-top: 4px; font-family: ui-monospace, monospace; font-size: 12px; color: var(--ink-muted); }
+  .keyfinding { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; padding: 18px 20px; box-shadow: var(--shadow); margin-bottom: 8px; }
+  .keyfinding .eyebrow { display: block; margin-bottom: 8px; }
+  .keyfinding p { font-size: 16px; font-weight: 500; margin: 0; }
+  p { margin: 0 0 12px; color: var(--ink); }
+  .note { font-size: 13.5px; color: var(--ink-muted); }
+  .narrative-list { margin: 0 0 16px; padding-left: 22px; }
+  .narrative-list li { margin-bottom: 8px; color: var(--ink); line-height: 1.5; }
+  .glossary dt { font-family: ui-monospace, monospace; font-weight: 600; color: var(--ink); margin-top: 10px; }
+  .glossary dd { color: var(--ink-muted); margin: 2px 0 0; }
   .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
   .tiles.three { grid-template-columns: repeat(3, 1fr); }
   @media (max-width: 560px) { .tiles, .tiles.three { grid-template-columns: 1fr; } }
@@ -115,8 +123,8 @@
       <dt>Generated</dt><dd>{{ findings.generated_at }}</dd>
       <dt>Modules</dt><dd>{{ ok_count }} of {{ modules|length }} ran cleanly</dd>
       <dt>Artifacts</dt><dd>{{ findings.artifacts|length }} across all modules</dd>
-      <dt>Output dir</dt><dd>{{ findings.case.output_dir }}</dd>
-      {% if findings.case.evidence_dir %}<dt>Evidence dir</dt><dd>{{ findings.case.evidence_dir }}</dd>{% endif %}
+      <dt>Output dir</dt><dd>{{ findings.case.output_dir|wrap_path }}</dd>
+      {% if findings.case.evidence_dir %}<dt>Evidence dir</dt><dd>{{ findings.case.evidence_dir|wrap_path }}</dd>{% endif %}
     </dl>
   </div>
 
@@ -138,6 +146,7 @@
   <div class="band">
     <div class="eyebrow">Module A</div>
     <h2>Registry &amp; execution evidence</h2>
+    <p class="band-subtitle">What the Windows registry shows about Tor Browser being installed and used.</p>
     <dl class="meta-grid" style="margin-bottom:32px;">
       <dt>Hives analyzed</dt><dd>{{ registry.hives_analyzed|join(", ") if registry.hives_analyzed else "— none" }}</dd>
       {% if registry.hives_missing %}
@@ -146,6 +155,16 @@
       <dt>Summary</dt><dd>{{ registry.summary }}</dd>
     </dl>
   </div>
+
+  <section>
+    <div class="keyfinding">
+      <span class="eyebrow">Key finding</span>
+      <p>{{ registry.narrative.key_finding }}</p>
+    </div>
+    {% if not registry.narrative.empty %}
+    <p class="note" style="margin-top:10px;">See <a href="#appendix-profiles">Appendix: Windows user profiles</a> at the end of this report for every Windows account found on this computer.</p>
+    {% endif %}
+  </section>
 
   {% if registry.errors %}
   <section>
@@ -161,6 +180,45 @@
   {% endif %}
 
   <section>
+    <div class="section-head"><h2>What happened</h2><span class="count">Plain-English summary — rule-based, not an AI-generated guess</span></div>
+    {% if registry.narrative.empty %}
+    {% for line in registry.narrative.empty %}
+    <p class="note">{{ line }}</p>
+    {% endfor %}
+    {% else %}
+    <ol class="narrative-list">
+      {% for point in registry.narrative.timeline %}
+      <li>{{ point }}</li>
+      {% endfor %}
+    </ol>
+    {% endif %}
+  </section>
+
+  {% if not registry.narrative.empty %}
+  <section>
+    <div class="section-head"><h2>How reliable is this?</h2></div>
+    {% for line in registry.narrative.reliability %}
+    <p class="note">{{ line }}</p>
+    {% endfor %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>What we could not determine</h2></div>
+    <ul class="narrative-list">
+      {% for line in registry.narrative.not_determined %}
+      <li>{{ line }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <div class="band">
+    <div class="eyebrow">Module A — for examiners</div>
+    <h2>Technical details</h2>
+    <p class="band-subtitle">The registry tables and source-by-source evidence the summary above is built from.</p>
+  </div>
+
+  <section>
     <div class="section-head">
       <h2>Confirmed Tor Browser components</h2>
       <span class="count">{{ registry.component_timeline|length }} distinct file{{ "s" if registry.component_timeline|length != 1 }} — {{ registry.corroborated_components }} corroborated by 2+ independent hive sources</span>
@@ -168,16 +226,15 @@
     {% if registry.component_timeline %}
     <div class="table-scroll">
       <table class="evidence-table">
-        <thead><tr><th>File</th><th>Seen in</th><th>Amcache first-seen</th><th>UserAssist runs</th><th>UserAssist last run</th><th>ShimCache hits</th></tr></thead>
+        <thead><tr><th>File</th><th>Seen in</th><th>Install / first seen</th><th>Run count</th><th>Last activity</th></tr></thead>
         <tbody>
           {% for c in registry.component_timeline %}
           <tr>
-            <td class="val">{{ c.basename }}{% if c.paths|length > 1 %}<br><span class="off">({{ c.paths|length }} path variants)</span>{% endif %}</td>
-            <td class="val">{% for t in c.seen_in %}<span class="chip {{ 'high' if t in ('UserAssist', 'Amcache') else 'low' if t == 'RecentDocs' else '' }}">{{ t }}</span> {% endfor %}</td>
+            <td class="val">{{ c.basename|wrap_path }}{% if c.paths|length > 1 %}<br><span class="off">({{ c.paths|length }} path variants)</span>{% endif %}</td>
+            <td class="val">{% for t in c.seen_in %}<span class="chip {{ 'high' if t in ('UserAssist', 'Amcache', 'BAM', 'InstalledPrograms') else 'low' if t in ('RecentDocs', 'RunMRU', 'WordWheelQuery', 'ComDlg32') else '' }}">{{ t }}{% if t == 'ShimCache' and c.shimcache_hits > 1 %} ×{{ c.shimcache_hits }}{% endif %}</span> {% endfor %}</td>
             <td class="off">{{ c.amcache_first_seen|fmt_ts }}</td>
             <td class="off">{{ c.userassist_run_count or "—" }}</td>
-            <td class="off">{{ c.userassist_last_run|fmt_ts }}</td>
-            <td class="off">{{ c.shimcache_hits or "—" }}</td>
+            <td class="off">{% if c.last_activity %}{{ c.last_activity.timestamp|fmt_ts }} <span class="off">({{ c.last_activity.source }})</span>{% else %}—{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -188,6 +245,15 @@
       <strong>Independent corroboration:</strong> {{ registry.corroborated_components }} file{{ "s" if registry.corroborated_components != 1 }} above {{ "is" if registry.corroborated_components == 1 else "are" }} confirmed by 2 or more separate OS subsystems (execution history, cache insertion, install record) agreeing independently — stronger than any single artifact type's say-so alone.
     </div>
     {% endif %}
+    {% if registry.narrative.technical.last_use_summary %}
+    <p class="note" style="margin-top:12px;">{{ registry.narrative.technical.last_use_summary }}</p>
+    {% endif %}
+    {% if registry.narrative.technical.time_gap %}
+    <p class="note">{{ registry.narrative.technical.time_gap }}</p>
+    {% endif %}
+    <p class="note">{{ registry.narrative.technical.account }}</p>
+    <p class="note">{{ registry.narrative.technical.strength }}</p>
+    <p class="note">{{ registry.narrative.technical.install_date_detail }}</p>
     {% for note in registry.quiet_hive_notes %}
     <p class="note">{{ note }}</p>
     {% endfor %}
@@ -224,7 +290,7 @@
             <tbody>
               {% for f in s.findings %}
               <tr>
-                <td class="val">{{ f.path or "—" }}</td>
+                <td class="val">{{ f.path|wrap_path }}{% if f.harddiskvolume_note %}<br><span class="off">{{ f.harddiskvolume_note }}</span>{% endif %}</td>
                 <td class="off">{{ f.run_count if f.run_count is not none else "—" }}</td>
                 <td class="off">{{ f.focus_count if f.focus_count is not none else "—" }}</td>
                 <td class="off">{{ f.total_focus_time_ms if f.total_focus_time_ms is not none else "—" }}</td>
@@ -240,7 +306,7 @@
             <tbody>
               {% for f in s.findings %}
               <tr>
-                <td class="val">{{ f.path or "—" }}</td>
+                <td class="val">{{ f.path|wrap_path }}{% if f.harddiskvolume_note %}<br><span class="off">{{ f.harddiskvolume_note }}</span>{% endif %}</td>
                 <td class="val">
                   {% if s.type == 'Amcache' %}sha1={{ f.sha1 or "—" }}, size={{ f.size or "—" }}
                   {% else %}{{ f.description }}
@@ -1029,6 +1095,69 @@
       {% endfor %}
     </ul>
   </section>
+
+  {% if glossary %}
+  <section>
+    <div class="section-head"><h2>Glossary</h2></div>
+    <dl class="glossary">
+      {% for term, definition in glossary %}
+      <dt>{{ term }}</dt><dd>{{ definition }}</dd>
+      {% endfor %}
+    </dl>
+  </section>
+  {% endif %}
+
+  {% if registry and registry.profiles %}
+  <div class="band" id="appendix-profiles">
+    <div class="eyebrow">Appendix</div>
+    <h2>Windows user profiles</h2>
+    <p class="band-subtitle">Every Windows account found on this computer, from the registry's own account list — reference data, not Tor-related findings on their own.</p>
+  </div>
+  <section>
+    {% set relevant_profiles = registry.profiles|selectattr("is_relevant")|list %}
+    {% set other_profiles = registry.profiles|rejectattr("is_relevant")|list %}
+    {% if relevant_profiles %}
+    <div class="callout" style="border-left-color: var(--confirm); margin-bottom:16px;">
+      <strong>Linked to the Tor Browser activity above:</strong>
+      <div class="table-scroll" style="margin-top:10px;">
+        <table class="evidence-table">
+          <thead><tr><th>Profile path</th><th>SID</th><th>Last write</th></tr></thead>
+          <tbody>
+            {% for p in relevant_profiles %}
+            <tr>
+              <td class="val">{{ p.path|wrap_path }}</td>
+              <td class="off">{{ p.sid or "—" }}</td>
+              <td class="off">{{ p.last_write|fmt_ts }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+    {% if other_profiles %}
+    <details class="appendix">
+      <summary>Show {{ other_profiles|length }} other profile{{ "s" if other_profiles|length != 1 }} on this computer — system/service accounts not tied to the findings above</summary>
+      <div class="appendix-body">
+        <div class="table-scroll">
+          <table class="evidence-table">
+            <thead><tr><th>Profile path</th><th>SID</th><th>Last write</th></tr></thead>
+            <tbody>
+              {% for p in other_profiles %}
+              <tr>
+                <td class="val">{{ p.path|wrap_path }}</td>
+                <td class="off">{{ p.sid or "—" }}</td>
+                <td class="off">{{ p.last_write|fmt_ts }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </details>
+    {% endif %}
+  </section>
+  {% endif %}
 
   <footer>
     <span>TRANCE · findings.json schema v{{ findings.schema_version }}</span>

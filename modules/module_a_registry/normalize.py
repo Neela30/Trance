@@ -22,9 +22,15 @@ from core.schema import Artifact
 
 from .constants import (
     ARTIFACT_TYPE_AMCACHE,
+    ARTIFACT_TYPE_BAM,
+    ARTIFACT_TYPE_COMDLG32,
+    ARTIFACT_TYPE_INSTALLEDPROGRAMS,
+    ARTIFACT_TYPE_MUICACHE,
     ARTIFACT_TYPE_RECENTDOCS,
+    ARTIFACT_TYPE_RUNMRU,
     ARTIFACT_TYPE_SHIMCACHE,
     ARTIFACT_TYPE_USER_ASSIST,
+    ARTIFACT_TYPE_WORDWHEELQUERY,
     candidate_path,
 )
 
@@ -106,11 +112,99 @@ def _normalize_recentdocs(entry: dict) -> tuple[str, str | None]:
     return description, entry.get("last_write")
 
 
+def _normalize_bam(entry: dict) -> tuple[str, str | None]:
+    path = candidate_path(ARTIFACT_TYPE_BAM, entry) or "<unknown>"
+    sid = entry.get("sid")
+    sid_suffix = f", sid={sid}" if sid else ""
+    description = (
+        f"BAM (Background Activity Moderator) last-execution evidence for '{path}'"
+        f"{sid_suffix}. Confidence: HIGH — an independent OS subsystem's own "
+        "last-run record, separate from UserAssist/ShimCache/Amcache."
+    )
+    return description, entry.get("timestamp")
+
+
+def _normalize_muicache(entry: dict) -> tuple[str, str | None]:
+    path = candidate_path(ARTIFACT_TYPE_MUICACHE, entry) or "<unknown>"
+    display_name = entry.get("display_name")
+    name_suffix = f", display_name={display_name!r}" if display_name else ""
+    description = (
+        f"MUICache entry for '{path}'{name_suffix}. "
+        "Confidence: MEDIUM — shows the app was invoked via the shell at some point, "
+        "not confirmed execution."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_runmru(entry: dict) -> tuple[str, str | None]:
+    # "for '...'" wording is required here, not just stylistic -- report.py's
+    # _PATH_RE (shared by every artifact type) only matches "for '...'"/"entry '...'",
+    # and without a match this entry would silently drop out of the cross-hive
+    # component correlation table entirely.
+    command = candidate_path(ARTIFACT_TYPE_RUNMRU, entry) or "<unknown>"
+    description = (
+        f"RunMRU evidence for '{command}' (command typed into the Run dialog). "
+        "Confidence: LOW — contextual/corroborating evidence only, "
+        "not direct Tor Browser execution evidence."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_word_wheel_query(entry: dict) -> tuple[str, str | None]:
+    # See _normalize_runmru's comment -- "for '...'" wording is load-bearing for
+    # report.py's _PATH_RE, not just stylistic.
+    query = candidate_path(ARTIFACT_TYPE_WORDWHEELQUERY, entry) or "<unknown>"
+    description = (
+        f"WordWheelQuery evidence for '{query}' (search typed into Explorer/Start "
+        "search). Confidence: LOW — contextual/corroborating evidence only, "
+        "not direct Tor Browser execution evidence."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_comdlg32(entry: dict) -> tuple[str, str | None]:
+    path = candidate_path(ARTIFACT_TYPE_COMDLG32, entry) or "<unknown>"
+    mru_type = entry.get("mru_type")
+    type_suffix = f" ({mru_type})" if mru_type else ""
+    description = (
+        f"ComDlg32 entry for '{path}'{type_suffix} — used in a file Open/Save dialog. "
+        "Confidence: LOW — contextual/corroborating evidence only, "
+        "not direct Tor Browser execution evidence; regipy's own PIDL parsing here is "
+        "best-effort and can be noisy."
+    )
+    return description, entry.get("last_write")
+
+
+def _normalize_installed_programs(entry: dict) -> tuple[str, str | None]:
+    path = candidate_path(ARTIFACT_TYPE_INSTALLEDPROGRAMS, entry) or "<unknown>"
+    publisher = entry.get("Publisher")
+    publisher_suffix = f", publisher={publisher!r}" if publisher else ""
+    # InstallDate (when present) is the Uninstall key's own raw "YYYYMMDD" string, not
+    # ISO-8601 -- kept in the description as context rather than as Artifact.timestamp
+    # (which every other type here treats as a parseable ISO timestamp). The key's own
+    # last-write time (already ISO, via regipy's convert_wintime) is the real timestamp.
+    install_date = entry.get("InstallDate")
+    date_suffix = f", InstallDate={install_date}" if install_date else ""
+    description = (
+        f"Installed-programs (Uninstall key) entry for '{path}'{publisher_suffix}"
+        f"{date_suffix}. Confidence: HIGH — a registered install, largely independent "
+        "of execution and shutdown state (though a portable Tor Browser won't register "
+        "here)."
+    )
+    return description, entry.get("timestamp")
+
+
 _NORMALIZERS = {
     ARTIFACT_TYPE_USER_ASSIST: _normalize_user_assist,
     ARTIFACT_TYPE_SHIMCACHE: _normalize_shimcache,
     ARTIFACT_TYPE_AMCACHE: _normalize_amcache,
     ARTIFACT_TYPE_RECENTDOCS: _normalize_recentdocs,
+    ARTIFACT_TYPE_BAM: _normalize_bam,
+    ARTIFACT_TYPE_MUICACHE: _normalize_muicache,
+    ARTIFACT_TYPE_RUNMRU: _normalize_runmru,
+    ARTIFACT_TYPE_WORDWHEELQUERY: _normalize_word_wheel_query,
+    ARTIFACT_TYPE_COMDLG32: _normalize_comdlg32,
+    ARTIFACT_TYPE_INSTALLEDPROGRAMS: _normalize_installed_programs,
 }
 
 

@@ -117,6 +117,16 @@ def acquire_system(output_dir: Path, custody: CustodyLog) -> Path:
     return output_path
 
 
+def acquire_software(output_dir: Path, custody: CustodyLog) -> Path:
+    """SOFTWARE is a loaded hive (HKLM\\SOFTWARE), same as SYSTEM -- reg save gives a
+    consistent snapshot directly, no VSS needed. Feeds ProfileList (SID -> username)
+    and the Installed Programs (Uninstall key) artifact type."""
+    output_path = output_dir / f"SOFTWARE_{_timestamp()}"
+    _reg_save("HKLM\\SOFTWARE", output_path)
+    _hash_sidecar_custody(output_path, custody, "SOFTWARE hive via reg save HKLM\\SOFTWARE")
+    return output_path
+
+
 def acquire_ntuser_live(output_dir: Path, custody: CustodyLog) -> Path:
     """The CURRENT session's user (HKCU) -- reg save, no VSS needed."""
     output_path = output_dir / f"NTUSER_{_timestamp()}.DAT"
@@ -213,6 +223,7 @@ def acquire_all(
     include_system: bool = True,
     include_ntuser: bool = True,
     include_amcache: bool = True,
+    include_software: bool = True,
     ntuser_user: str | None = None,
 ) -> dict:
     """Best-effort: each hive is attempted independently -- one failing (e.g. Amcache's
@@ -247,6 +258,8 @@ def acquire_all(
             attempt("NTUSER.DAT", lambda: acquire_ntuser_live(output_dir, custody))
     if include_amcache:
         attempt("Amcache.hve", lambda: acquire_amcache(output_dir, custody))
+    if include_software:
+        attempt("SOFTWARE", lambda: acquire_software(output_dir, custody))
 
     custody.save()
     results["custody_log_path"] = str(custody.log_path)
@@ -255,7 +268,8 @@ def acquire_all(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Export NTUSER.DAT, SYSTEM and Amcache.hve from a live Windows target for Module A."
+        description="Export NTUSER.DAT, SYSTEM, Amcache.hve and SOFTWARE from a live "
+        "Windows target for Module A."
     )
     parser.add_argument(
         "--output-dir", type=Path, default=Path("captures"), help="Default: %(default)s"
@@ -263,6 +277,7 @@ def main() -> None:
     parser.add_argument("--skip-system", action="store_true", help="Don't export SYSTEM")
     parser.add_argument("--skip-ntuser", action="store_true", help="Don't export NTUSER.DAT")
     parser.add_argument("--skip-amcache", action="store_true", help="Don't export Amcache.hve")
+    parser.add_argument("--skip-software", action="store_true", help="Don't export SOFTWARE")
     parser.add_argument(
         "--ntuser-user",
         help="Export this named user's NTUSER.DAT via Volume Shadow Copy instead of the current "
@@ -277,6 +292,7 @@ def main() -> None:
             include_system=not args.skip_system,
             include_ntuser=not args.skip_ntuser,
             include_amcache=not args.skip_amcache,
+            include_software=not args.skip_software,
             ntuser_user=args.ntuser_user,
         )
     except AcquisitionError as exc:

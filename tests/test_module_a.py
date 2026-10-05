@@ -20,10 +20,18 @@ from core.exceptions import IntegrityError, ParsingError
 from core.schema import Artifact
 from modules.module_a_registry.constants import (
     ARTIFACT_TYPE_AMCACHE,
+    ARTIFACT_TYPE_BAM,
+    ARTIFACT_TYPE_COMDLG32,
+    ARTIFACT_TYPE_INSTALLEDPROGRAMS,
+    ARTIFACT_TYPE_MUICACHE,
     ARTIFACT_TYPE_RECENTDOCS,
+    ARTIFACT_TYPE_RUNMRU,
     ARTIFACT_TYPE_SHIMCACHE,
     ARTIFACT_TYPE_USER_ASSIST,
+    ARTIFACT_TYPE_WORDWHEELQUERY,
     candidate_path,
+    harddiskvolume_number,
+    infer_drive_letters,
     is_tor_related,
 )
 from modules.module_a_registry.normalize import normalize_entry
@@ -67,6 +75,49 @@ class TestIsTorRelated:
         assert is_tor_related(r"C:\Users\bob\Downloads\torbrowser-install-win64.exe") is True
 
 
+class TestInferDriveLetters:
+    """\\Device\\HarddiskVolumeN -> drive letter, inferred from the SAME evidence set --
+    see constants.infer_drive_letters' docstring for why MountedDevices can't answer
+    this (it maps letters to volume GUIDs/disk signatures, never to the HarddiskVolumeN
+    ordinal) and same-evidence correlation is used instead."""
+
+    def test_unambiguous_match_is_inferred(self):
+        paths = {
+            r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe",
+            r"E:\Tor Browser\Browser\firefox.exe",
+        }
+        assert infer_drive_letters(paths) == {
+            r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe": "E"
+        }
+
+    def test_no_matching_drive_letter_path_is_left_unresolved(self):
+        paths = {r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe"}
+        assert infer_drive_letters(paths) == {}
+
+    def test_ambiguous_match_across_two_drive_letters_is_left_unresolved(self):
+        # Two different drives both happen to hold a file at the same relative path --
+        # genuinely ambiguous, must not guess either one.
+        paths = {
+            r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe",
+            r"E:\Tor Browser\Browser\firefox.exe",
+            r"F:\Tor Browser\Browser\firefox.exe",
+        }
+        assert infer_drive_letters(paths) == {}
+
+    def test_case_insensitive_suffix_match(self):
+        paths = {
+            r"\device\harddiskvolume6\Tor Browser\Browser\firefox.exe",
+            r"e:\TOR BROWSER\Browser\firefox.exe",
+        }
+        resolved = infer_drive_letters(paths)
+        assert resolved == {r"\device\harddiskvolume6\Tor Browser\Browser\firefox.exe": "E"}
+
+    def test_harddiskvolume_number_extracts_the_ordinal(self):
+        assert harddiskvolume_number(r"\Device\HarddiskVolume6\Tor Browser\firefox.exe") == "6"
+        assert harddiskvolume_number(r"E:\Tor Browser\firefox.exe") is None
+        assert harddiskvolume_number(None) is None
+
+
 class TestCandidatePath:
     def test_user_assist_uses_name_field(self):
         entry = {"name": r"C:\Tor Browser\Browser\firefox.exe", "run_counter": 3}
@@ -81,6 +132,27 @@ class TestCandidatePath:
 
     def test_missing_field_returns_none(self):
         assert candidate_path(ARTIFACT_TYPE_SHIMCACHE, {}) is None
+
+    def test_bam_uses_executable_field(self):
+        entry = {"executable": r"C:\Tor Browser\Browser\firefox.exe"}
+        assert candidate_path(ARTIFACT_TYPE_BAM, entry) == r"C:\Tor Browser\Browser\firefox.exe"
+        assert is_tor_related(candidate_path(ARTIFACT_TYPE_BAM, entry)) is True
+        assert (
+            is_tor_related(
+                candidate_path(
+                    ARTIFACT_TYPE_BAM, {"executable": r"C:\Windows\System32\notepad.exe"}
+                )
+            )
+            is False
+        )
+
+    def test_installed_programs_falls_back_across_field_names(self):
+        entry = {"InstallLocation": r"C:\Tor Browser"}
+        assert candidate_path(ARTIFACT_TYPE_INSTALLEDPROGRAMS, entry) == r"C:\Tor Browser"
+        assert (
+            candidate_path(ARTIFACT_TYPE_INSTALLEDPROGRAMS, {"DisplayName": "Tor Browser"})
+            == "Tor Browser"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +212,70 @@ class TestNormalizeEntry:
 
         assert "LOW" in artifact.description
         assert "corroborating evidence only" in artifact.description
+
+    def test_bam_is_high_confidence_and_includes_sid(self):
+        entry = {
+            "executable": r"\Device\HarddiskVolume3\Tor Browser\Browser\firefox.exe",
+            "timestamp": "2026-07-14T14:15:22+00:00",
+            "sid": "S-1-5-21-1-2-3-1001",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_BAM, entry, "SYSTEM")
+
+        assert "HIGH" in artifact.description
+        assert "sid=S-1-5-21-1-2-3-1001" in artifact.description
+        assert artifact.timestamp == "2026-07-14T14:15:22+00:00"
+
+    def test_muicache_is_medium_confidence(self):
+        entry = {
+            "path": r"C:\Tor Browser\Browser\firefox.exe",
+            "display_name": "Tor Browser",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MUICACHE, entry, "NTUSER.DAT")
+
+        assert "MEDIUM" in artifact.description
+        assert "not confirmed execution" in artifact.description
+
+    def test_runmru_is_low_confidence(self):
+        entry = {
+            "command": r"C:\Tor Browser\Browser\firefox.exe",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_RUNMRU, entry, "NTUSER.DAT")
+
+        assert "LOW" in artifact.description
+        assert "for 'C:\\Tor Browser\\Browser\\firefox.exe'" in artifact.description
+
+    def test_word_wheel_query_is_low_confidence(self):
+        entry = {"name": "tor browser", "last_write": "2026-07-14T00:00:00+00:00"}
+        artifact = normalize_entry(ARTIFACT_TYPE_WORDWHEELQUERY, entry, "NTUSER.DAT")
+
+        assert "LOW" in artifact.description
+        assert "for 'tor browser'" in artifact.description
+
+    def test_comdlg32_is_low_confidence(self):
+        entry = {
+            "path": r"C:\Tor Browser\Browser\firefox.exe",
+            "mru_type": "OpenSavePidlMRU",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_COMDLG32, entry, "NTUSER.DAT")
+
+        assert "LOW" in artifact.description
+        assert "for 'C:\\Tor Browser\\Browser\\firefox.exe'" in artifact.description
+
+    def test_installed_programs_is_high_confidence_and_includes_install_date(self):
+        entry = {
+            "DisplayName": "Tor Browser",
+            "Publisher": "The Tor Project",
+            "InstallDate": "20260714",
+            "timestamp": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_INSTALLEDPROGRAMS, entry, "SOFTWARE")
+
+        assert "HIGH" in artifact.description
+        assert "InstallDate=20260714" in artifact.description
+        assert artifact.timestamp == "2026-07-14T00:00:00+00:00"
 
     def test_unknown_artifact_type_raises(self):
         with pytest.raises(ValueError):
@@ -249,6 +385,174 @@ def _run_pipeline_with_mocks(tmp_path: Path, output_dir: Path):
             p.stop()
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Real bug: summary said "executed 4 times" when the table showed one launch.
+# Root cause was two stacked problems in _update_stats()'s run_counter sum:
+# regipy returning each real entry twice, and a .lnk shortcut + the firefox.exe
+# it starts sharing one timestamp (one user action, counted as two). See
+# pipeline.py's _update_stats()/_build_summary() docstrings.
+# ---------------------------------------------------------------------------
+
+_DUPLICATED_LINKED_LAUNCH_ENTRIES = [
+    # firefox.exe, reported twice by regipy (identical entry) -- the same real launch.
+    {
+        "name": r"E:\Tor Browser\Browser\firefox.exe",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    {
+        "name": r"E:\Tor Browser\Browser\firefox.exe",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    # Tor Browser.lnk, also reported twice -- same exact timestamp as firefox.exe above:
+    # one user action (click the shortcut, which starts firefox.exe), two UserAssist GUIDs.
+    {
+        "name": r"E:\Tor Browser\Tor Browser.lnk",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    {
+        "name": r"E:\Tor Browser\Tor Browser.lnk",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    # The installer: never actually launched (run_counter=0), null/epoch-zero timestamp --
+    # must not count as a launch at all.
+    {
+        "name": (
+            r"C:\Users\Admin\AppData\Local\Temp\MicrosoftEdgeDownloads\g\\"
+            r"tor-browser-windows-x86_64-portable-15.0.21.exe"
+        ),
+        "timestamp": "1601-01-01T00:00:00+00:00",
+        "run_counter": 0,
+    },
+    {
+        "name": (
+            r"C:\Users\Admin\AppData\Local\Temp\MicrosoftEdgeDownloads\g\\"
+            r"tor-browser-windows-x86_64-portable-15.0.21.exe"
+        ),
+        "timestamp": "1601-01-01T00:00:00+00:00",
+        "run_counter": 0,
+    },
+]
+
+
+class TestLaunchCounting:
+    def test_duplicates_and_linked_launch_count_as_one_launch(self, tmp_path):
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                return_value=_DUPLICATED_LINKED_LAUNCH_ENTRIES,
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        assert "launched 1 time" in result.summary
+        assert "launched 1 times" not in result.summary  # pluralization
+        assert "launched 2 times" not in result.summary
+        assert "launched 4 times" not in result.summary
+        assert "executed" not in result.summary
+
+    def test_distinct_timestamps_each_count_as_a_separate_launch(self, tmp_path):
+        entries = [
+            {
+                "name": r"E:\Tor Browser\Browser\firefox.exe",
+                "timestamp": "2026-09-03T04:41:53+00:00",
+                "run_counter": 1,
+            },
+            {
+                "name": r"E:\Tor Browser\Browser\firefox.exe",
+                "timestamp": "2026-09-05T10:00:00+00:00",
+                "run_counter": 2,
+            },
+        ]
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_user_assist", return_value=entries),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        assert "launched 2 times" in result.summary
+
+
+class TestSoftwareHiveIsOptional:
+    def test_runs_without_software_same_as_other_optional_hives(self, tmp_path):
+        """SOFTWARE is a fourth optional hive, same degrade-gracefully contract as
+        ntuser/system/amcache -- omitting it must not affect the other three."""
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                return_value=[
+                    {
+                        "name": r"E:\Tor Browser\Browser\firefox.exe",
+                        "timestamp": "2026-07-14T14:15:22+00:00",
+                        "run_counter": 1,
+                    }
+                ],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        assert len(result.findings) == 1
+        assert result.profiles == []
+        assert "launched 1 time" in result.summary
+
+    def test_software_hive_populates_installed_programs_and_profiles(self, tmp_path):
+        ntuser = tmp_path / "NTUSER.DAT"
+        software = tmp_path / "SOFTWARE"
+        for f in (ntuser, software):
+            f.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        profiles = [{"path": r"C:\Users\Admin", "sid": "S-1-5-21-1-2-3-1001", "last_write": None}]
+        installed = [
+            {
+                "DisplayName": "Tor Browser",
+                "timestamp": "2026-07-14T00:00:00+00:00",
+                "registry_path": r"Microsoft\Windows\CurrentVersion\Uninstall",
+            },
+            {
+                "DisplayName": "Totally Unrelated App",
+                "timestamp": "2026-07-14T00:00:00+00:00",
+                "registry_path": r"Microsoft\Windows\CurrentVersion\Uninstall",
+            },
+        ]
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_user_assist", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_installed_programs",
+                return_value=installed,
+            ),
+            patch("modules.module_a_registry.pipeline.extract_profiles", return_value=profiles),
+        ):
+            result = run_module_a(config, ntuser=ntuser, software=software)
+
+        assert len(result.findings) == 1  # only the Tor-related install, not the unrelated app
+        assert result.findings[0].artifact_type == ARTIFACT_TYPE_INSTALLEDPROGRAMS
+        assert result.profiles == profiles
 
 
 class TestPipelineIntegrity:
@@ -378,4 +682,4 @@ class TestPipelineRepeatability:
         assert isinstance(payload["findings"], list)
         assert isinstance(payload["summary"], str)
         assert "installed" in payload["summary"]
-        assert "executed" in payload["summary"]
+        assert "launched" in payload["summary"]

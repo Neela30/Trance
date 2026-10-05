@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 
 from core.config import TranceConfig
+from core.schema import ModuleResult
 from findings import build_findings
-from report import _format_timestamp, write_report
+from report import _format_timestamp, _resolve_local_tz, _wrap_path, render_report, write_report
 
 
 class TestFormatTimestamp:
@@ -19,6 +20,86 @@ class TestFormatTimestamp:
 
     def test_unparseable_string_is_returned_unchanged_rather_than_hidden(self):
         assert _format_timestamp("not-a-timestamp") == "not-a-timestamp"
+
+
+class TestWrapPath:
+    def test_inserts_wbr_after_every_backslash(self):
+        result = _wrap_path(r"C:\Users\Admin\Downloads\x.exe")
+        assert result == r"C:\<wbr>Users\<wbr>Admin\<wbr>Downloads\<wbr>x.exe"
+
+    def test_inserts_wbr_after_forward_slashes_too(self):
+        result = _wrap_path("a/b/c.txt")
+        assert result == "a/<wbr>b/<wbr>c.txt"
+
+    def test_escapes_html_special_characters(self):
+        # Never breaks mid-word (no bare "anywhere" break), but still must not let a
+        # path smuggle markup into the page.
+        result = _wrap_path(r"C:\<script>\x.exe")
+        assert "<script>" not in result
+        assert "&lt;script&gt;" in result
+
+    def test_none_and_empty_become_a_dash(self):
+        assert _wrap_path(None) == "—"
+        assert _wrap_path("") == "—"
+
+    def test_result_is_marked_safe_for_the_template(self):
+        from markupsafe import Markup
+
+        assert isinstance(_wrap_path(r"C:\x.exe"), Markup)
+
+
+class TestResolveLocalTz:
+    def test_explicit_value_passes_through_unchanged(self):
+        assert _resolve_local_tz("Asia/Colombo") == "Asia/Colombo"
+
+    def test_none_resolves_to_something_or_none_but_never_raises(self):
+        # tzlocal is installed in this project's deps; on a machine without it (or
+        # without usable tzdata) this must degrade to None, never raise.
+        result = _resolve_local_tz(None)
+        assert result is None or isinstance(result, str)
+
+
+def _module_a_result_with_one_launch() -> ModuleResult:
+    finding = {
+        "description": (
+            "UserAssist evidence for 'E:\\Tor Browser\\Browser\\firefox.exe' "
+            "(run_count=1). Confidence: HIGH."
+        ),
+        "source": "NTUSER.DAT",
+        "timestamp": "2026-09-03T04:41:53+00:00",
+    }
+    return ModuleResult(
+        module="module_a_registry",
+        status="ok",
+        artifacts=[],
+        details={
+            "summary": "Tor Browser launched 1 time.",
+            "errors": [],
+            "findings_by_type": {"UserAssist": [finding]},
+            "hives_provided": {"ntuser": True, "system": False, "amcache": False},
+        },
+    )
+
+
+def test_render_report_includes_glossary_for_a_module_a_case(tmp_path):
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    findings = build_findings(config, [_module_a_result_with_one_launch()])
+
+    html = render_report(findings, local_tz="Asia/Colombo")
+
+    assert "Glossary" in html
+    assert "UserAssist" in html
+    assert "NTUSER.DAT" in html
+
+
+def test_render_report_narrative_uses_the_given_timezone(tmp_path):
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    findings = build_findings(config, [_module_a_result_with_one_launch()])
+
+    html = render_report(findings, local_tz="Asia/Colombo")
+
+    assert "What happened" in html
+    assert "10:11 AM Asia/Colombo" in html
 
 
 def test_write_report_handles_non_ascii_template_content(tmp_path):

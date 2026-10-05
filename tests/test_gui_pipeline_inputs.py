@@ -18,6 +18,7 @@ def test_module_kwargs_from_resolved_maps_all_fields():
     assert kwargs["module_a_registry"]["system"] == Path("registry/SYSTEM_x")
     assert kwargs["module_a_registry"]["ntuser"] == Path("registry/NTUSER_x.DAT")
     assert kwargs["module_a_registry"]["amcache"] is None
+    assert kwargs["module_a_registry"]["software"] is None
     assert kwargs["module_b_disk"]["profile_dir"] == Path("disk/profile")
     assert kwargs["module_b_disk"]["tor_dir"] == Path("disk/tor_dir")
     assert kwargs["module_c_memory"]["dump"] == Path("memory/fullmem_x.raw")
@@ -30,6 +31,11 @@ def test_module_kwargs_from_resolved_maps_all_fields():
 def test_module_kwargs_from_resolved_empty_fields_become_none():
     kwargs = module_kwargs_from_resolved({}, "", "", "")
 
-    assert kwargs["module_a_registry"] == {"ntuser": None, "system": None, "amcache": None}
+    assert kwargs["module_a_registry"] == {
+        "ntuser": None,
+        "system": None,
+        "amcache": None,
+        "software": None,
+    }
     assert kwargs["module_c_memory"]["onion"] is None
     assert kwargs["module_c_memory"]["source_type"] == "process"
