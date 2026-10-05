@@ -11,6 +11,14 @@ examiner-supplied binary (https://github.com/Velocidex/WinPmem releases), same
 "external tool, not a Python dependency" pattern used for RawCopy/TScopy in the
 pagefile/hiberfil design (see context.md). No new third-party Python dependency is
 introduced: acquisition is a subprocess call plus the stdlib.
+
+--winpmem-path is optional: if omitted, find_winpmem_binaries() scans the filesystem
+for one instead (see core.fs_scan for the fast-locations-first, full-drive-fallback
+search order this shares with module_b_disk.acquire's Tor Browser auto-discovery).
+There's no fixed WinPMEM filename across its release history
+(winpmem_mini_x64_rc2.exe, winpmem.exe, winpmem_x64_rc2.exe, ...), so the match is a
+case-insensitive "winpmem" substring plus a .exe extension -- specific enough not to
+false-positive on anything else while covering every naming scheme so far.
 """
 
 from __future__ import annotations
@@ -21,6 +29,7 @@ import sys
 import time
 from pathlib import Path
 
+from core import fs_scan
 from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import AcquisitionError
 from core.hashing import hash_file
@@ -29,6 +38,27 @@ from core.winadmin import is_admin as _is_admin
 # A full physical-RAM image can legitimately take a long time on a large-memory
 # machine; bounded rather than unbounded so a hung driver/process doesn't block forever.
 ACQUIRE_TIMEOUT_SECONDS = 3600
+
+
+def _looks_like_winpmem(path: Path) -> bool:
+    name = path.name.lower()
+    return "winpmem" in name and name.endswith(".exe")
+
+
+def _scan_for_winpmem(root: Path) -> list[Path]:
+    found = []
+    for current, _dirnames, filenames in fs_scan.walk_pruned(root):
+        for name in filenames:
+            candidate = current / name
+            if _looks_like_winpmem(candidate):
+                found.append(candidate)
+    return found
+
+
+def find_winpmem_binaries(search_roots: list[Path] | None = None) -> list[Path]:
+    """Auto-discovery for when no --winpmem-path is given -- see core.fs_scan.staged_scan
+    for the fast-locations-first, full-drive-fallback search order."""
+    return fs_scan.staged_scan(_scan_for_winpmem, search_roots)
 
 
 def run_winpmem(
@@ -120,7 +150,10 @@ def main() -> None:
         description="Acquire a full physical-memory image via an examiner-supplied WinPMEM binary."
     )
     parser.add_argument(
-        "--winpmem-path", type=Path, required=True, help="Path to the WinPMEM executable"
+        "--winpmem-path",
+        type=Path,
+        help="Path to the WinPMEM executable. Omit to auto-discover instead: scans the "
+        "home directory/Desktop/Downloads/Documents, then every drive, for one",
     )
     parser.add_argument(
         "--output-dir",
@@ -137,8 +170,25 @@ def main() -> None:
         "(e.g. --winpmem-arg -o for a build that needs -o <outfile> instead of a bare positional path)",
     )
     args = parser.parse_args()
+
+    winpmem_path = args.winpmem_path
+    if winpmem_path is None:
+        candidates = find_winpmem_binaries()
+        if not candidates:
+            print(
+                "[!] No WinPMEM binary found (searched the home directory, Desktop, "
+                "Downloads, Documents, then every drive). Pass --winpmem-path explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        winpmem_path = candidates[0]
+        if len(candidates) > 1:
+            print(f"[*] Found {len(candidates)} WinPMEM binaries, using: {winpmem_path}")
+            for other in candidates[1:]:
+                print(f"[*]   also found (not used): {other}")
+
     try:
-        acquire(args.winpmem_path, args.output_dir, args.winpmem_args)
+        acquire(winpmem_path, args.output_dir, args.winpmem_args)
     except AcquisitionError as exc:
         print(f"[!] {exc}", file=sys.stderr)
         sys.exit(1)
