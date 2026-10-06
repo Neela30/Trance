@@ -97,6 +97,9 @@ def test_recycled_download_is_described_in_the_artifact_and_report(tmp_path):
         "end_basis": "last daemon write",
     }
     correlate_downloads(scan, window)
+    # The $R file's creation time is the test's, not the window's; only in-window
+    # files become artifacts, so mark this one as correlated.
+    scan["internet_origin_files"][0]["within_tor_daemon_window"] = True
 
     from modules.module_b_disk import _download_artifacts
 

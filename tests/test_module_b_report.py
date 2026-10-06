@@ -182,8 +182,8 @@ def test_context_shapes_every_section():
         "end_basis": None,
     }
     assert downloads["hits"][0]["created"] == "2026-09-19 08:12:26 UTC"
-    assert downloads["hits"][1]["created"] is None
-    assert downloads["any_url_fields"] is True
+    assert downloads["total"] == 2 and len(downloads["hits"]) == 1  # outside-window omitted
+    assert downloads["any_url_fields"] is False  # only the omitted file had URL fields
     assert ctx["carve"] is None
 
 
@@ -216,7 +216,7 @@ def test_report_renders_module_b_section(tmp_path):
     assert "Tor Browser deliberately omits" in html
     assert "Entry guards that carried traffic" in html
     assert 'class="chip high">yes' in html
-    assert 'class="chip low">no' in html
+    assert 'class="chip low">no' not in html  # outside-window files are not listed
     assert "showing 2 of 2" not in html  # no generic fallback table for B
 
 

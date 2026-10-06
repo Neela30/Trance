@@ -188,7 +188,7 @@ def _num(value: str | None) -> str:
 
 
 def _downloads_context(scan: dict) -> dict:
-    hits = [
+    all_hits = [
         {
             "path": h["path"],
             "size": h["size"],
@@ -211,6 +211,9 @@ def _downloads_context(scan: dict) -> dict:
         }
         for h in scan.get("internet_origin_files", [])
     ]
+    # Only files created inside the Tor daemon window are listed (same rule as the
+    # artifacts); the rest are counted so the report still says how many were skipped.
+    hits = [h for h in all_hits if h["within_window"] is True]
     window = scan.get("tor_daemon_window")
     return {
         "volume_root": scan.get("volume_root"),
@@ -228,10 +231,11 @@ def _downloads_context(scan: dict) -> dict:
             else None
         ),
         "hits": hits,
+        "total": len(all_hits),
         "recycled": sum(1 for h in hits if h["recycled"]),
-        "inside": sum(1 for h in hits if h["within_window"] is True),
-        "outside": sum(1 for h in hits if h["within_window"] is False),
-        "unknown": sum(1 for h in hits if h["within_window"] is None),
+        "inside": len(hits),
+        "outside": sum(1 for h in all_hits if h["within_window"] is False),
+        "unknown": sum(1 for h in all_hits if h["within_window"] is None),
         "any_url_fields": any(h["host_url"] or h["referrer_url"] for h in hits),
         "note": scan.get("note"),
     }

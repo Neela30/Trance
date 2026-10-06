@@ -464,7 +464,7 @@ def test_module_b_correlates_downloads_with_daemon_window(tmp_path, monkeypatch)
     }
     assert "while the Tor daemon was running" in files["a.txt"].description
     assert "source URL not recoverable" in files["a.txt"].description
-    assert "outside the last recorded Tor daemon window" in files["b.txt"].description
+    assert "b.txt" not in files  # outside the window: observation only, not a finding
     assert files["a.txt"].sha256 == hashlib.sha256(b"a.txt").hexdigest()
 
 
@@ -480,7 +480,7 @@ def test_module_b_download_scan_without_daemon(tmp_path, monkeypatch):
     assert result.status == "ok"
     [hit] = result.details["downloads"]["internet_origin_files"]
     assert hit["within_tor_daemon_window"] is None
-    assert "no Tor daemon window available" in result.artifacts[0].description
+    assert not [a for a in result.artifacts if a.artifact_type == "internet_origin_file"]
 
 
 def test_main_runs_download_scan_and_records_custody(tmp_path, monkeypatch):
@@ -497,7 +497,7 @@ def test_main_runs_download_scan_and_records_custody(tmp_path, monkeypatch):
         == 0
     )
     findings = json.loads((output / "dl" / "findings.json").read_text())
-    assert findings["modules"]["module_b_disk"]["artifact_count"] == 1
+    assert findings["modules"]["module_b_disk"]["artifact_count"] == 0
     custody = json.loads((output / "dl" / "custody.json").read_text())
     entry = next(e for e in custody if e["action"] == "hashed_in_place")
     assert entry["artifact_path"] == str(marked.resolve())
@@ -586,7 +586,7 @@ def test_live_scan_correlates_against_metadata_window_extended_while_tor_runs(tm
         for h in downloads["internet_origin_files"]
     }
     assert flags == {"during.zip": True, "after_last_state_write.zip": True, "before.exe": False}
-    assert sum(a.artifact_type == "internet_origin_file" for a in result.artifacts) == 3
+    assert sum(a.artifact_type == "internet_origin_file" for a in result.artifacts) == 2
 
 
 def test_live_scan_window_ends_at_last_write_when_tor_had_exited(tmp_path):

@@ -188,22 +188,23 @@ def _carve_artifacts(report: dict) -> list[Artifact]:
 
 
 def _download_artifacts(scan: dict) -> list[Artifact]:
+    """One artifact per internet-origin file created while the Tor daemon was running.
+
+    Zone.Identifier is on every browser download and every file extracted from a
+    downloaded archive, so a whole-disk scan finds hundreds. Only files correlated to the
+    daemon window are findings; the full list stays in `details` as observations."""
     source = scan["volume_root"]
-    window = scan.get("tor_daemon_window")
+    window = scan.get("tor_daemon_window") or {}
     artifacts = []
     for hit in scan["internet_origin_files"]:
+        if hit.get("within_tor_daemon_window") is not True:
+            continue
         stamps = hit["timestamps"]
         created = stamps["created_utc"] or stamps["modified_utc"]
-        within = hit.get("within_tor_daemon_window")
-        if within is True:
-            correlation = (
-                f"created while the Tor daemon was running ({window['start_utc']} to "
-                f"{window['end_utc']}); network origin established, source URL not recoverable"
-            )
-        elif within is False:
-            correlation = "created outside the last recorded Tor daemon window"
-        else:
-            correlation = "no Tor daemon window available for correlation"
+        correlation = (
+            f"created while the Tor daemon was running ({window['start_utc']} to "
+            f"{window['end_utc']}); network origin established, source URL not recoverable"
+        )
         recycled = hit.get("recycle_bin")
         if recycled:
             deleted = f", deleted {recycled['deleted_utc']}" if recycled.get("deleted_utc") else ""
