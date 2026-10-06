@@ -69,7 +69,13 @@ def _resolve_from_manifest(evidence_dir: Path, manifest: dict) -> dict:
         return None
 
     registry = manifest.get("registry", {})
-    for key, flag in (("SYSTEM", "system"), ("NTUSER.DAT", "ntuser"), ("Amcache.hve", "amcache")):
+    for key, flag in (
+        ("SYSTEM", "system"),
+        ("NTUSER.DAT", "ntuser"),
+        ("Amcache.hve", "amcache"),
+        ("SOFTWARE", "software"),
+        ("UsrClass.dat", "usrclass"),
+    ):
         path = ok_path(registry.get(key))
         if path:
             resolved[flag] = path
@@ -124,6 +130,8 @@ def _resolve_by_globbing(evidence_dir: Path) -> dict:
         ("SYSTEM_*", "system"),
         ("NTUSER_*.DAT", "ntuser"),
         ("Amcache_*.hve", "amcache"),
+        ("SOFTWARE_*", "software"),
+        ("UsrClass_*.dat", "usrclass"),
     ):
         match = _latest([p for p in registry_dir.glob(pattern) if p.suffix != ".sha256"])
         if match:
@@ -168,11 +176,15 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         argv += ["--evidence-dir", str(args.evidence_dir)]
     if args.verbose:
         argv.append("--verbose")
+    if args.report_timezone:
+        argv += ["--report-timezone", args.report_timezone]
 
     overrides = {
         "ntuser": args.ntuser,
         "system": args.system,
         "amcache": args.amcache,
+        "software": args.software,
+        "usrclass": args.usrclass,
         "disk_profile": args.disk_profile,
         "tor_dir": args.tor_dir,
         "downloads_scan": args.downloads_scan,
@@ -183,6 +195,8 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         "ntuser": "--ntuser",
         "system": "--system",
         "amcache": "--amcache",
+        "software": "--software",
+        "usrclass": "--usrclass",
         "disk_profile": "--disk-profile",
         "tor_dir": "--tor-dir",
         "downloads_scan": "--downloads-scan",
@@ -225,10 +239,17 @@ def main(argv: list[str] | None = None) -> int:
         "layout); used both for auto-discovery and as findings.json provenance",
     )
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--report-timezone",
+        help="IANA zone name (e.g. Asia/Colombo) for the report's local-time display; "
+        "passed through to main.py. Omit to auto-detect this machine's own timezone",
+    )
 
     parser.add_argument("--ntuser", type=Path, help="Override auto-discovery")
     parser.add_argument("--system", type=Path, help="Override auto-discovery")
     parser.add_argument("--amcache", type=Path, help="Override auto-discovery")
+    parser.add_argument("--software", type=Path, help="Override auto-discovery")
+    parser.add_argument("--usrclass", type=Path, help="Override auto-discovery")
     parser.add_argument("--disk-profile", type=Path, help="Override auto-discovery")
     parser.add_argument("--tor-dir", type=Path, help="Override auto-discovery")
     parser.add_argument("--disk-image", type=Path, help="Raw image to carve (not auto-discovered)")

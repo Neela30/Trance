@@ -1,5 +1,6 @@
 from core.config import TranceConfig
 from modules import module_c_memory
+from modules.module_c_memory import analyzer
 
 
 def make_config(tmp_path):
@@ -25,6 +26,25 @@ def test_run_without_vol3_path_skips_process_extraction(tmp_path):
     assert result.status == "ok"
     assert "process_extraction" not in result.details
     assert result.details["dump"]["source_type"] == "full-memory"
+
+
+def test_run_unexpected_exception_from_analyze_degrades_to_error_not_a_crash(tmp_path, monkeypatch):
+    """Boundary hardening: run() used to catch only `except TranceError`, so any OTHER
+    exception type raised by analyze() (a single linear pass with no per-step isolation
+    of its own -- unlike Module A/B's named, independently-isolated extractors) would
+    escape this module's own boundary entirely. A clean "error" ModuleResult must come
+    back regardless of the exception type analyze() happens to raise."""
+
+    def _raise(*_args, **_kwargs):
+        raise ValueError("synthetic unexpected analyzer failure")
+
+    monkeypatch.setattr(analyzer, "analyze", _raise)
+
+    dump = make_dump(tmp_path, b"irrelevant")
+    result = module_c_memory.run(make_config(tmp_path), dump=dump, onion="target.onion")
+
+    assert result.status == "error"
+    assert "synthetic unexpected analyzer failure" in result.message
 
 
 def test_run_extraction_failure_falls_back_to_full_image(tmp_path):

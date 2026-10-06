@@ -19,7 +19,7 @@ Writes <output-dir>/{registry,memory,disk}/... and <output-dir>/
 acquire_manifest.json -- the contract analyze_evidence.py reads to resolve
 each artifact's path without the examiner having to type them all by hand.
 
-Registry (SYSTEM/NTUSER/Amcache) and the live memory dump need an elevated
+Registry (SYSTEM/NTUSER/Amcache/SOFTWARE/UsrClass.dat) and the live memory dump need an elevated
 session; the disk copy doesn't but runs alongside them here for one output
 folder. Each category is isolated -- one failing does not stop the others,
 same philosophy as every acquire.acquire_all() this wraps.

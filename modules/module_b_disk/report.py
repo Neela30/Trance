@@ -362,7 +362,11 @@ SECTIONS = (
 )
 
 
-def build_context(details: dict) -> dict:
+def build_context(details: dict, local_tz: str | None = None) -> dict:
+    # local_tz: unused for now -- accepted so root report.py can pass it to every
+    # module's build_context() uniformly. Module A's report.py (narrative.py) is the
+    # reference implementation for a plain-English section that uses it; add one here
+    # the same way when this module gets its own.
     sections = {}
     errors = {}
     notes = {}
