@@ -9,6 +9,7 @@ import json
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PureWindowsPath
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from analyze_evidence import resolve_evidence
 from main import CUSTODY_FILENAME
@@ -47,6 +48,7 @@ class AnalysisRequest:
     onion: str = ""
     host: str = ""
     username: str = ""
+    report_timezone: str = ""  # IANA zone name; blank = auto-detect this machine's own
     disk_image: str | None = None
     mount_image: bool = False  # mount disk_image read-only and analyse the volume
     carve_image: bool = False  # raw byte carve of disk_image
@@ -207,6 +209,12 @@ def validate(request: AnalysisRequest, inputs: dict) -> Issues:
         # would be silently ignored.
         errors.append("A process ID needs the process name too (e.g. firefox.exe).")
 
+    if request.report_timezone:
+        try:
+            ZoneInfo(request.report_timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            errors.append(f"Unknown timezone: {request.report_timezone}")
+
     if inputs.get("dump") and not (request.onion or request.host):
         warnings.append(
             "No onion address or host set: the memory section's targeted URLs will be empty."
@@ -287,4 +295,6 @@ def summary_rows(request: AnalysisRequest, inputs: dict) -> list[SummaryRow]:
         )
     else:
         rows.append(SummaryRow("Disk image", "off", "optional — add one under More options"))
+    if request.report_timezone:
+        rows.append(SummaryRow("Report timezone", "found", request.report_timezone))
     return rows

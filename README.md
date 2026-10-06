@@ -217,6 +217,7 @@ pyinstaller --onefile --name trance-analyze analyze_evidence.py \
     --hidden-import modules.module_a_registry \
     --hidden-import modules.module_b_disk \
     --hidden-import modules.module_c_memory \
+    --collect-all tzdata \
     --add-data "report_template.html.j2:." \
     --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
 
@@ -237,6 +238,15 @@ avoids Volatility3's dynamic plugin-loading being a PyInstaller risk).
 Neither exe needs a Python install on its machine; both are still
 `--onefile` binaries and may need AV allowlisting as noted above.
 
+`--collect-all tzdata` is required, not optional: Windows has no OS-level
+timezone database, so Python's `zoneinfo` (used by `--report-timezone`
+and the auto-detected local time in every report) depends entirely on
+the `tzdata` PyPI package's data files. PyInstaller's default import
+analysis only follows `.py` code, not `tzdata`'s ~600 non-code zone
+files, so without this flag every zone name — typed or auto-detected —
+silently fails to resolve in the built exe even though it worked fine
+from source.
+
 ### Desktop GUI (`trance-gui`)
 
 `gui_main.py` is a PySide6 desktop app over the same backend — Analyse
@@ -253,12 +263,13 @@ Kept out of `requirements.txt` on purpose — `requirements-gui.txt`
 exactly as lean as before:
 
 ```
-pip install -r requirements-gui.txt pyinstaller
+pip install -r requirements.txt -r requirements-gui.txt pyinstaller
 pyinstaller --onefile --name trance-gui gui_main.py \
     --hidden-import modules.module_a_registry \
     --hidden-import modules.module_b_disk \
     --hidden-import modules.module_c_memory \
     --collect-all PySide6 \
+    --collect-all tzdata \
     --add-data "report_template.html.j2:." \
     --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
 
@@ -266,7 +277,10 @@ trance-gui.exe --output-dir output
 ```
 
 (`;` instead of `:` for `--add-data` on Windows, same as `trance-analyze`.)
-`--collect-all PySide6` is needed for `QtWebEngine`'s own resources/
+The GUI needs `requirements.txt` too, not just `requirements-gui.txt` —
+it drives `main.py`'s full pipeline (regipy, jinja2, tzdata, ...), not
+just PySide6, and `--collect-all tzdata` is needed for the same reason
+noted under `trance-analyze` above. `--collect-all PySide6` is needed for `QtWebEngine`'s own resources/
 plugins. Expect a noticeably larger binary than the other two exes —
 QtWebEngine bundles a Chromium build (built and smoke-tested in this
 repo at ~290MB `--onefile`, vs. ~15MB for `trance-analyze`); this is the

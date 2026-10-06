@@ -60,6 +60,22 @@ class TestResolveLocalTz:
         assert result is None or isinstance(result, str)
 
 
+def test_tzdata_package_provides_a_real_zone_database():
+    # Windows has no OS-level tz database, so zoneinfo.ZoneInfo depends entirely on the
+    # `tzdata` PyPI package (requirements.txt) to resolve any zone name at all -- both
+    # --report-timezone (CLI and GUI) and auto-detected local time rely on it. If tzdata
+    # were missing, or a PyInstaller build failed to bundle its data files (see
+    # requirements.txt / README.md's trance-analyze and trance-gui build commands), every
+    # zone name would silently fail to resolve (narrative.format_dual_time() et al. treat
+    # a resolution failure the same as "no zone configured") instead of raising loudly --
+    # this test is the one place that catches tzdata going fully missing.
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo("Asia/Colombo")
+    assert zone is not None
+    assert datetime(2026, 1, 1, tzinfo=timezone.utc).astimezone(zone).utcoffset() is not None
+
+
 def _module_a_result_with_one_launch() -> ModuleResult:
     finding = {
         "description": (
