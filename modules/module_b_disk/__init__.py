@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import traceback
 from pathlib import Path
 
 from core.config import TranceConfig
+from core.exceptions import IntegrityError
 from core.schema import Artifact, ModuleResult
 
 MODULE_NAME = "module_b_disk"
@@ -344,6 +346,33 @@ def run(
     details: dict[str, dict] = {}
     artifacts: list[Artifact] = []
     errors = []
+    # Uniform {"artifact_type", "source", "reason", "traceback"} shape -- same as Module
+    # A's (see core.schema.ModuleResult's docstring) so root report.py's Module-status
+    # card renders either module's failures the same way. Each of the 6 sub-analyses
+    # below was already independently isolated before this change (one failing has
+    # never stopped the others); this only adds traceback capture and the shared
+    # warnings record feeding the status below.
+    warnings: list[dict] = []
+    # A hash-verification failure (IntegrityError) means that sub-analysis's evidence
+    # cannot be trusted at all -- the same "error" reservation Module A's __init__.py
+    # makes for a whole-hive IntegrityError. Every other exception is a single
+    # sub-analysis failing to run, which degrades to "partial" instead (one bad
+    # analysis must not hide every OTHER sub-analysis's real findings).
+    integrity_failures: list[str] = []
+
+    def _record_failure(source: str, label: str, exc: Exception) -> None:
+        errors.append(f"{label} failed")
+        if isinstance(exc, IntegrityError):
+            integrity_failures.append(label)
+        warnings.append(
+            {
+                "artifact_type": label,
+                "source": source,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            }
+        )
+
     if profile_dir:
         try:
             from modules.module_b_disk.recover_evidence import analyze_profile
@@ -354,7 +383,7 @@ def run(
                 errors.append("profile analysis incomplete")
         except Exception as exc:
             details["profile"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("profile analysis failed")
+            _record_failure("profile", "profile analysis", exc)
     if tor_dir:
         try:
             from modules.module_b_disk.analyze_tor_datadir import analyze_tor_directory
@@ -365,7 +394,7 @@ def run(
                 errors.append("Tor daemon analysis incomplete")
         except Exception as exc:
             details["tor_daemon"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("Tor daemon analysis failed")
+            _record_failure("tor_daemon", "Tor daemon analysis", exc)
     if disk_image:
         try:
             from modules.module_b_disk.carve_onion_strings import scan
@@ -377,7 +406,7 @@ def run(
             artifacts.extend(_carve_artifacts(details["raw_carve"]))
         except Exception as exc:
             details["raw_carve"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("raw-image carve failed")
+            _record_failure("raw_carve", "raw-image carve", exc)
     if downloads_scan and not disk_root:
         # A mounted volume (disk_root) is the stronger source when both exist; the live
         # scan is what trance-acquire.exe produces when there's no imaged volume.
@@ -390,7 +419,7 @@ def run(
             artifacts.extend(_download_artifacts(details["downloads"]))
         except Exception as exc:
             details["downloads"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("downloads scan analysis failed")
+            _record_failure("downloads", "downloads scan analysis", exc)
     if disk_root:
         try:
             from modules.module_b_disk.analyze_downloads import scan_volume
@@ -401,7 +430,7 @@ def run(
             artifacts.extend(_download_artifacts(details["downloads"]))
         except Exception as exc:
             details["downloads"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("volume download scan failed")
+            _record_failure("downloads", "volume download scan", exc)
         try:
             from modules.module_b_disk.analyze_memory_residue import carve_residue
 
@@ -409,7 +438,7 @@ def run(
             artifacts.extend(_residue_artifacts(details["memory_residue"]))
         except Exception as exc:
             details["memory_residue"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("memory residue carve failed")
+            _record_failure("memory_residue", "memory residue carve", exc)
         try:
             from modules.module_b_disk.analyze_ntfs_journal import analyze_ntfs
 
@@ -420,10 +449,16 @@ def run(
                 artifacts.extend(_ntfs_artifacts(details["ntfs"], window))
         except Exception as exc:
             details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("NTFS metadata analysis failed")
+            _record_failure("ntfs", "NTFS metadata analysis", exc)
+
+    details["warnings"] = warnings
+    # "error" only for an integrity (hash-verification) failure; "partial" for any other
+    # sub-analysis failure (some succeeded, some didn't); root report.py's presenter
+    # gate still treats "partial" as "show the full disk section", same as Module A.
+    status = "error" if integrity_failures else ("partial" if errors else "ok")
     return ModuleResult(
         module=MODULE_NAME,
-        status="error" if errors else "ok",
+        status=status,
         artifacts=artifacts,
         details=details,
         message="; ".join(errors) if errors else None,

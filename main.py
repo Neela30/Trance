@@ -84,7 +84,7 @@ def run_pipeline(
 
     findings = build_findings(config, results)
     findings_path = write_findings(findings, config.output_dir)
-    report_path = write_report(findings, config.output_dir)
+    report_path = write_report(findings, config.output_dir, config.report_timezone)
 
     custody = CustodyLog(config.output_dir / CUSTODY_FILENAME)
     disk_result = next((r for r in results if r.module == "module_b_disk"), None)
@@ -181,6 +181,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--verbose", action="store_true", help="Also print each module's full text summary"
     )
+    parser.add_argument(
+        "--report-timezone",
+        help="IANA zone name (e.g. Asia/Colombo) the report's plain-English section shows "
+        "local times in, alongside UTC. Omit to auto-detect this machine's own timezone",
+    )
 
     registry = parser.add_argument_group("module_a_registry")
     registry.add_argument(
@@ -190,6 +195,18 @@ def main(argv: list[str] | None = None) -> int:
         "--system", type=Path, help="Acquired SYSTEM hive (feeds ShimCache/AppCompatCache)"
     )
     registry.add_argument("--amcache", type=Path, help="Acquired Amcache.hve hive")
+    registry.add_argument(
+        "--software",
+        type=Path,
+        help="Acquired SOFTWARE hive (feeds ProfileList, Installed Programs, and Windows "
+        "version)",
+    )
+    registry.add_argument(
+        "--usrclass",
+        type=Path,
+        help="Acquired UsrClass.dat hive. Hashed/custody-logged but not yet analyzed "
+        "(Phase 1 of the Module A roadmap adds Shell Bags etc.)",
+    )
 
     disk = parser.add_argument_group("module_b_disk")
     disk.add_argument(
@@ -285,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=output_dir,
         evidence_dir=args.evidence_dir,
         verbose=args.verbose,
+        report_timezone=args.report_timezone,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -293,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
             "ntuser": args.ntuser,
             "system": args.system,
             "amcache": args.amcache,
+            "software": args.software,
+            "usrclass": args.usrclass,
         },
         "module_b_disk": {
             "profile_dir": args.disk_profile,

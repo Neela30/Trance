@@ -130,6 +130,7 @@ class AnalyseTab(QWidget):
         self._options.changed.connect(self._refresh_summary)
         self._host_field = self._options.target.host
         self._username_field = self._options.target.username
+        self._report_timezone_field = self._options.target.report_timezone
         content_layout.addWidget(self._options)
         content_layout.addLayout(self._build_run_area())
 
@@ -350,6 +351,7 @@ class AnalyseTab(QWidget):
             onion=self._onion_field.text().strip(),
             host=self._host_field.text().strip(),
             username=self._username_field.text().strip(),
+            report_timezone=self._report_timezone_field.text().strip(),
             **self._options.disk.values(),
             **self._options.memory.values(),
         )

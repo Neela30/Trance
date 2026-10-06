@@ -11,19 +11,43 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+from regipy.exceptions import RegistryKeyNotFoundException
 
 from core.config import TranceConfig
 from core.exceptions import IntegrityError, ParsingError
 from core.schema import Artifact
 from modules.module_a_registry.constants import (
     ARTIFACT_TYPE_AMCACHE,
+    ARTIFACT_TYPE_APP_SWITCHED,
+    ARTIFACT_TYPE_BAM,
+    ARTIFACT_TYPE_COMDLG32,
+    ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE,
+    ARTIFACT_TYPE_COMPUTERNAME,
+    ARTIFACT_TYPE_EMDMGMT,
+    ARTIFACT_TYPE_FIREFOX_LAUNCHER,
+    ARTIFACT_TYPE_INSTALLEDPROGRAMS,
+    ARTIFACT_TYPE_LASTVISITEDPIDLMRU,
+    ARTIFACT_TYPE_MOUNTEDDEVICES,
+    ARTIFACT_TYPE_MOUNTPOINTS2,
+    ARTIFACT_TYPE_MUICACHE,
+    ARTIFACT_TYPE_PORTABLEDEVICES,
     ARTIFACT_TYPE_RECENTDOCS,
+    ARTIFACT_TYPE_RUNMRU,
+    ARTIFACT_TYPE_SHELLBAGS,
     ARTIFACT_TYPE_SHIMCACHE,
+    ARTIFACT_TYPE_TIMEZONE,
+    ARTIFACT_TYPE_TYPEDPATHS,
+    ARTIFACT_TYPE_USBDEVICES,
+    ARTIFACT_TYPE_USBSTOR,
     ARTIFACT_TYPE_USER_ASSIST,
+    ARTIFACT_TYPE_WINDOWSVERSION,
+    ARTIFACT_TYPE_WORDWHEELQUERY,
     candidate_path,
+    harddiskvolume_number,
+    infer_drive_letters,
     is_tor_related,
 )
 from modules.module_a_registry.normalize import normalize_entry
@@ -67,6 +91,49 @@ class TestIsTorRelated:
         assert is_tor_related(r"C:\Users\bob\Downloads\torbrowser-install-win64.exe") is True
 
 
+class TestInferDriveLetters:
+    """\\Device\\HarddiskVolumeN -> drive letter, inferred from the SAME evidence set --
+    see constants.infer_drive_letters' docstring for why MountedDevices can't answer
+    this (it maps letters to volume GUIDs/disk signatures, never to the HarddiskVolumeN
+    ordinal) and same-evidence correlation is used instead."""
+
+    def test_unambiguous_match_is_inferred(self):
+        paths = {
+            r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe",
+            r"E:\Tor Browser\Browser\firefox.exe",
+        }
+        assert infer_drive_letters(paths) == {
+            r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe": "E"
+        }
+
+    def test_no_matching_drive_letter_path_is_left_unresolved(self):
+        paths = {r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe"}
+        assert infer_drive_letters(paths) == {}
+
+    def test_ambiguous_match_across_two_drive_letters_is_left_unresolved(self):
+        # Two different drives both happen to hold a file at the same relative path --
+        # genuinely ambiguous, must not guess either one.
+        paths = {
+            r"\Device\HarddiskVolume6\Tor Browser\Browser\firefox.exe",
+            r"E:\Tor Browser\Browser\firefox.exe",
+            r"F:\Tor Browser\Browser\firefox.exe",
+        }
+        assert infer_drive_letters(paths) == {}
+
+    def test_case_insensitive_suffix_match(self):
+        paths = {
+            r"\device\harddiskvolume6\Tor Browser\Browser\firefox.exe",
+            r"e:\TOR BROWSER\Browser\firefox.exe",
+        }
+        resolved = infer_drive_letters(paths)
+        assert resolved == {r"\device\harddiskvolume6\Tor Browser\Browser\firefox.exe": "E"}
+
+    def test_harddiskvolume_number_extracts_the_ordinal(self):
+        assert harddiskvolume_number(r"\Device\HarddiskVolume6\Tor Browser\firefox.exe") == "6"
+        assert harddiskvolume_number(r"E:\Tor Browser\firefox.exe") is None
+        assert harddiskvolume_number(None) is None
+
+
 class TestCandidatePath:
     def test_user_assist_uses_name_field(self):
         entry = {"name": r"C:\Tor Browser\Browser\firefox.exe", "run_counter": 3}
@@ -81,6 +148,27 @@ class TestCandidatePath:
 
     def test_missing_field_returns_none(self):
         assert candidate_path(ARTIFACT_TYPE_SHIMCACHE, {}) is None
+
+    def test_bam_uses_executable_field(self):
+        entry = {"executable": r"C:\Tor Browser\Browser\firefox.exe"}
+        assert candidate_path(ARTIFACT_TYPE_BAM, entry) == r"C:\Tor Browser\Browser\firefox.exe"
+        assert is_tor_related(candidate_path(ARTIFACT_TYPE_BAM, entry)) is True
+        assert (
+            is_tor_related(
+                candidate_path(
+                    ARTIFACT_TYPE_BAM, {"executable": r"C:\Windows\System32\notepad.exe"}
+                )
+            )
+            is False
+        )
+
+    def test_installed_programs_falls_back_across_field_names(self):
+        entry = {"InstallLocation": r"C:\Tor Browser"}
+        assert candidate_path(ARTIFACT_TYPE_INSTALLEDPROGRAMS, entry) == r"C:\Tor Browser"
+        assert (
+            candidate_path(ARTIFACT_TYPE_INSTALLEDPROGRAMS, {"DisplayName": "Tor Browser"})
+            == "Tor Browser"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -104,8 +192,11 @@ class TestNormalizeEntry:
         assert artifact.artifact_type == ARTIFACT_TYPE_USER_ASSIST
         assert artifact.source == "NTUSER.DAT"
         assert artifact.timestamp == "2026-07-14T14:15:22+00:00"
-        assert "HIGH" in artifact.description
+        assert artifact.confidence == "high"
+        assert "GUI-launched execution" in artifact.confidence_reason
+        assert artifact.category == "tor-direct"
         assert "run_count=14" in artifact.description
+        assert "Confidence" not in artifact.description  # moved to structured fields
 
     def test_shimcache_is_medium_confidence_and_says_not_confirmed_execution(self):
         entry = {
@@ -114,8 +205,8 @@ class TestNormalizeEntry:
         }
         artifact = normalize_entry(ARTIFACT_TYPE_SHIMCACHE, entry, "SYSTEM")
 
-        assert "MEDIUM" in artifact.description
-        assert "not confirmed execution" in artifact.description
+        assert artifact.confidence == "medium"
+        assert "not confirmed execution" in artifact.confidence_reason
 
     def test_amcache_is_high_confidence_and_includes_sha1(self):
         entry = {
@@ -126,7 +217,7 @@ class TestNormalizeEntry:
         }
         artifact = normalize_entry(ARTIFACT_TYPE_AMCACHE, entry, "Amcache.hve")
 
-        assert "HIGH" in artifact.description
+        assert artifact.confidence == "high"
         assert "sha1=b3f2e91a" in artifact.description
         assert artifact.timestamp == "2026-07-10T09:01:47+00:00"
 
@@ -138,12 +229,512 @@ class TestNormalizeEntry:
         }
         artifact = normalize_entry(ARTIFACT_TYPE_RECENTDOCS, entry, "NTUSER.DAT")
 
-        assert "LOW" in artifact.description
-        assert "corroborating evidence only" in artifact.description
+        assert artifact.confidence == "low"
+        assert "corroborating evidence only" in artifact.confidence_reason
+
+    def test_bam_is_high_confidence_and_includes_sid(self):
+        entry = {
+            "executable": r"\Device\HarddiskVolume3\Tor Browser\Browser\firefox.exe",
+            "timestamp": "2026-07-14T14:15:22+00:00",
+            "sid": "S-1-5-21-1-2-3-1001",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_BAM, entry, "SYSTEM")
+
+        assert artifact.confidence == "high"
+        assert "sid=S-1-5-21-1-2-3-1001" in artifact.description
+        assert artifact.timestamp == "2026-07-14T14:15:22+00:00"
+
+    def test_muicache_is_medium_confidence(self):
+        entry = {
+            "path": r"C:\Tor Browser\Browser\firefox.exe",
+            "display_name": "Tor Browser",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MUICACHE, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "medium"
+        assert "not confirmed execution" in artifact.confidence_reason
+
+    def test_muicache_renders_both_friendly_name_and_company_when_grouped(self):
+        """entry here is what group_muicache_values() produces -- the Vista+
+        FriendlyAppName/ApplicationCompany pair for one program merged into one record,
+        not two separate findings."""
+        entry = {
+            "path": r"E:\Tor Browser\Browser\firefox.exe",
+            "display_name": "Tor Browser",
+            "application_company": "Mozilla Corporation",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MUICACHE, entry, "NTUSER.DAT")
+
+        assert "'Tor Browser'" in artifact.description
+        assert "Mozilla Corporation" in artifact.description
+        assert r"E:\Tor Browser\Browser\firefox.exe" in artifact.description
+
+    def test_muicache_omits_company_clause_when_absent(self):
+        entry = {
+            "path": r"C:\Program Files\App\app.exe",
+            "display_name": "My App",
+            "application_company": None,
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MUICACHE, entry, "NTUSER.DAT")
+
+        assert "'My App'" in artifact.description
+        assert "Corporation" not in artifact.description
+
+    def test_runmru_is_low_confidence(self):
+        entry = {
+            "command": r"C:\Tor Browser\Browser\firefox.exe",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_RUNMRU, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "low"
+        assert "for 'C:\\Tor Browser\\Browser\\firefox.exe'" in artifact.description
+
+    def test_word_wheel_query_is_low_confidence(self):
+        entry = {"name": "tor browser", "last_write": "2026-07-14T00:00:00+00:00"}
+        artifact = normalize_entry(ARTIFACT_TYPE_WORDWHEELQUERY, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "low"
+        assert "for 'tor browser'" in artifact.description
+
+    def test_comdlg32_is_low_confidence(self):
+        entry = {
+            "path": r"C:\Tor Browser\Browser\firefox.exe",
+            "mru_type": "OpenSavePidlMRU",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_COMDLG32, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "low"
+        assert "for 'C:\\Tor Browser\\Browser\\firefox.exe'" in artifact.description
+
+    def test_installed_programs_is_high_confidence_and_includes_install_date(self):
+        entry = {
+            "DisplayName": "Tor Browser",
+            "Publisher": "The Tor Project",
+            "InstallDate": "20260714",
+            "timestamp": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_INSTALLEDPROGRAMS, entry, "SOFTWARE")
+
+        assert artifact.confidence == "high"
+        assert "InstallDate=20260714" in artifact.description
+        assert artifact.timestamp == "2026-07-14T00:00:00+00:00"
+
+    def test_computer_name_is_high_confidence_context(self):
+        # "name"/"timestamp" are ComputerNamePlugin's own entry keys (regipy), not
+        # the original Phase 0 custom-parser keys -- see normalize.py's
+        # _normalize_computer_name() docstring.
+        entry = {"name": "DESKTOP-ABC123", "timestamp": "2026-07-14T00:00:00+00:00"}
+        artifact = normalize_entry(ARTIFACT_TYPE_COMPUTERNAME, entry, "SYSTEM")
+
+        assert artifact.confidence == "high"
+        assert artifact.category == "context"
+        assert "DESKTOP-ABC123" in artifact.description
+
+    def test_time_zone_is_high_confidence_context(self):
+        # "TimeZoneKeyName"/"Bias" are TimezoneDataPlugin2's own entry keys (regipy,
+        # PascalCase) -- confirmed against a real SYSTEM hive; the previous snake_case
+        # fixture here matched neither the plugin nor normalize.py's old (also-wrong)
+        # lookup, so this real bug went undetected. See normalize.py's
+        # _normalize_time_zone() docstring.
+        entry = {"TimeZoneKeyName": "Sri Lanka Standard Time", "Bias": -330}
+        artifact = normalize_entry(ARTIFACT_TYPE_TIMEZONE, entry, "SYSTEM")
+
+        assert artifact.confidence == "high"
+        assert artifact.category == "context"
+        assert "Sri Lanka Standard Time" in artifact.description
+        assert "bias=-330" in artifact.description
+
+    def test_time_zone_unknown_when_fields_missing(self):
+        artifact = normalize_entry(ARTIFACT_TYPE_TIMEZONE, {}, "SYSTEM")
+        assert "<unknown>" in artifact.description
+
+    def test_windows_version_is_high_confidence_context(self):
+        # "ProductName"/"CurrentVersion"/"CurrentBuildNumber" are WinVersionPlugin's own
+        # entry keys (regipy, PascalCase) -- confirmed against a real SOFTWARE hive. Same
+        # real bug as the TimeZone fixture above: the old snake_case fixture never matched
+        # the plugin's real output.
+        entry = {
+            "ProductName": "Windows 11 Pro",
+            "CurrentVersion": "6.3",
+            "CurrentBuildNumber": "22631",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_WINDOWSVERSION, entry, "SOFTWARE")
+
+        assert artifact.confidence == "high"
+        assert artifact.category == "context"
+        assert "Windows 11 Pro" in artifact.description
+        assert "6.3" in artifact.description
+        assert "22631" in artifact.description
+
+    def test_windows_version_unknown_when_fields_missing(self):
+        artifact = normalize_entry(ARTIFACT_TYPE_WINDOWSVERSION, {}, "SOFTWARE")
+        assert "<unknown>" in artifact.description
+
+    def test_shellbags_is_medium_confidence_and_tor_direct(self):
+        entry = {"path": r"C:\Tor Browser\Browser", "last_write": "2026-07-14T00:00:00+00:00"}
+        artifact = normalize_entry(ARTIFACT_TYPE_SHELLBAGS, entry, "UsrClass.dat")
+
+        assert artifact.confidence == "medium"
+        assert artifact.category == "tor-direct"
+        assert r"C:\Tor Browser\Browser" in artifact.description
+
+    def test_compat_assistant_store_is_high_confidence_and_notes_best_effort_timestamp(self):
+        entry = {
+            "path": r"C:\Tor Browser\Browser\firefox.exe",
+            "flagged_timestamp": "2026-07-14T00:00:00+00:00",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "high"
+        assert "best-effort" in artifact.description
+
+    def test_compat_assistant_store_states_undecoded_timestamp_honestly(self):
+        entry = {"path": r"C:\Tor Browser\Browser\firefox.exe", "flagged_timestamp": None}
+        artifact = normalize_entry(ARTIFACT_TYPE_COMPAT_ASSISTANT_STORE, entry, "NTUSER.DAT")
+
+        assert "not decoded" in artifact.description
+
+    def test_firefox_launcher_is_high_confidence(self):
+        entry = {"path": r"E:\Tor Browser\Browser\firefox.exe"}
+        artifact = normalize_entry(ARTIFACT_TYPE_FIREFOX_LAUNCHER, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "high"
+        assert r"E:\Tor Browser\Browser\firefox.exe" in artifact.description
+
+    def test_app_switched_is_low_confidence(self):
+        entry = {"path": r"C:\Tor Browser\Browser\firefox.exe", "switch_count": 5}
+        artifact = normalize_entry(ARTIFACT_TYPE_APP_SWITCHED, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "low"
+        assert "switch_count=5" in artifact.description
+
+    def test_typed_paths_is_low_confidence(self):
+        entry = {"path": r"E:\Tor Browser", "last_write": "2026-07-14T00:00:00+00:00"}
+        artifact = normalize_entry(ARTIFACT_TYPE_TYPEDPATHS, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "low"
+        assert "for 'E:\\Tor Browser'" in artifact.description
+
+    def test_last_visited_pidl_mru_is_medium_confidence_and_names_the_program(self):
+        entry = {
+            "path": r"C:\Users\bob\Downloads",
+            "program": r"E:\Tor Browser\Browser\firefox.exe",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_LASTVISITEDPIDLMRU, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "medium"
+        assert "for 'C:\\Users\\bob\\Downloads'" in artifact.description
+        assert r"E:\Tor Browser\Browser\firefox.exe" in artifact.description
+
+    def test_usbstor_is_high_confidence_and_names_device_and_serial(self):
+        entry = {
+            "device_name": "SanDisk Cruzer Blade",
+            "manufacturer": "SanDisk",
+            "serial_number": "4C53000012345678&0",
+            "last_connected": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_USBSTOR, entry, "SYSTEM")
+
+        assert artifact.confidence == "high"
+        assert "SanDisk Cruzer Blade" in artifact.description
+        assert "manufacturer=SanDisk" in artifact.description
+        assert "serial=4C53000012345678&0" in artifact.description
+        assert artifact.timestamp == "2026-07-14T00:00:00+00:00"
+
+    def test_usbstor_missing_fields_fall_back_to_unknown(self):
+        entry = {}
+        artifact = normalize_entry(ARTIFACT_TYPE_USBSTOR, entry, "SYSTEM")
+
+        assert "manufacturer=unknown" in artifact.description
+        assert "serial=unknown" in artifact.description
+
+    def test_usb_devices_is_medium_confidence(self):
+        entry = {"friendly_name": "USB Keyboard", "vid": "046D", "pid": "C31C"}
+        artifact = normalize_entry(ARTIFACT_TYPE_USBDEVICES, entry, "SYSTEM")
+
+        assert artifact.confidence == "medium"
+        assert "USB Keyboard" in artifact.description
+        assert "vid=046D" in artifact.description
+        assert "pid=C31C" in artifact.description
+
+    def test_mounted_devices_is_high_confidence_and_decodes_mount_type(self):
+        entry = {
+            "mount_point": "E:",
+            "mount_type": "drive_letter",
+            "path": "_??_USBSTOR#Disk&Ven_SanDisk&Prod_Cruzer_Blade#4C53&0#{guid}",
+            "last_write": "2026-07-14T00:00:00+00:00",
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_MOUNTEDDEVICES, entry, "SYSTEM")
+
+        assert artifact.confidence == "high"
+        assert "entry 'E:'" in artifact.description
+        assert "mount_type=drive_letter" in artifact.description
+        assert "decoded=_??_USBSTOR#" in artifact.description
+
+    def test_mountpoints2_is_low_confidence(self):
+        entry = {"path": "{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}", "last_write": None}
+        artifact = normalize_entry(ARTIFACT_TYPE_MOUNTPOINTS2, entry, "NTUSER.DAT")
+
+        assert artifact.confidence == "low"
+        assert "entry '{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}'" in artifact.description
+
+    def test_emdmgmt_is_medium_confidence_and_best_effort_on_capacity(self):
+        entry = {"path": "SanDisk_Cruzer_Blade", "device_capacity": 8192}
+        artifact = normalize_entry(ARTIFACT_TYPE_EMDMGMT, entry, "SOFTWARE")
+
+        assert artifact.confidence == "medium"
+        assert "entry 'SanDisk_Cruzer_Blade'" in artifact.description
+        assert "device_capacity=8192" in artifact.description
+
+    def test_emdmgmt_missing_capacity_is_honest_not_a_guess(self):
+        entry = {"path": "SanDisk_Cruzer_Blade"}
+        artifact = normalize_entry(ARTIFACT_TYPE_EMDMGMT, entry, "SOFTWARE")
+
+        assert "device_capacity=unknown" in artifact.description
+
+    def test_portable_devices_is_low_confidence(self):
+        entry = {"friendly_name": "My Phone", "path": "5&abc123"}
+        artifact = normalize_entry(ARTIFACT_TYPE_PORTABLEDEVICES, entry, "SYSTEM")
+
+        assert artifact.confidence == "low"
+        assert "entry 'My Phone'" in artifact.description
 
     def test_unknown_artifact_type_raises(self):
         with pytest.raises(ValueError):
             normalize_entry("NotARealType", {}, "NTUSER.DAT")
+
+    def test_null_filetime_timestamp_becomes_none(self):
+        # A raw FILETIME of 0 (field never set) decodes to exactly the Windows FILETIME
+        # epoch -- a real date string, not an error, so nothing upstream would catch it.
+        entry = {
+            "name": r"C:\Tor Browser\Browser\firefox.exe",
+            "timestamp": "1601-01-01T00:00:00+00:00",
+            "run_counter": 0,
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_USER_ASSIST, entry, "NTUSER.DAT")
+
+        assert artifact.timestamp is None
+
+    def test_real_timestamp_near_but_not_at_filetime_epoch_is_kept(self):
+        entry = {
+            "name": r"C:\Tor Browser\Browser\firefox.exe",
+            "timestamp": "1601-01-02T00:00:00+00:00",
+            "run_counter": 1,
+        }
+        artifact = normalize_entry(ARTIFACT_TYPE_USER_ASSIST, entry, "NTUSER.DAT")
+
+        assert artifact.timestamp == "1601-01-02T00:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# extract_last_visited_pidl_mru() -- RegistryHive mocked out, same spirit as the removed
+# Phase 0 system_context.py tests (this is the one extractors.py function in Phase 1 that
+# genuinely needs to exercise hive-reading logic, unlike the thin regipy-plugin wrappers,
+# which the pipeline-level mocking below already covers).
+# ---------------------------------------------------------------------------
+
+
+def _fake_key(values: dict, last_modified: int = 0) -> MagicMock:
+    key = MagicMock()
+    key.get_value.side_effect = lambda name, *a, **k: values.get(name)
+    key.header.last_modified = last_modified
+    return key
+
+
+class TestLastVisitedPidlMru:
+    def test_pairs_program_name_with_decoded_folder(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_last_visited_pidl_mru
+
+        ntuser_path = tmp_path / "NTUSER.DAT"
+        ntuser_path.write_bytes(b"synthetic")
+
+        # Real shape: value NAME is the invoking program's full path; value DATA is a
+        # PIDL blob -- parse_pidl_mru_value() is regipy's own best-effort byte-scanner,
+        # not re-implemented here, so a plausible path-like byte sequence is enough.
+        program_value = MagicMock()
+        program_value.name = r"E:\Tor Browser\Browser\firefox.exe"
+        program_value.value = "C:\\Users\\bob\\Downloads".encode("utf-16-le")
+
+        mru_list_value = MagicMock()
+        mru_list_value.name = "MRUListEx"
+        mru_list_value.value = b"\x00\x00\x00\x00"
+
+        key = MagicMock()
+        key.header.last_modified = 0
+        key.iter_values.return_value = [mru_list_value, program_value]
+
+        fake_hive = MagicMock()
+        fake_hive.get_key.return_value = key
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_last_visited_pidl_mru(ntuser_path)
+
+        assert len(result) == 1
+        assert result[0]["program"] == r"E:\Tor Browser\Browser\firefox.exe"
+        assert result[0]["path"] == "C:\\Users\\bob\\Downloads"
+
+    def test_missing_key_returns_empty_list(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_last_visited_pidl_mru
+
+        ntuser_path = tmp_path / "NTUSER.DAT"
+        ntuser_path.write_bytes(b"synthetic")
+
+        fake_hive = MagicMock()
+        fake_hive.get_key.side_effect = RegistryKeyNotFoundException("missing")
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_last_visited_pidl_mru(ntuser_path)
+
+        assert result == []
+
+    def test_undecodable_value_is_skipped(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_last_visited_pidl_mru
+
+        ntuser_path = tmp_path / "NTUSER.DAT"
+        ntuser_path.write_bytes(b"synthetic")
+
+        unparseable_value = MagicMock()
+        unparseable_value.name = r"C:\unrelated.exe"
+        unparseable_value.value = b"\x01\x02"  # too short for parse_pidl_mru_value()
+
+        key = MagicMock()
+        key.header.last_modified = 0
+        key.iter_values.return_value = [unparseable_value]
+
+        fake_hive = MagicMock()
+        fake_hive.get_key.return_value = key
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_last_visited_pidl_mru(ntuser_path)
+
+        assert result == []
+
+
+class TestExtractMountedDevices:
+    """Deliberately does NOT use regipy's own MountedDevicesPlugin -- see
+    extract_mounted_devices()'s own docstring for the confirmed real-world bug this
+    reimplementation fixes (iter_values()'s default trim_values=True returns a hex
+    string, not bytes, for REG_BINARY data, so the plugin's own parse_device_data() call
+    is never reached). Fake values here supply real bytes via iter_values(trim_values=False),
+    exactly as the fix expects."""
+
+    def _fake_value(self, name: str, value: bytes) -> MagicMock:
+        v = MagicMock()
+        v.name = name
+        v.value = value
+        return v
+
+    def _fake_hive(self, values: list) -> MagicMock:
+        key = MagicMock()
+        key.header.last_modified = 0
+        key.iter_values.return_value = values
+        hive = MagicMock()
+        hive.hive_type = "system"
+        hive.get_key.return_value = key
+        return hive
+
+    def test_plain_usbstor_shaped_value_decodes_normally(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        usbstor_path = (
+            "_??_USBSTOR#Disk&Ven_SanDisk&Prod_Cruzer_Blade&Rev_1.00"
+            "#4C53000012345678&0#{53f5630d-b6bf-11d0-94f2-00a0c91efb8b}"
+        )
+        value = self._fake_value(r"\DosDevices\E:", usbstor_path.encode("utf-16-le"))
+        fake_hive = self._fake_hive([value])
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_mounted_devices(system_path)
+
+        assert len(result) == 1
+        assert result[0]["mount_type"] == "drive_letter"
+        assert result[0]["mount_point"] == "E:"
+        assert result[0]["path"] == usbstor_path
+        assert "dynamic_disk" not in result[0]
+
+    def test_dynamic_disk_identifier_is_flagged_not_mangled(self, tmp_path):
+        """Confirmed real shape: Windows Dynamic Disk volumes store "DMIO:ID:" + a
+        16-byte LDM object id -- parse_device_data() would otherwise try to UTF-16-decode
+        this into garbled text; it must not even be attempted."""
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        dynamic_disk_bytes = b"DMIO:ID:" + bytes(range(16))
+        value = self._fake_value(r"\DosDevices\C:", dynamic_disk_bytes)
+        fake_hive = self._fake_hive([value])
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_mounted_devices(system_path)
+
+        assert result[0]["dynamic_disk"] is True
+        assert "path" not in result[0]
+
+    def test_missing_key_returns_empty_list(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        fake_hive = MagicMock()
+        fake_hive.hive_type = "system"
+        fake_hive.get_key.side_effect = RegistryKeyNotFoundException("missing")
+
+        with patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive):
+            result = extract_mounted_devices(system_path)
+
+        assert result == []
+
+    def test_wrong_hive_type_raises_parsing_error(self, tmp_path):
+        from modules.module_a_registry.extractors import extract_mounted_devices
+
+        system_path = tmp_path / "SYSTEM"
+        system_path.write_bytes(b"synthetic")
+
+        fake_hive = MagicMock()
+        fake_hive.hive_type = "ntuser"
+
+        with (
+            patch("modules.module_a_registry.extractors.RegistryHive", return_value=fake_hive),
+            pytest.raises(ParsingError),
+        ):
+            extract_mounted_devices(system_path)
+
+
+class TestIsTorRelatedEntry:
+    def test_program_field_flags_entry_even_when_folder_path_does_not(self):
+        from modules.module_a_registry.constants import is_tor_related_entry
+
+        entry = {
+            "path": r"C:\Users\bob\Downloads",
+            "program": r"E:\Tor Browser\Browser\firefox.exe",
+        }
+        assert is_tor_related_entry(ARTIFACT_TYPE_LASTVISITEDPIDLMRU, entry) is True
+
+    def test_neither_field_tor_related_is_discarded(self):
+        from modules.module_a_registry.constants import is_tor_related_entry
+
+        entry = {"path": r"C:\Users\bob\Downloads", "program": r"C:\Windows\notepad.exe"}
+        assert is_tor_related_entry(ARTIFACT_TYPE_LASTVISITEDPIDLMRU, entry) is False
+
+    def test_path_field_alone_still_works_for_types_without_extra_fields(self):
+        from modules.module_a_registry.constants import is_tor_related_entry
+
+        # UserAssist's candidate_path() field is "name", not "path" -- confirming
+        # is_tor_related_entry() still behaves exactly like the plain
+        # is_tor_related(candidate_path(...)) check for a type with no additional fields.
+        entry = {"name": r"C:\Tor Browser\Browser\firefox.exe"}
+        assert is_tor_related_entry(ARTIFACT_TYPE_USER_ASSIST, entry) is True
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +820,362 @@ def _run_pipeline_with_mocks(tmp_path: Path, output_dir: Path):
     return result
 
 
+# ---------------------------------------------------------------------------
+# Real bug: summary said "executed 4 times" when the table showed one launch.
+# Root cause was two stacked problems in _update_stats()'s run_counter sum:
+# regipy returning each real entry twice, and a .lnk shortcut + the firefox.exe
+# it starts sharing one timestamp (one user action, counted as two). See
+# pipeline.py's _update_stats()/_build_summary() docstrings.
+# ---------------------------------------------------------------------------
+
+_DUPLICATED_LINKED_LAUNCH_ENTRIES = [
+    # firefox.exe, reported twice by regipy (identical entry) -- the same real launch.
+    {
+        "name": r"E:\Tor Browser\Browser\firefox.exe",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    {
+        "name": r"E:\Tor Browser\Browser\firefox.exe",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    # Tor Browser.lnk, also reported twice -- same exact timestamp as firefox.exe above:
+    # one user action (click the shortcut, which starts firefox.exe), two UserAssist GUIDs.
+    {
+        "name": r"E:\Tor Browser\Tor Browser.lnk",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    {
+        "name": r"E:\Tor Browser\Tor Browser.lnk",
+        "timestamp": "2026-09-03T04:41:53.211000+00:00",
+        "run_counter": 1,
+    },
+    # The installer: never actually launched (run_counter=0), null/epoch-zero timestamp --
+    # must not count as a launch at all.
+    {
+        "name": (
+            r"C:\Users\Admin\AppData\Local\Temp\MicrosoftEdgeDownloads\g\\"
+            r"tor-browser-windows-x86_64-portable-15.0.21.exe"
+        ),
+        "timestamp": "1601-01-01T00:00:00+00:00",
+        "run_counter": 0,
+    },
+    {
+        "name": (
+            r"C:\Users\Admin\AppData\Local\Temp\MicrosoftEdgeDownloads\g\\"
+            r"tor-browser-windows-x86_64-portable-15.0.21.exe"
+        ),
+        "timestamp": "1601-01-01T00:00:00+00:00",
+        "run_counter": 0,
+    },
+]
+
+
+class TestLaunchCounting:
+    def test_duplicates_and_linked_launch_count_as_one_launch(self, tmp_path):
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                return_value=_DUPLICATED_LINKED_LAUNCH_ENTRIES,
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        assert "launched 1 time" in result.summary
+        assert "launched 1 times" not in result.summary  # pluralization
+        assert "launched 2 times" not in result.summary
+        assert "launched 4 times" not in result.summary
+        assert "executed" not in result.summary
+
+    def test_distinct_timestamps_each_count_as_a_separate_launch(self, tmp_path):
+        entries = [
+            {
+                "name": r"E:\Tor Browser\Browser\firefox.exe",
+                "timestamp": "2026-09-03T04:41:53+00:00",
+                "run_counter": 1,
+            },
+            {
+                "name": r"E:\Tor Browser\Browser\firefox.exe",
+                "timestamp": "2026-09-05T10:00:00+00:00",
+                "run_counter": 2,
+            },
+        ]
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_user_assist", return_value=entries),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        assert "launched 2 times" in result.summary
+
+
+class TestSoftwareHiveIsOptional:
+    def test_runs_without_software_same_as_other_optional_hives(self, tmp_path):
+        """SOFTWARE is a fourth optional hive, same degrade-gracefully contract as
+        ntuser/system/amcache -- omitting it must not affect the other three."""
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                return_value=[
+                    {
+                        "name": r"E:\Tor Browser\Browser\firefox.exe",
+                        "timestamp": "2026-07-14T14:15:22+00:00",
+                        "run_counter": 1,
+                    }
+                ],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        assert len(result.findings) == 1
+        assert result.profiles == []
+        assert "launched 1 time" in result.summary
+
+    def test_software_hive_populates_installed_programs_and_profiles(self, tmp_path):
+        ntuser = tmp_path / "NTUSER.DAT"
+        software = tmp_path / "SOFTWARE"
+        for f in (ntuser, software):
+            f.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        profiles = [{"path": r"C:\Users\Admin", "sid": "S-1-5-21-1-2-3-1001", "last_write": None}]
+        installed = [
+            {
+                "DisplayName": "Tor Browser",
+                "timestamp": "2026-07-14T00:00:00+00:00",
+                "registry_path": r"Microsoft\Windows\CurrentVersion\Uninstall",
+            },
+            {
+                "DisplayName": "Totally Unrelated App",
+                "timestamp": "2026-07-14T00:00:00+00:00",
+                "registry_path": r"Microsoft\Windows\CurrentVersion\Uninstall",
+            },
+        ]
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_user_assist", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_installed_programs",
+                return_value=installed,
+            ),
+            patch("modules.module_a_registry.pipeline.extract_profiles", return_value=profiles),
+        ):
+            result = run_module_a(config, ntuser=ntuser, software=software)
+
+        assert len(result.findings) == 1  # only the Tor-related install, not the unrelated app
+        assert result.findings[0].artifact_type == ARTIFACT_TYPE_INSTALLEDPROGRAMS
+        assert result.profiles == profiles
+
+
+class TestContextGating:
+    """CATEGORY_CONTEXT findings (computer name/time zone/Windows version) are only kept
+    in the final output when the same run also has at least one CATEGORY_TOR_DIRECT
+    finding -- see pipeline.py's run_module_a() and constants.py's "Confidence /
+    category" section for why a bare machine fact isn't interesting on its own."""
+
+    def test_context_facts_included_when_a_tor_direct_finding_exists(self, tmp_path):
+        ntuser = tmp_path / "NTUSER.DAT"
+        system = tmp_path / "SYSTEM"
+        for f in (ntuser, system):
+            f.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                return_value=[
+                    {
+                        "name": r"C:\Tor Browser\Browser\firefox.exe",
+                        "timestamp": "2026-07-14T14:15:22+00:00",
+                        "run_counter": 1,
+                    }
+                ],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_shimcache", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_bam", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_computer_name",
+                return_value=[{"name": "DESKTOP-ABC123", "timestamp": None}],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_time_zone", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser, system=system)
+
+        types = {f.artifact_type for f in result.findings}
+        assert ARTIFACT_TYPE_COMPUTERNAME in types
+        computer_name_finding = next(
+            f for f in result.findings if f.artifact_type == ARTIFACT_TYPE_COMPUTERNAME
+        )
+        assert computer_name_finding.category == "context"
+
+    def test_context_facts_dropped_when_no_tor_direct_finding_exists(self, tmp_path):
+        system = tmp_path / "SYSTEM"
+        system.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_shimcache", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_bam", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_computer_name",
+                return_value=[{"name": "DESKTOP-ABC123", "timestamp": None}],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_time_zone", return_value=[]),
+        ):
+            result = run_module_a(config, system=system)
+
+        assert result.findings == []
+
+    def test_device_evidence_included_when_a_tor_direct_finding_exists(self, tmp_path):
+        """Phase 2's six device-evidence types get exactly the same gating treatment as
+        Phase 0's three machine-fact types above -- a bare USB history isn't interesting
+        on its own, only as context *for* a Tor finding."""
+        ntuser = tmp_path / "NTUSER.DAT"
+        system = tmp_path / "SYSTEM"
+        for f in (ntuser, system):
+            f.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                return_value=[
+                    {
+                        "name": r"C:\Tor Browser\Browser\firefox.exe",
+                        "timestamp": "2026-07-14T14:15:22+00:00",
+                        "run_counter": 1,
+                    }
+                ],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_shimcache", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_bam", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_computer_name", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_time_zone", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_usbstor",
+                return_value=[{"device_name": "SanDisk Cruzer Blade", "serial_number": "4C53"}],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_usb_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_mounted_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_portable_devices", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser, system=system)
+
+        types = {f.artifact_type for f in result.findings}
+        assert ARTIFACT_TYPE_USBSTOR in types
+        usbstor_finding = next(
+            f for f in result.findings if f.artifact_type == ARTIFACT_TYPE_USBSTOR
+        )
+        assert usbstor_finding.category == "context"
+
+    def test_device_evidence_dropped_when_no_tor_direct_finding_exists(self, tmp_path):
+        system = tmp_path / "SYSTEM"
+        system.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_shimcache", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_bam", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_computer_name", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_time_zone", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_usbstor",
+                return_value=[{"device_name": "SanDisk Cruzer Blade", "serial_number": "4C53"}],
+            ),
+            patch("modules.module_a_registry.pipeline.extract_usb_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_mounted_devices", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_portable_devices", return_value=[]),
+        ):
+            result = run_module_a(config, system=system)
+
+        assert result.findings == []
+
+
+class TestLastVisitedPidlMruFiltering:
+    """End-to-end confirmation that _process_hive() actually calls
+    is_tor_related_entry() (not the plain is_tor_related(candidate_path(...)) it
+    replaced) -- a LastVisitedPidlMRU entry whose folder alone gives no hint must still
+    survive when the paired program is Tor's firefox.exe, and must still be dropped when
+    neither field is Tor-related."""
+
+    def test_non_tor_folder_kept_when_program_is_tor_firefox(self, tmp_path):
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_user_assist", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_last_visited_pidl_mru",
+                return_value=[
+                    {
+                        "path": r"C:\Users\bob\Downloads",
+                        "program": r"E:\Tor Browser\Browser\firefox.exe",
+                        "last_write": "2026-07-14T00:00:00+00:00",
+                    }
+                ],
+            ),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        types = {f.artifact_type for f in result.findings}
+        assert ARTIFACT_TYPE_LASTVISITEDPIDLMRU in types
+
+    def test_discarded_when_neither_folder_nor_program_is_tor_related(self, tmp_path):
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch("modules.module_a_registry.pipeline.extract_user_assist", return_value=[]),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+            patch(
+                "modules.module_a_registry.pipeline.extract_last_visited_pidl_mru",
+                return_value=[
+                    {
+                        "path": r"C:\Users\bob\Downloads",
+                        "program": r"C:\Windows\notepad.exe",
+                        "last_write": "2026-07-14T00:00:00+00:00",
+                    }
+                ],
+            ),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        types = {f.artifact_type for f in result.findings}
+        assert ARTIFACT_TYPE_LASTVISITEDPIDLMRU not in types
+
+
 class TestPipelineIntegrity:
     def test_pre_and_post_parse_hashes_match_in_custody_log(self, tmp_path):
         output_dir = tmp_path / "out"
@@ -250,6 +1197,17 @@ class TestPipelineIntegrity:
             assert (
                 actions["ingest_pre_parse"] == actions["post_parse_verify"]
             ), f"Hash changed across parsing for {path} — read-only violation."
+
+    def test_summary_timestamps_are_human_readable_not_raw_isoformat(self, tmp_path):
+        output_dir = tmp_path / "out"
+        result = _run_pipeline_with_mocks(tmp_path, output_dir)
+
+        # Amcache mock timestamp is "2026-07-10T09:01:47+00:00" (install), UserAssist
+        # mock's later timestamp is "2026-07-14T14:15:22+00:00" (last run) -- both
+        # should read as "YYYY-MM-DD HH:MM:SS UTC", not the raw ISO +00:00 offset.
+        assert "2026-07-10 09:01:47 UTC" in result.summary
+        assert "2026-07-14 14:15:22 UTC" in result.summary
+        assert "+00:00" not in result.summary
 
     def test_only_tor_related_entries_survive_filtering(self, tmp_path):
         output_dir = tmp_path / "out"
@@ -316,6 +1274,36 @@ class TestPipelineIntegrity:
 
         assert any("boom" in e for e in result.errors)
 
+    def test_extraction_error_also_records_a_structured_warning_with_traceback(self, tmp_path):
+        """`errors` (short strings) and `warnings` (structured, with a full traceback)
+        describe the exact same failures -- additive, not a replacement; see
+        ModuleAResult's own docstring and __init__.py's run() for how `warnings` feeds
+        the report's Module-status card and Module A's own plain-English note."""
+        ntuser = tmp_path / "NTUSER.DAT"
+        ntuser.write_bytes(b"synthetic")
+        output_dir = tmp_path / "out"
+        config = TranceConfig(case_name="test-case", output_dir=output_dir)
+
+        with (
+            patch(
+                "modules.module_a_registry.pipeline.extract_user_assist",
+                side_effect=ParsingError("boom"),
+            ),
+            patch("modules.module_a_registry.pipeline.extract_recentdocs", return_value=[]),
+        ):
+            result = run_module_a(config, ntuser=ntuser)
+
+        # Other unmocked NTUSER extractors also fail against the synthetic fixture file
+        # (expected and harmless -- same as every other pipeline test using this fixture
+        # style); only the UserAssist warning, specifically, is asserted on here.
+        warning = next(
+            w for w in result.warnings if w["artifact_type"] == ARTIFACT_TYPE_USER_ASSIST
+        )
+        assert warning["hive"] == "NTUSER.DAT"
+        assert "boom" in warning["message"]
+        assert "ParsingError" in warning["traceback"]
+        assert "boom" in warning["traceback"]
+
 
 class TestPipelineRepeatability:
     def test_two_runs_produce_byte_identical_output(self, tmp_path):
@@ -345,4 +1333,4 @@ class TestPipelineRepeatability:
         assert isinstance(payload["findings"], list)
         assert isinstance(payload["summary"], str)
         assert "installed" in payload["summary"]
-        assert "executed" in payload["summary"]
+        assert "launched" in payload["summary"]

@@ -15,6 +15,19 @@ def test_walk_pruned_skips_listed_directory_names(tmp_path):
     assert kept in visited
 
 
+def test_walk_pruned_skips_appdata(tmp_path):
+    """AppData is where leftover test fixtures / app caches live, not where a human
+    deliberately places a Tor Browser install or a WinPMEM binary -- auto-discovery
+    picking up a stale pytest fixture named winpmem.exe under %TEMP% was a real bug."""
+    skipped = tmp_path / "AppData"
+    skipped.mkdir()
+    (skipped / "winpmem.exe").write_text("not a real winpmem binary")
+
+    visited = [current for current, _dirnames, _filenames in fs_scan.walk_pruned(tmp_path)]
+
+    assert skipped not in visited
+
+
 def test_walk_pruned_respects_max_depth(tmp_path):
     deep = tmp_path
     for _ in range(10):

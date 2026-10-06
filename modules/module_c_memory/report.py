@@ -284,8 +284,13 @@ def _vol3_context(details: dict) -> dict:
     }
 
 
-def build_context(details: dict) -> dict:
-    """Presentation context for the memory section of the case report."""
+def build_context(details: dict, local_tz: str | None = None) -> dict:
+    """Presentation context for the memory section of the case report.
+
+    local_tz: unused for now -- accepted so root report.py can pass it to every module's
+    build_context() uniformly. See modules/module_a_registry/narrative.py for the
+    reference plain-English-section implementation that uses it.
+    """
     site_map, assets = _site_map(details["targeted"]["urls"])
     events = _annotate_timeline(details["timeline"]["events"])
     return {

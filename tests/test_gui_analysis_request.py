@@ -150,6 +150,33 @@ def test_validate_warns_when_memory_has_no_target(tmp_path):
     assert any("targeted URLs will be empty" in w for w in issues.warnings)
 
 
+def test_validate_accepts_a_blank_or_valid_report_timezone(tmp_path):
+    dump = _file(tmp_path / "d.bin")
+    inputs = {"dump": dump}
+    assert validate(_request(tmp_path), inputs).errors == []
+    # A real IANA zone must validate successfully -- if tzdata (requirements.txt) were
+    # missing or not bundled by a PyInstaller build, ZoneInfo() would raise for every
+    # zone name, including this one, and block Run for a perfectly valid timezone.
+    valid = _request(tmp_path, report_timezone="Asia/Colombo")
+    assert validate(valid, inputs).errors == []
+
+
+def test_validate_rejects_an_unknown_report_timezone(tmp_path):
+    dump = _file(tmp_path / "d.bin")
+    bad = _request(tmp_path, report_timezone="Not/AZone")
+    issues = validate(bad, {"dump": dump})
+    assert any("Unknown timezone" in e for e in issues.errors)
+
+
+def test_summary_includes_the_report_timezone_when_set(tmp_path):
+    from gui.analysis_request import summary_rows
+
+    request = _request(tmp_path, report_timezone="Asia/Colombo")
+    rows = {row.label: row for row in summary_rows(request, {})}
+    assert rows["Report timezone"].detail == "Asia/Colombo"
+    assert "Report timezone" not in {row.label for row in summary_rows(_request(tmp_path), {})}
+
+
 def test_summary_rows_describe_what_will_be_analysed(tmp_path):
     from gui.analysis_request import display_path, summary_rows
 

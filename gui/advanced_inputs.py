@@ -262,6 +262,8 @@ class TargetPage(_Page):
         self.host.setPlaceholderText("e.g. 1.2.3.4:8080")
         self.username = QLineEdit(self)
         self.username.setPlaceholderText("e.g. admin")
+        self.report_timezone = QLineEdit(self)
+        self.report_timezone.setPlaceholderText("e.g. Asia/Colombo — blank uses this computer's")
         self.body.addLayout(
             labelled(
                 field_label("Host and port", self),
@@ -275,6 +277,15 @@ class TargetPage(_Page):
                 field_label("Username", self),
                 self.username,
                 "A known account name to highlight in recovered searches.",
+                self,
+            )
+        )
+        self.body.addLayout(
+            labelled(
+                field_label("Report timezone", self),
+                self.report_timezone,
+                "An IANA zone name the report's plain-English section shows local times "
+                "in, alongside UTC.",
                 self,
             )
         )

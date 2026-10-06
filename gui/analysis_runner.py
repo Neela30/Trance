@@ -75,6 +75,7 @@ def run(request_path: Path) -> int:
             case_name=request.case_name,
             output_dir=request.case_dir,
             evidence_dir=Path(request.evidence_dir) if request.evidence_dir else None,
+            report_timezone=request.report_timezone or None,
         )
         result = main.run_pipeline(
             config,

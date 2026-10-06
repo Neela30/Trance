@@ -23,6 +23,8 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
             "ntuser": _path("ntuser"),
             "system": _path("system"),
             "amcache": _path("amcache"),
+            "software": _path("software"),
+            "usrclass": _path("usrclass"),
         },
         "module_b_disk": {
             "profile_dir": _path("disk_profile"),
