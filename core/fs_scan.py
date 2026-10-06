@@ -48,11 +48,15 @@ def drive_search_roots() -> list[Path]:
 
 
 def walk_pruned(
-    root: Path, max_depth: int = DEFAULT_MAX_DEPTH
+    root: Path,
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    skip_dir_names: frozenset[str] | set[str] | None = None,
 ) -> Iterator[tuple[Path, list[str], list[str]]]:
     """Same contract as os.walk (mutate dirnames in place to prune further descent),
-    with SKIP_DIR_NAMES and max_depth already applied -- callers only need to handle
-    their own "found a match, stop descending here too" case."""
+    with skip_dir_names (default SKIP_DIR_NAMES) and max_depth already applied --
+    callers only need to handle their own "found a match, stop descending here too"
+    case."""
+    skip = SKIP_DIR_NAMES if skip_dir_names is None else skip_dir_names
     root = root.resolve()
     base_depth = len(root.parts)
     for dirpath, dirnames, filenames in os.walk(root):
@@ -60,7 +64,7 @@ def walk_pruned(
         if len(current.parts) - base_depth >= max_depth:
             dirnames[:] = []
             continue
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+        dirnames[:] = [d for d in dirnames if d not in skip]
         yield current, dirnames, filenames
 
 

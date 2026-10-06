@@ -225,3 +225,119 @@ def test_acquire_all_raises_when_auto_discovery_finds_nothing(tmp_path, monkeypa
 
     with pytest.raises(AcquisitionError, match="No Tor Browser installation found"):
         acquire.acquire_all(output_dir=tmp_path / "out")
+
+
+def _real_shutil_copy2():
+    import shutil
+
+    return shutil.copy2
+
+
+def test_copy_tor_datadir_skips_a_locked_file_and_keeps_its_metadata(tmp_path, monkeypatch):
+    # tor.exe holds `lock` locked while running: reading it raises PermissionError on
+    # Windows. That must not abort the rest of the copy (it used to: no hashes.sha256,
+    # no custody entries, onion-auth never copied).
+    src = tmp_path / "src"
+    (src / "onion-auth").mkdir(parents=True)
+    (src / "onion-auth" / "example.auth_private").write_bytes(b"cred")
+    for name in ("state", "lock", "torrc"):
+        (src / name).write_bytes(name.encode())
+    real_copy2 = _real_shutil_copy2()
+
+    def copy2(source, target, *args, **kwargs):
+        if source.name == "lock":
+            raise PermissionError(13, "Permission denied")
+        return real_copy2(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(acquire.shutil, "copy2", copy2)
+    result = acquire.copy_tor_datadir(src, tmp_path / "dest")
+
+    assert set(result["copied"]) == {"state", "torrc"}
+    assert "lock" in result["failed"]
+    assert result["onion_auth_copied"] == ["example.auth_private"]
+    assert result["metadata"]["lock"]["copied"] is False
+    assert result["metadata"]["lock"]["modified_utc"]
+    assert result["metadata"]["onion-auth/example.auth_private"]["copied"] is True
+
+
+def test_acquire_tor_datadir_preserves_source_timestamps_for_analysis(tmp_path, monkeypatch):
+    import json
+    import os
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("state", "lock"):
+        (src / name).write_bytes(name.encode())
+    written = 1_788_000_000  # 2026-08-29, well before "now"
+    os.utime(src / "lock", (written, written))
+    monkeypatch.setattr(acquire, "tor_daemon_running", lambda _src: True)
+    out = tmp_path / "out"
+    out.mkdir()
+    custody = acquire.CustodyLog(out / "c.json")
+
+    result = acquire.acquire_tor_datadir(src, out, custody)
+
+    metadata = json.loads((out / "tor_dir" / acquire.METADATA_FILENAME).read_text())
+    assert metadata["tor_running_at_capture"] is True
+    assert metadata["files"]["lock"]["modified_utc"].startswith("2026-08-29")
+    assert result["tor_running_at_capture"] is True
+    # The metadata file is covered by the hash manifest like every copied file.
+    assert verify_hashes(out / "tor_dir")[acquire.METADATA_FILENAME]["status"] == "match"
+
+
+def test_acquire_downloads_is_skipped_off_windows_without_explicit_roots(tmp_path, monkeypatch):
+    monkeypatch.setattr(acquire.sys, "platform", "linux")
+    custody = acquire.CustodyLog(tmp_path / "c.json")
+    assert acquire.acquire_downloads(tmp_path, custody)["status"] == "skipped"
+
+
+def test_scan_live_records_marked_files_and_skips_the_output_folder(tmp_path):
+    from modules.module_b_disk.acquire_downloads import scan_live
+
+    root = tmp_path / "drive"
+    (root / "Users" / "a" / "Downloads").mkdir(parents=True)
+    (root / "evidence").mkdir()
+    marked = root / "Users" / "a" / "Downloads" / "tool.zip"
+    unmarked = root / "Users" / "a" / "notes.txt"
+    own_output = root / "evidence" / "fullmem.raw"
+    for path in (marked, unmarked, own_output):
+        path.write_bytes(path.name.encode())
+    zone = b"[ZoneTransfer]\r\nZoneId=3\r\n"
+
+    def read_stream(path, stream):
+        return zone if path in (str(marked), str(own_output)) else None
+
+    report = scan_live([root], exclude=[root / "evidence"], read_stream=read_stream)
+
+    assert report["scan_method"] == "live_windows"
+    assert report["files_walked"] == 2
+    [hit] = report["internet_origin_files"]
+    assert hit["path"] == str(marked)
+    assert hit["zone_identifier"]["zone_id"] == 3
+    assert hit["timestamps"]["modified_utc"]
+    assert len(hit["sha256"]) == 64
+
+
+def test_dumper_acquire_returns_the_dump_path(tmp_path, monkeypatch):
+    # acquire_all records str(return value) in the manifest; it used to be None,
+    # so every manifest said "path": "None" for a successful live dump.
+    from modules.module_c_memory import dumper
+
+    class FakeProc:
+        pid = 4448
+
+        def memory_info(self):
+            return type("M", (), {"rss": 1024 * 1024})()
+
+    def fake_dump(pid, output_path):
+        output_path.write_bytes(b"memory")
+        return 1, 6
+
+    monkeypatch.setattr(dumper.sys, "platform", "win32")
+    monkeypatch.setattr(dumper, "find_largest_firefox", FakeProc)
+    monkeypatch.setattr(dumper, "dump_process_memory", fake_dump)
+
+    path = dumper.acquire(tmp_path)
+
+    assert path is not None and path.is_file()
+    assert path.name.startswith("firefox_4448_")

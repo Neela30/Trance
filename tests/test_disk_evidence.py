@@ -454,6 +454,7 @@ def test_daemon_window_uses_lock_and_newest_write():
     assert window == {
         "start_utc": "2026-09-02T19:00:00+00:00",
         "end_utc": "2026-09-02T20:30:00+00:00",
+        "end_basis": "last daemon write",
     }
 
 
@@ -489,6 +490,7 @@ def test_module_b_correlates_downloads_with_daemon_window(tmp_path, monkeypatch)
     assert downloads["tor_daemon_window"] == {
         "start_utc": start.isoformat(),
         "end_utc": end.isoformat(),
+        "end_basis": "last daemon write",
     }
     flags = {h["path"]: h["within_tor_daemon_window"] for h in downloads["internet_origin_files"]}
     assert flags == {"a.txt": True, "b.txt": False}
@@ -539,3 +541,108 @@ def test_main_runs_download_scan_and_records_custody(tmp_path, monkeypatch):
     assert entry["sha256"] == hashlib.sha256(b"f").hexdigest()
     with pytest.raises(SystemExit):
         pipeline_main(["--case", "x", "--output-dir", str(volume), "--disk-root", str(volume)])
+
+
+def _live_acquisition(tmp_path, running):
+    """A tor_dir as trance-acquire now writes it while tor.exe runs: `lock` could not
+    be copied, but its source timestamps are in filesystem_metadata.json."""
+    (tmp_path / "disk").mkdir()
+    tor_dir = tmp_path / "disk" / "tor_dir"
+    _create_tor_dir(tor_dir)
+    (tor_dir / "lock").unlink()
+    # Every copied file has its source timestamps recorded, as the acquire side writes.
+    files = {
+        path.relative_to(tor_dir).as_posix(): {
+            "modified_utc": "2026-09-02T19:05:00+00:00",
+            "copied": True,
+        }
+        for path in tor_dir.rglob("*")
+        if path.is_file()
+    }
+    files["lock"] = {"modified_utc": "2026-09-02T19:00:00+00:00", "copied": False}
+    files["state"] = {"modified_utc": "2026-09-02T20:30:00+00:00", "copied": True}
+    (tor_dir / "filesystem_metadata.json").write_text(
+        json.dumps(
+            {
+                "captured_at_utc": "2026-09-02T23:00:00+00:00",
+                "tor_running_at_capture": running,
+                "files": files,
+            }
+        )
+    )
+    downloads = tmp_path / "disk" / "downloads"
+    downloads.mkdir()
+    zone = {"zone_id": 3, "host_url": None, "referrer_url": None, "raw": ""}
+
+    def hit(name, created):
+        return {
+            "path": f"C:\\Users\\a\\Downloads\\{name}",
+            "size": 1,
+            "sha256": "0" * 64,
+            "zone_identifier": zone,
+            "timestamps": {"source": "win32_stat", "created_utc": created, "modified_utc": None},
+        }
+
+    scan = downloads / "zone_identifier_scan.json"
+    scan.write_text(
+        json.dumps(
+            {
+                "scan_method": "live_windows",
+                "volume_root": "C:\\",
+                "files_walked": 10,
+                "scan_seconds": 0.1,
+                "xattr_support": True,
+                "internet_origin_files": [
+                    hit("during.zip", "2026-09-02T19:30:00+00:00"),
+                    hit("after_last_state_write.zip", "2026-09-02T22:00:00+00:00"),
+                    hit("before.exe", "2026-08-01T10:00:00+00:00"),
+                ],
+            }
+        )
+    )
+    manifest(downloads, ["zone_identifier_scan.json"])
+    return tor_dir, scan
+
+
+def test_live_scan_correlates_against_metadata_window_extended_while_tor_runs(tmp_path):
+    tor_dir, scan = _live_acquisition(tmp_path, running=True)
+    result = run_disk_module(
+        TranceConfig("test", tmp_path / "out"), tor_dir=tor_dir, downloads_scan=scan
+    )
+    assert result.status == "ok", result.details
+    daemon = result.details["tor_daemon"]
+    assert daemon["daemon_start_utc"] == "2026-09-02T19:00:00+00:00"
+    downloads = result.details["downloads"]
+    assert downloads["tor_daemon_window"] == {
+        "start_utc": "2026-09-02T19:00:00+00:00",
+        "end_utc": "2026-09-02T23:00:00+00:00",
+        "end_basis": "capture time (tor.exe still running)",
+    }
+    flags = {
+        h["path"].split("\\")[-1]: h["within_tor_daemon_window"]
+        for h in downloads["internet_origin_files"]
+    }
+    assert flags == {"during.zip": True, "after_last_state_write.zip": True, "before.exe": False}
+    assert sum(a.artifact_type == "internet_origin_file" for a in result.artifacts) == 3
+
+
+def test_live_scan_window_ends_at_last_write_when_tor_had_exited(tmp_path):
+    tor_dir, scan = _live_acquisition(tmp_path, running=False)
+    result = run_disk_module(
+        TranceConfig("test", tmp_path / "out"), tor_dir=tor_dir, downloads_scan=scan
+    )
+    flags = {
+        h["path"].split("\\")[-1]: h["within_tor_daemon_window"]
+        for h in result.details["downloads"]["internet_origin_files"]
+    }
+    assert flags["after_last_state_write.zip"] is False
+
+
+def test_tampered_live_scan_is_rejected(tmp_path):
+    tor_dir, scan = _live_acquisition(tmp_path, running=True)
+    scan.write_text(scan.read_text().replace("during.zip", "other.zip"))
+    result = run_disk_module(
+        TranceConfig("test", tmp_path / "out"), tor_dir=tor_dir, downloads_scan=scan
+    )
+    assert result.status == "error"
+    assert "IntegrityError" in result.details["downloads"]["error"]

@@ -138,7 +138,7 @@ def dump_process_memory(pid: int, output_path: Path) -> tuple[int, int]:
     return region_count, total_bytes
 
 
-def acquire(output_dir: Path) -> None:
+def acquire(output_dir: Path) -> Path:
     if sys.platform != "win32":
         raise AcquisitionError("The memory dumper only runs on Windows.")
 
@@ -178,6 +178,7 @@ def acquire(output_dir: Path) -> None:
     print(f"[*] Dump:           {dump_path}")
     print(f"[*] Hash file:      {hash_path}")
     print(f"[*] Custody log:    {custody.log_path}")
+    return dump_path
 
 
 def main() -> None:

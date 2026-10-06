@@ -447,14 +447,34 @@ What follows describes the current state.
     Documents first, then every drive; skip-list of system dirs; depth ≤ 8). Several installs
     → picks the one whose `torrc` was modified most recently, records the others in
     `other_installations_found`.
-  - Plain file copy, **not VSS** — copying while Tor Browser runs can catch a sqlite db
-    mid-write.
-- **Analyze** (`__init__.py: run(config, profile_dir, tor_dir, disk_image, disk_root)`):
+  - Plain file copy (`shutil.copy2`), **not VSS** — copying while Tor Browser runs can catch a
+    sqlite db mid-write. Each file is copied independently: one that can't be read (the
+    running `tor.exe` keeps `lock` locked) goes under `failed` instead of aborting the rest.
+  - **Source timestamps**: every file's original created/modified/accessed times are read
+    *before* copying into `filesystem_metadata.json` next to the copy (hashed by the manifest).
+    Copies get fresh timestamps — on the target and again on every examiner-side `cp` — so
+    this file is the only record of when tor wrote them; `analyze_tor_datadir` prefers it.
+    `tor_dir`'s copy also records `tor_running_at_capture` (psutil).
+  - **Live downloads scan** (`acquire_downloads.py`, Windows only): walks every drive
+    (fs_scan skip-list **minus `$Recycle.Bin`**, depth ≤ 16, excluding the evidence output
+    folder) for files with a `:Zone.Identifier` stream; writes
+    `disk/downloads/zone_identifier_scan.json` in exactly `analyze_downloads.scan_volume()`'s
+    shape (marked files hashed in place, not copied). Hits inside the Recycle Bin get
+    `recycle_bin` = original path / deletion time / size from the matching `$I` file
+    (`analyze_downloads.recycle_bin_info()`, shared with the mounted-volume scan; handles
+    `$I` v1 and v2 and files inside deleted folders).
+- **Analyze** (`__init__.py: run(config, profile_dir, tor_dir, disk_image, disk_root,
+  downloads_scan)`):
   - `profile_dir` → `recover_evidence.analyze_profile()` on a verified disposable working copy
     (`evidence.working_copy()`); filters Tor Browser's shipped default bookmarks
     (`DEFAULT_BOOKMARK_URLS`). An inert profile is *expected* (permanent private browsing).
   - `tor_dir` → `analyze_tor_datadir.py`: guards used, circuits, consensus validity window,
     daemon start (`lock`), onion client-auth credentials.
+  - `downloads_scan` (live scan above; auto-resolved by `analyze_evidence`, so the GUI runs it
+    with no extra input) → hash-verified, then `correlate_downloads()` against
+    `daemon_window()`. The window is `lock` time → newest daemon write, extended to the
+    capture time when `tor_running_at_capture` (tor only rewrites `state` periodically).
+    `disk_root` takes precedence when both are given.
   - `disk_image` → `carve_onion_strings.py` raw byte carve (slow, optional).
   - `disk_root` (read-only ntfs-3g mount with `show_sys_files,streams_interface=windows`) →
     `analyze_downloads.py` (Zone.Identifier internet-origin files correlated to the daemon
@@ -463,7 +483,10 @@ What follows describes the current state.
     download renames → browser-family attribution, Tor file-activity timeline).
 - **Report**: dedicated presenter `modules/module_b_disk/report.py`.
 - Note: `acquire_all.py` never produces `--disk-image` or `--disk-root` inputs — those need a
-  separate imaging step (not implemented; see §8).
+  separate imaging step (not implemented; see §8). The downloads correlation no longer needs
+  them (live scan), but `$MFT`/`$UsnJrnl` and pagefile/hiberfil residue still do.
+- Known gap: any sub-step error (e.g. an incomplete profile) sets the whole module to
+  `error`, and the report then drops Module B's dedicated presenter for the generic table.
 
 ### Module C — memory (`modules/module_c_memory/`) — the most-developed module
 
@@ -551,13 +574,35 @@ ruff check . && black --check .
 - `main_window.py` — `QTabWidget`: **Analyse**, **Report**, **History**. Wires signals:
   analysis finished → load report + refresh history; history "view" → load report;
   history delete → clear report tab if it showed that case + refresh recent cases.
-- `analyse_tab.py` — 720px centered form: evidence folder (read-only, `NoFocus`, drag-and-drop,
-  dashed when empty), case name, collapsible targeting (onion/host/username), Run button,
-  progress bar, live status dot (`StatusIndicator`), bottom panel that shows **Recent cases**
-  when idle and a **Live log** while running.
-- `pipeline_worker.py` — `QThread` running `main.run_pipeline()`; captures the pipeline's
-  `print()` output via `contextlib.redirect_stdout` into a line-emitting stream → `log`
-  signal. (stdout redirect is process-global; safe only because one run at a time.)
+- **The GUI is the primary analysis interface** and covers every analysis-side CLI flag;
+  `main.py`/`analyze_evidence.py` stay as the engine and a scriptable fallback.
+  `trance-acquire.exe` stays CLI (it runs on the target).
+- `analyse_tab.py` — 720px centered, scrollable form: evidence folder (optional; read-only,
+  `NoFocus`, drag-and-drop), case name, and collapsible sections (`advanced_inputs.py`):
+  targeting; **Review detected inputs** (each auto-discovered input with Change…/reset —
+  the `--system/--ntuser/--amcache/--dump/--disk-profile/--tor-dir/--downloads-scan`
+  overrides); **disk image or mounted volume** (`--disk-image` carve, mount-from-the-app,
+  or an already-mounted `--disk-root`); **memory options** (`--source-type`, `--vol3-path`
+  auto-filled from PATH, `--vol3-extract-process/-pid`). Run becomes **Cancel** while
+  running. Bottom panel: **Recent cases** idle, **Live log** while running.
+- `analysis_request.py` (Qt-free) — `AnalysisRequest` dataclass = the form; `effective_inputs()`
+  merges `resolve_evidence()` with overrides; `validate()` mirrors `main.main()`'s rules plus
+  form-only ones (returns errors + warnings). JSON round-trip for the child process.
+- `analysis_runner.py` (Qt-free) — the analysis runs as a **child process** (`gui_main.py
+  --run-analysis <request.json>`; frozen: the same exe re-launches itself) so Cancel can stop
+  it; stdout carries log lines plus `@@TRANCE {json}` progress/result/error lines. Cancel
+  removes the case folder only if this run created it.
+- `mount_helper.py` (stdlib only, **runs as root via pkexec**, `gui_main.py --mount-helper` when
+  frozen) — validates the image (regular file; refuses VirtualBox *differencing* VDIs by
+  header type 4 at 0x4C), `qemu-nbd --read-only`, mounts the largest NTFS partition with
+  ntfs-3g `ro,show_sys_files,streams_interface=windows` under `/run/trance-mounts/`, then
+  waits: "unmount" on stdin **or stdin EOF** (GUI gone) unmounts and detaches. One password
+  prompt per run. Linux only (`processes.mount_support()` disables it elsewhere).
+  **Verified for real** by the user (2026-10-04, Linux/GNOME/Wayland, flattened VM `.vdi`).
+  Formats: raw, `.vdi`, `.vmdk`, `.vhd(x)`, `.qcow2` — **not E01** (would need `ewfmount`).
+- `processes.py` — Qt wrappers: `AnalysisProcess` (QProcess, signals, terminate→kill cancel)
+  and `MountSession`. Analyse tab order: mount → analyse with `disk_root=<mountpoint>` →
+  unmount → show result; also unmounts on failure/cancel/window close.
 - Progress bar: 0–100 with a `QTimer` easing toward the last real checkpoint (25/50/75/100).
   Honest limitation: there are only 4 real checkpoints; it's visual smoothing.
 - `report_tab.py` — `QWebEngineView` loading the existing `report.html` (paths must be
@@ -566,7 +611,8 @@ ruff check . && black --check .
   Sortable table with filter box, relative-time "Generated" column (ISO in tooltip), status
   chips painted by a `QStyledItemDelegate`, selection-gated View/Delete, Delete behind a
   confirmation dialog (`shutil.rmtree` of the case dir).
-- `history.py`, `pipeline_inputs.py` — **Qt-free** pure logic, unit-tested without PySide6.
+- `history.py`, `pipeline_inputs.py`, `analysis_request.py`, `analysis_runner.py`,
+  `mount_helper.py` — **Qt-free** pure logic, unit-tested without PySide6.
   Keep new logic Qt-free where possible; CI does not install PySide6.
 - `theme.qss` + `theme.py` — styling matching the report's CSS tokens (`--bg #14181b`,
   `--surface #1b2126`, `--accent #e2694f`, `--confirm #4fae84`, `--noise #c9a552`, …).
@@ -580,8 +626,10 @@ Qt gotchas already hit (don't rediscover them):
 - Row → data lookups must go through `item.data(UserRole)`, not a parallel Python list
   (breaks after sorting).
 - A read-only `QLineEdit` still takes focus by default (showed a permanent accent border).
-- The GUI has only been verified **offscreen** (`QT_QPA_PLATFORM=offscreen`) and visually by
-  the user on Linux; never on Windows.
+- The GUI has been verified **offscreen** (`QT_QPA_PLATFORM=offscreen`, incl. full and
+  cancelled runs) and by the user on Linux/Wayland (incl. the in-app mount); never on
+  Windows. On Wayland without GBM, QtWebEngine segfaulted on page load until `gui_main.py`
+  defaulted `QTWEBENGINE_CHROMIUM_FLAGS=--disable-gpu`.
 
 ---
 
@@ -702,6 +750,24 @@ workflow on large changes):
 - Only one Tor Browser install is acquired and the analyze side only accepts one
   profile/tor_dir pair end to end (acquire → manifest → `module_b_disk.run`).
 - No acquire step produces a disk image or the read-only mount `--disk-root` needs.
+- **Planned (agreed 2026-10-04, not built): NTFS metadata collection in trance-acquire.**
+  New `modules/module_b_disk/acquire_ntfs.py` (stdlib, Windows, admin) reads the raw volume
+  and exports `disk/ntfs/{MFT, UsnJrnl_J, pagefile.sys, swapfile.sys}` + `ntfs_metadata.json`
+  + `hashes.sha256`, so Module B's `$MFT`/`$UsnJrnl`/residue analysis runs without imaging.
+  Decisions: read `$MFT`/`$J` from a **VSS snapshot device** (reuse Module A's WMI create/
+  delete), **fall back to the live volume** and record which; `$MFT` via record 0's `$DATA`
+  runlist; `$J` via the `$UsnJrnl` record under `$Extend` (record 11, follow
+  `$ATTRIBUTE_LIST`), copying **allocated runs only** into a compact file (records are
+  self-describing; original offsets kept in metadata); **pagefile + swapfile on by default**
+  from the live volume (VSS excludes them) with a free-space check and `--skip-pagefile`,
+  hiberfil opt-in; volumes = **system drive + the Tor Browser install's drive**;
+  `--skip-ntfs`; manifest `disk.ntfs`. Analyze side: Module B `ntfs_dir` input →
+  `analyze_ntfs(mft=, usnjrnl=)` + `carve_residue(ntfs_dir)` (it globs by file name), hash-
+  verified, `disk_root` wins when both exist; auto-resolved for the GUI (checklist row +
+  Inputs override). Verify: unit tests for boot sector/runlist/attribute list/compaction;
+  byte-compare the reader's `$MFT` against ntfs-3g's `/mnt/win10/$MFT` on the flattened VM
+  image and reproduce the `--disk-root` run (7,535 Tor USN events, 3 `.part` downloads,
+  382 deleted Tor files); then a real VM run.
 
 ### P2 — smaller cleanups
 
@@ -710,9 +776,10 @@ workflow on large changes):
 - CI's `compileall` step skips `gui/`, `acquire_all.py`, `analyze_evidence.py`, `gui_main.py`.
 - `yara-python` is in requirements but unused; `volatility3` is only needed as the external
   `vol` CLI; `click` is only used by `modules/module_a_registry/cli.py`.
-- GUI: no cancel for a running analysis; can't pass `--vol3-path`, `--disk-root`,
-  `--disk-image` from the GUI; Recent Cases shows raw ISO timestamps (History uses relative
-  time); case-name validation is duplicated between `main.py` and `gui/analyse_tab.py`.
+- GUI: Recent Cases shows raw ISO timestamps (History uses relative time); case-name and
+  output checks exist in both `main.py` and `gui/analysis_request.validate()`. The in-app
+  mount needs pkexec + a polkit agent; it has only been run on GNOME (other desktops need
+  their own polkit agent running). E01 images can't be mounted from the app yet.
 - `output/` contains stale results from older code (e.g. `output/vm-run-*` predate Module A;
   `output/Test002` shows `host_anchoring.applied: false` although current code applies it for
   that input — verified with a synthetic dump). Don't treat old outputs as current behavior.

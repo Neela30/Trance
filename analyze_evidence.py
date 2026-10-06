@@ -24,6 +24,9 @@ import main as main_module
 
 # main.py's --source-type default; used when a manifest doesn't say otherwise.
 _DEFAULT_SOURCE_TYPE = "process"
+# modules/module_b_disk/acquire.py's DOWNLOADS_SCAN_FILENAME; not imported, so this
+# wrapper doesn't pull the acquire side in.
+DOWNLOADS_SCAN_FILENAME = "zone_identifier_scan.json"
 
 
 def _latest(paths: list[Path]) -> Path | None:
@@ -55,7 +58,13 @@ def _resolve_from_manifest(evidence_dir: Path, manifest: dict) -> dict:
     resolved: dict[str, str] = {}
 
     def ok_path(entry: object) -> str | None:
-        if isinstance(entry, dict) and entry.get("status") == "ok" and entry.get("path"):
+        # "None" is what trance-acquire builds before the dumper returned its path
+        # wrote into the manifest for a successful live dump.
+        if (
+            isinstance(entry, dict)
+            and entry.get("status") == "ok"
+            and entry.get("path") not in (None, "", "None")
+        ):
             return _rebase_onto(evidence_dir, entry["path"])
         return None
 
@@ -86,6 +95,23 @@ def _resolve_from_manifest(evidence_dir: Path, manifest: dict) -> dict:
         resolved["disk_profile"] = path
     if path := ok_path(disk.get("tor_dir")):
         resolved["tor_dir"] = path
+    if path := ok_path(disk.get("downloads")):
+        resolved["downloads_scan"] = path
+
+    # Fill gaps from this same folder's own files -- never from another acquisition:
+    # a step the manifest says succeeded but recorded no usable path for (older
+    # trance-acquire builds wrote "None" for the live dump), and the tor_dir/downloads
+    # outputs older manifests don't list, or list as "error" after a partial copy.
+    globbed = _resolve_by_globbing(evidence_dir)
+    memory_ok = any(
+        isinstance(e, dict) and e.get("status") == "ok" for e in (full_image, live_dump)
+    )
+    if "dump" not in resolved and memory_ok and "dump" in globbed:
+        resolved["dump"] = globbed["dump"]
+        resolved["source_type"] = globbed["source_type"]
+    for key in ("tor_dir", "downloads_scan"):
+        if key not in resolved and key in globbed:
+            resolved[key] = globbed[key]
 
     return resolved
 
@@ -129,6 +155,9 @@ def _resolve_by_globbing(evidence_dir: Path) -> dict:
     tor_dir = evidence_dir / "disk" / "tor_dir"
     if tor_dir.is_dir():
         resolved["tor_dir"] = str(tor_dir)
+    downloads_scan = evidence_dir / "disk" / "downloads" / DOWNLOADS_SCAN_FILENAME
+    if downloads_scan.is_file():
+        resolved["downloads_scan"] = str(downloads_scan)
 
     return resolved
 
@@ -158,6 +187,7 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         "usrclass": args.usrclass,
         "disk_profile": args.disk_profile,
         "tor_dir": args.tor_dir,
+        "downloads_scan": args.downloads_scan,
         "dump": args.dump,
         "source_type": args.source_type,
     }
@@ -169,6 +199,7 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         "usrclass": "--usrclass",
         "disk_profile": "--disk-profile",
         "tor_dir": "--tor-dir",
+        "downloads_scan": "--downloads-scan",
         "dump": "--dump",
         "source_type": "--source-type",
     }
@@ -228,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Root of a read-only mounted Windows volume for Zone.Identifier/NTFS-journal "
         "carving (not auto-discovered)",
     )
+    parser.add_argument("--downloads-scan", type=Path, help="Override auto-discovery")
     parser.add_argument("--dump", type=Path, help="Override auto-discovery")
     parser.add_argument("--source-type", choices=("process", "full-memory"), default=None)
 

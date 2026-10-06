@@ -32,6 +32,12 @@ class MainWindow(QMainWindow):
         self._history_tab.report_requested.connect(self._on_report_requested)
         self._history_tab.case_deleted.connect(self._on_case_deleted)
 
+    def closeEvent(self, event) -> None:
+        # Stop a running analysis and unmount any disk image before the window goes;
+        # the mount helper would also clean up on its own once our pipe closes.
+        self._analyse_tab.shutdown()
+        super().closeEvent(event)
+
     def _on_analysis_finished(self, result) -> None:
         self._report_tab.load_report(result.report_path)
         self._tabs.setCurrentWidget(self._report_tab)

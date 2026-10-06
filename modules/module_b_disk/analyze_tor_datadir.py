@@ -205,12 +205,23 @@ def _parse_tor_directory(directory: Path, source: Path) -> dict:
         ),
         "onion_auth": parse_onion_auth(directory / "onion-auth", files),
         "daemon_start_utc": (
-            _utc(directory / "lock", files.get("lock")) if (directory / "lock").exists() else None
+            _utc(directory / "lock", files.get("lock"))
+            if (directory / "lock").exists()
+            # A running tor.exe keeps `lock` locked, so acquisition records its
+            # timestamps without being able to copy it.
+            else (files.get("lock") or {}).get("modified_utc")
         ),
         "file_mtimes_utc": {
-            f.name: _utc(f, files.get(f.name))
-            for f in sorted(directory.iterdir())
-            if f.is_file() and f.name not in ("hashes.sha256", "filesystem_metadata.json")
+            **{
+                name: meta["modified_utc"]
+                for name, meta in files.items()
+                if "/" not in name and meta.get("copied") is False and meta.get("modified_utc")
+            },
+            **{
+                f.name: _utc(f, files.get(f.name))
+                for f in sorted(directory.iterdir())
+                if f.is_file() and f.name not in ("hashes.sha256", "filesystem_metadata.json")
+            },
         },
         "torrc": torrc.read_text(errors="replace") if torrc.exists() else None,
         "filesystem_metadata": filesystem_metadata,

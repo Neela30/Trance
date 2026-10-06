@@ -104,13 +104,26 @@ def run_pipeline(
                     )
                 )
         downloads = disk_result.details.get("downloads", {})
+        live_scan = downloads.get("scan_method") == "live_windows"
         for hit in downloads.get("internet_origin_files", []):
             custody.record(
                 CustodyEntry(
-                    artifact_path=str(Path(downloads["volume_root"]) / hit["path"]),
+                    # A live scan records absolute paths on the target; a mount scan
+                    # records them relative to the mounted volume root.
+                    artifact_path=(
+                        hit["path"]
+                        if live_scan
+                        else str(Path(downloads["volume_root"]) / hit["path"])
+                    ),
                     sha256=hit["sha256"],
                     action="hashed_in_place",
-                    notes="module_b_disk downloads; Zone.Identifier stream present on read-only mount",
+                    notes=(
+                        "module_b_disk downloads; Zone.Identifier stream present, hashed "
+                        "on the live target at acquisition"
+                        if live_scan
+                        else "module_b_disk downloads; Zone.Identifier stream present on "
+                        "read-only mount"
+                    ),
                 )
             )
         raw_carve = disk_result.details.get("raw_carve", {})
@@ -211,6 +224,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Root of the read-only mounted Windows volume (ntfs-3g); walked in full for "
         "files carrying a Zone.Identifier stream and correlated against the Tor daemon window",
     )
+    disk.add_argument(
+        "--downloads-scan",
+        type=Path,
+        help="Live Zone.Identifier scan written by trance-acquire (disk/downloads/"
+        "zone_identifier_scan.json); correlated against the Tor daemon window like "
+        "--disk-root, which takes precedence when both are given",
+    )
 
     memory = parser.add_argument_group("module_c_memory")
     memory.add_argument(
@@ -299,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             "tor_dir": args.tor_dir,
             "disk_image": args.disk_image,
             "disk_root": args.disk_root,
+            "downloads_scan": args.downloads_scan,
         },
         "module_c_memory": {
             "dump": args.dump,

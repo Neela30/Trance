@@ -11,7 +11,8 @@ from pathlib import Path
 def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username: str) -> dict:
     """Same shape main.py's argparse builds -- see main.py's module_kwargs dict -- just
     sourced from analyze_evidence.resolve_evidence()'s output plus the GUI's targeting
-    fields, instead of parsed CLI flags."""
+    fields, instead of parsed CLI flags. `resolved` may also carry the inputs that are
+    never auto-discovered (disk_image, disk_root, vol3_*); see gui.analysis_request."""
 
     def _path(key: str) -> Path | None:
         value = resolved.get(key)
@@ -28,8 +29,9 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
         "module_b_disk": {
             "profile_dir": _path("disk_profile"),
             "tor_dir": _path("tor_dir"),
-            "disk_image": None,
-            "disk_root": None,
+            "disk_image": _path("disk_image"),
+            "disk_root": _path("disk_root"),
+            "downloads_scan": _path("downloads_scan"),
         },
         "module_c_memory": {
             "dump": _path("dump"),
@@ -37,8 +39,8 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
             "host": host or None,
             "username": username or None,
             "source_type": resolved.get("source_type", "process"),
-            "vol3_path": None,
-            "vol3_extract_process": None,
-            "vol3_extract_pid": None,
+            "vol3_path": resolved.get("vol3_path") or None,
+            "vol3_extract_process": resolved.get("vol3_extract_process") or None,
+            "vol3_extract_pid": resolved.get("vol3_extract_pid"),
         },
     }
