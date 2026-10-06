@@ -649,10 +649,16 @@ pyinstaller --onefile --name trance-acquire acquire_all.py
 pyinstaller --onefile --name trance-analyze analyze_evidence.py \
   --hidden-import modules.module_a_registry --hidden-import modules.module_b_disk \
   --hidden-import modules.module_c_memory \
+  --collect-all tzdata \
   --add-data "report_template.html.j2:." \
   --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
 # trance-gui: same flags as trance-analyze plus --collect-all PySide6, entry gui_main.py
 ```
+`--collect-all tzdata` is required on both trance-analyze and trance-gui: Windows has no
+OS-level tz database, so `zoneinfo` (report-timezone display, both CLI and GUI) depends
+entirely on the `tzdata` package's data files, which PyInstaller's default import analysis
+does not follow (they're not `.py` modules). Without it every zone name silently fails to
+resolve in the built exe even though it works fine from source.
 PyInstaller never cross-compiles: Windows exes must be built on Windows. `*.spec`, `build/`,
 `dist/` are gitignored.
 

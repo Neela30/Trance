@@ -53,7 +53,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import AcquisitionError
@@ -275,7 +275,11 @@ def _resolve_target_user(ntuser_user: str | None) -> str:
         return ntuser_user
     userprofile = os.environ.get("USERPROFILE")
     if userprofile:
-        name = Path(userprofile).name
+        # USERPROFILE is always a Windows-style path regardless of the host platform
+        # running this code (tests monkeypatch it on Linux CI) -- PureWindowsPath parses
+        # it consistently everywhere; a plain Path here would treat the whole backslash
+        # string as one opaque component on a POSIX host.
+        name = PureWindowsPath(userprofile).name
         if name:
             return name
     try:

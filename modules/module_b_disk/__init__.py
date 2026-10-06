@@ -8,6 +8,7 @@ import traceback
 from pathlib import Path
 
 from core.config import TranceConfig
+from core.exceptions import IntegrityError
 from core.schema import Artifact, ModuleResult
 
 MODULE_NAME = "module_b_disk"
@@ -349,11 +350,19 @@ def run(
     # card renders either module's failures the same way. Each of the 6 sub-analyses
     # below was already independently isolated before this change (one failing has
     # never stopped the others); this only adds traceback capture and the shared
-    # warnings record feeding the "partial" status below.
+    # warnings record feeding the status below.
     warnings: list[dict] = []
+    # A hash-verification failure (IntegrityError) means that sub-analysis's evidence
+    # cannot be trusted at all -- the same "error" reservation Module A's __init__.py
+    # makes for a whole-hive IntegrityError. Every other exception is a single
+    # sub-analysis failing to run, which degrades to "partial" instead (one bad
+    # analysis must not hide every OTHER sub-analysis's real findings).
+    integrity_failures: list[str] = []
 
     def _record_failure(source: str, label: str, exc: Exception) -> None:
         errors.append(f"{label} failed")
+        if isinstance(exc, IntegrityError):
+            integrity_failures.append(label)
         warnings.append(
             {
                 "artifact_type": label,
@@ -442,13 +451,13 @@ def run(
             _record_failure("ntfs", "NTFS metadata analysis", exc)
 
     details["warnings"] = warnings
-    # "partial": some sub-analyses failed, others (or their already-collected artifacts)
-    # didn't -- distinct from "error", which Module B doesn't currently raise at all
-    # (every sub-analysis is already independently isolated above); kept as a status
-    # root report.py's presenter gate still treats as "show the full disk section".
+    # "error" only for an integrity (hash-verification) failure; "partial" for any other
+    # sub-analysis failure (some succeeded, some didn't); root report.py's presenter
+    # gate still treats "partial" as "show the full disk section", same as Module A.
+    status = "error" if integrity_failures else ("partial" if errors else "ok")
     return ModuleResult(
         module=MODULE_NAME,
-        status="partial" if errors else "ok",
+        status=status,
         artifacts=artifacts,
         details=details,
         message="; ".join(errors) if errors else None,
