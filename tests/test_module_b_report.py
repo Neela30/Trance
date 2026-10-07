@@ -308,6 +308,18 @@ def _residue_and_ntfs_details():
             "resident_onion_strings": [
                 {"path": "ONION_IN.TXT", "deleted": False, "onion_addresses": ["d" * 56 + ".onion"]}
             ],
+            "resident_auth_credentials": [
+                {
+                    "path": "Tor Browser\\onion-auth\\" + "a" * 56 + ".auth_private",
+                    "record": 80,
+                    "deleted": True,
+                    "onion_address": "a" * 56 + ".onion",
+                    "x25519_private_key": "b" * 52,
+                    "loadable_by_tor": True,
+                    "created_utc": "2026-09-19T07:46:00+00:00",
+                    "modified_utc": "2026-09-19T07:46:00+00:00",
+                }
+            ],
             "deleted_tor_files": [{"path": "Tor Browser\\state", "modified_utc": None}],
         },
         "usnjrnl": {
@@ -347,6 +359,11 @@ def test_residue_and_ntfs_context():
     assert ntfs["addresses"][0]["deleted"] is True
     assert ntfs["window"]["events"] == 2
     assert ntfs["events"][0]["reasons"] == "data extend, close"
+    [cred] = ntfs["resident_credentials"]
+    assert cred["address"] == "a" * 56 + ".onion"
+    assert cred["deleted"] is True and cred["loadable_by_tor"] is True
+    assert cred["record"] == 80
+    assert "x25519_private_key" not in cred
 
 
 def test_ntfs_unavailable_is_a_note_not_an_error():

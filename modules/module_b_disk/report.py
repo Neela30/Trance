@@ -300,7 +300,9 @@ def _ntfs_context(ntfs: dict) -> dict:
                 "sources": v["sources"],
                 "deleted": v["deleted"],
                 "paths": v.get("paths", []),
-                "filename_evidence": bool(set(v["sources"]) & {"mft", "usnjrnl"}),
+                "filename_evidence": bool(
+                    set(v["sources"]) & {"mft", "usnjrnl", "mft_resident_credential"}
+                ),
             }
             for a, v in ntfs.get("onion_addresses", {}).items()
         ],
@@ -317,6 +319,17 @@ def _ntfs_context(ntfs: dict) -> dict:
         "resident_onion_files": [
             {"path": r["path"], "deleted": r["deleted"], "addresses": r["onion_addresses"]}
             for r in mft.get("resident_onion_strings", [])
+        ],
+        "resident_credentials": [
+            {
+                "address": c["onion_address"],
+                "path": c["path"],
+                "record": c["record"],
+                "deleted": c["deleted"],
+                "loadable_by_tor": c["loadable_by_tor"],
+                "created": _iso(c.get("created_utc")),
+            }
+            for c in mft.get("resident_auth_credentials", [])
         ],
         "deleted_tor_files": [
             {"path": d["path"], "modified": _iso(d.get("modified_utc"))}

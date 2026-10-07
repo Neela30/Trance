@@ -735,6 +735,20 @@
         </tbody>
       </table>
     </div>
+    {% if disk.ntfs.resident_credentials %}
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Client-auth credentials recovered from the MFT</h3><span class="count">{{ disk.ntfs.resident_credentials|length }} — file small enough to be stored inside its MFT record</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Address</th><th>File</th><th>MFT record</th><th>Created (NTFS)</th><th>File status</th></tr></thead>
+        <tbody>
+          {% for c in disk.ntfs.resident_credentials %}
+          <tr><td class="val">{{ c.address }}</td><td class="val">{{ c.path }}{% if not c.loadable_by_tor %} <span class="chip low">not loadable by tor</span>{% endif %}</td><td class="mono">{{ c.record }}</td><td class="mono">{{ c.created or "—" }}</td><td>{% if c.deleted %}<span class="chip low">deleted</span>{% else %}<span class="chip ok">present</span>{% endif %}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="margin-top:8px;">The full credential (address and key) survives in the MFT record until Windows reuses that record, even after the file or the whole Tor Browser folder is deleted. A credential shows the hidden service was configured for access; on its own it does not prove a visit. Tor only loads files whose name ends exactly in <span class="mono">.auth_private</span>.</p>
+    {% endif %}
     {% if disk.ntfs.resident_onion_files %}
     <p class="note" style="margin-top:8px;">Addresses found inside small files stored in the MFT itself: {% for r in disk.ntfs.resident_onion_files %}<span class="mono">{{ r.path }}</span>{{ " (deleted)" if r.deleted }}{{ "; " if not loop.last }}{% endfor %} — check whether these are the examiner's own transfer files before counting them as browsing evidence.</p>
     {% endif %}

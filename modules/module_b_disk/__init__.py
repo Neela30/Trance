@@ -274,6 +274,24 @@ def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
                 "verify this is not an examiner transfer file before treating it as evidence"
             )
         artifacts.append(Artifact(MODULE_NAME, "ntfs_onion_address", source, description))
+    for cred in ntfs.get("mft", {}).get("resident_auth_credentials", []):
+        state = "deleted file" if cred["deleted"] else "file"
+        loadable = (
+            ""
+            if cred["loadable_by_tor"]
+            else "; filename does not end in .auth_private, so tor never loaded it"
+        )
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "ntfs_onion_client_auth",
+                source,
+                f"Client credential for {cred['onion_address']} recovered from the content of "
+                f"{state} {cred['path']} ($MFT record {cred['record']}){loadable}; "
+                "configuration, not proof of a visit",
+                timestamp=cred.get("created_utc"),
+            )
+        )
     for stream in ntfs.get("mft", {}).get("zone_identifier_streams", []):
         if not stream["deleted"]:
             continue

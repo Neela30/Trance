@@ -7,6 +7,9 @@ did to disk, independent of what those programs chose to persist:
                 small (resident) contents survive until the record is reused.
                 Zone.Identifier streams are resident, so a download's mark-of-
                 the-web is recoverable here even after the file was removed.
+                So is a client-auth credential: an .auth_private file is ~130
+                bytes, so its whole content (bare address + x25519 key) lives in
+                the record and outlives deleting the Tor Browser folder.
   $UsnJrnl:$J   the change journal: a timestamped log of every create, write,
                 rename, stream change and delete, by name. tor writes client-auth
                 credentials as <onion>.auth_private (via a .tmp rename) and the
@@ -39,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from modules.module_b_disk.analyze_downloads import parse_zone_identifier
-from modules.module_b_disk.carve_onion_strings import ONION_RE
+from modules.module_b_disk.carve_onion_strings import AUTH_CRED_RE, ONION_RE
 from modules.module_b_disk.onion import is_v3_onion
 
 MFT_RECORD_SIZE = 1024
@@ -236,6 +239,7 @@ def analyze_mft_records(records: dict[int, dict]) -> dict:
     onion_files = []
     zone_streams = []
     resident_onions = []
+    resident_creds = []
     deleted_tor = []
     for number, entry in records.items():
         name = entry["name"]
@@ -288,6 +292,28 @@ def analyze_mft_records(records: dict[int, dict]) -> dict:
                         "onion_addresses": found,
                     }
                 )
+            # Credential files store the address bare (no ".onion"), so ONION_RE above
+            # never sees them.
+            for m in AUTH_CRED_RE.finditer(data):
+                address = m.group(1).decode().lower()
+                if not is_v3_onion(address):
+                    continue
+                resident_creds.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "record": number,
+                        "deleted": deleted,
+                        "onion_address": address + ".onion",
+                        "x25519_private_key": m.group(2).decode(),
+                        # tor only loads files ending exactly in ".auth_private"; any other
+                        # name (e.g. a hand-made "key.auth_private.txt") was never used by
+                        # tor -- same rule analyze_tor_datadir applies to live files.
+                        "loadable_by_tor": name.lower().endswith(".auth_private"),
+                        "created_utc": entry["created_utc"] or entry["fn_created_utc"],
+                        "modified_utc": entry["modified_utc"],
+                    }
+                )
         if deleted and _is_tor_related(name, path):
             deleted_tor.append(
                 {
@@ -303,6 +329,7 @@ def analyze_mft_records(records: dict[int, dict]) -> dict:
         "onion_filenames": onion_files,
         "zone_identifier_streams": zone_streams,
         "resident_onion_strings": resident_onions,
+        "resident_auth_credentials": resident_creds,
         "deleted_tor_files": deleted_tor[:MAX_EVENTS],
     }
 
@@ -540,6 +567,11 @@ def analyze_ntfs(
             found = entry(address)
             found["sources"].add("mft_resident_data")
             found["paths"].append(item["path"])
+    for item in report.get("mft", {}).get("resident_auth_credentials", []):
+        found = entry(item["onion_address"])
+        found["sources"].add("mft_resident_credential")
+        found["deleted"] = found["deleted"] or item["deleted"]
+        found["paths"].append(item["path"])
     for item in report.get("usnjrnl", {}).get("onion_filenames", []):
         found = entry(item["onion_address"])
         found["sources"].add("usnjrnl")
@@ -583,6 +615,7 @@ def main(argv: list[str] | None = None) -> int:
             f"$MFT: {m['records']} named records, {m['in_use']} in use; "
             f"{len(m['onion_filenames'])} onion filename(s), "
             f"{len(m['zone_identifier_streams'])} Zone.Identifier stream(s), "
+            f"{len(m['resident_auth_credentials'])} client-auth credential(s) in record content, "
             f"{len(m['deleted_tor_files'])} deleted Tor-related file(s)"
         )
     if "usnjrnl" in report:

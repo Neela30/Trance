@@ -485,8 +485,14 @@ What follows describes the current state.
 - Note: `acquire_all.py` never produces `--disk-image` or `--disk-root` inputs — those need a
   separate imaging step (not implemented; see §8). The downloads correlation no longer needs
   them (live scan), but `$MFT`/`$UsnJrnl` and pagefile/hiberfil residue still do.
-- Known gap: any sub-step error (e.g. an incomplete profile) sets the whole module to
-  `error`, and the report then drops Module B's dedicated presenter for the generic table.
+- Sub-step isolation (commit `db2f33a`): each sub-analysis has its own try/except; a failed
+  one degrades the module to `partial` with a `details["warnings"]` entry, and the dedicated
+  presenter still renders. `error` is reserved for a hash-verification (`IntegrityError`)
+  failure.
+- `$MFT` resident content is also scanned with `AUTH_CRED_RE`: an `.auth_private` file is
+  small enough to live inside its MFT record, so a deleted credential's address + key are
+  recovered (`mft.resident_auth_credentials`, artifact `ntfs_onion_client_auth`; the key
+  stays in `details` only, never in the artifact text or HTML).
 
 ### Module C — memory (`modules/module_c_memory/`) — the most-developed module
 
