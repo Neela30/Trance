@@ -19,6 +19,10 @@ Writes <output-dir>/{registry,memory,disk}/... and <output-dir>/
 acquire_manifest.json -- the contract analyze_evidence.py reads to resolve
 each artifact's path without the examiner having to type them all by hand.
 
+NTFS metadata ($MFT, $UsnJrnl:$J, pagefile/swapfile) is read raw off the system drive and
+the Tor Browser install's drive, so deleted-file and memory-residue analysis needs no disk
+image -- and still runs when no Tor Browser install is found at all (it was deleted).
+
 Registry (SYSTEM/NTUSER/Amcache/SOFTWARE/UsrClass.dat) and the live memory dump need an elevated
 session; the disk copy doesn't but runs alongside them here for one output
 folder. Each category is isolated -- one failing does not stop the others,
@@ -37,6 +41,7 @@ from core.exceptions import AcquisitionError
 from core.winadmin import is_admin
 from modules.module_a_registry import acquire as registry_acquire
 from modules.module_b_disk import acquire as disk_acquire
+from modules.module_b_disk import acquire_ntfs
 from modules.module_c_memory import dumper as memory_dumper
 from modules.module_c_memory import winpmem_acquire
 
@@ -107,6 +112,44 @@ def _acquire_disk(
         return {"status": "error", "message": str(exc)}
 
 
+def ntfs_volumes(disk_result: dict) -> list[str]:
+    """System drive first, then every drive a Tor Browser install was seen on -- the one
+    acquired and any others auto-discovery found. Network and other non-letter paths are
+    skipped: there is no local volume to read."""
+    drives = [acquire_ntfs.system_drive()]
+    sources = [
+        disk_result.get(key, {}).get("source_dir")
+        for key in ("tor_dir", "profile")
+        if isinstance(disk_result.get(key), dict)
+    ]
+    sources += disk_result.get("other_installations_found", [])
+    for source in sources:
+        if not source:
+            continue
+        try:
+            drives.append(acquire_ntfs.normalize_drive(source))
+        except AcquisitionError:
+            continue
+    return list(dict.fromkeys(drives))
+
+
+def _acquire_ntfs(
+    output_dir: Path,
+    drives: list[str],
+    include_pagefile: bool,
+    include_hiberfil: bool,
+) -> dict:
+    try:
+        return acquire_ntfs.acquire_all(
+            drives,
+            output_dir / "disk" / "ntfs",
+            include_pagefile=include_pagefile,
+            include_hiberfil=include_hiberfil,
+        )
+    except (AcquisitionError, OSError) as exc:
+        return {"status": "error", "message": str(exc)}
+
+
 def _print_category(name: str, result: dict) -> None:
     """registry_acquire.acquire_all() already prints its own per-hive lines as it goes
     (see modules/module_a_registry/acquire.py); memory/disk's helpers here only return
@@ -135,6 +178,10 @@ def acquire(
     tor_browser_dir: Path | None = None,
     disk_profile_src: Path | None = None,
     tor_dir_src: Path | None = None,
+    include_ntfs: bool = True,
+    ntfs_volumes_override: list[str] | None = None,
+    include_pagefile: bool = True,
+    include_hiberfil: bool = False,
 ) -> dict:
     if sys.platform != "win32":
         raise AcquisitionError("Acquisition only runs on Windows.")
@@ -169,6 +216,20 @@ def acquire(
         _print_category("disk", manifest["disk"])
     else:
         print("[*] disk: skipped (--skip-disk)")
+
+    if include_ntfs:
+        # After the disk step, so the Tor install's drive is known; kept separate from it
+        # because a deleted install is exactly when this matters most.
+        drives = ntfs_volumes_override or ntfs_volumes(manifest["disk"])
+        ntfs = _acquire_ntfs(output_dir, drives, include_pagefile, include_hiberfil)
+        manifest["disk"]["ntfs"] = ntfs
+        if ntfs.get("status") == "error":
+            print(f"[!] disk.ntfs: {ntfs.get('message')}", file=sys.stderr)
+        for drive, volume in ntfs.get("volumes", {}).items():
+            detail = volume.get("path") or volume.get("message") or ""
+            print(f"[*] disk.ntfs.{drive}: {volume['status']}{' — ' + detail if detail else ''}")
+    else:
+        print("[*] disk.ntfs: skipped (--skip-ntfs)")
 
     _make_paths_portable(manifest, output_dir)
     manifest_path = output_dir / "acquire_manifest.json"
@@ -237,6 +298,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--disk-profile-src", type=Path, help="Explicit profile source dir")
     parser.add_argument("--tor-dir-src", type=Path, help="Explicit Tor daemon data dir source")
+    parser.add_argument(
+        "--skip-ntfs", action="store_true", help="Don't export $MFT/$UsnJrnl/pagefile"
+    )
+    parser.add_argument(
+        "--ntfs-volume",
+        action="append",
+        help="Drive letter to export NTFS metadata from, repeatable. Default: the system "
+        "drive plus every drive a Tor Browser install was found on",
+    )
+    parser.add_argument(
+        "--skip-pagefile",
+        action="store_true",
+        help="Don't copy pagefile.sys/swapfile.sys (several GB on most machines)",
+    )
+    parser.add_argument(
+        "--include-hiberfil",
+        action="store_true",
+        help="Also copy hiberfil.sys (as large as RAM; off by default)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -250,6 +330,10 @@ def main(argv: list[str] | None = None) -> int:
             tor_browser_dir=args.tor_browser_dir,
             disk_profile_src=args.disk_profile_src,
             tor_dir_src=args.tor_dir_src,
+            include_ntfs=not args.skip_ntfs,
+            ntfs_volumes_override=args.ntfs_volume,
+            include_pagefile=not args.skip_pagefile,
+            include_hiberfil=args.include_hiberfil,
         )
     except AcquisitionError as exc:
         print(f"[!] {exc}", file=sys.stderr)

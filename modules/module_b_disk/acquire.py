@@ -274,7 +274,7 @@ def acquire_profile(src: Path, output_dir: Path, custody: CustodyLog) -> dict:
                 notes="Tor Browser profile file, plain copy (not VSS)",
             )
         )
-    return {"path": str(dest), **copy_result}
+    return {"path": str(dest), "source_dir": str(src), **copy_result}
 
 
 def acquire_tor_datadir(src: Path, output_dir: Path, custody: CustodyLog) -> dict:
@@ -292,7 +292,12 @@ def acquire_tor_datadir(src: Path, output_dir: Path, custody: CustodyLog) -> dic
                 notes="Tor daemon data directory file, plain copy (not VSS)",
             )
         )
-    return {"path": str(dest), "tor_running_at_capture": running, **copy_result}
+    return {
+        "path": str(dest),
+        "source_dir": str(src),
+        "tor_running_at_capture": running,
+        **copy_result,
+    }
 
 
 def acquire_downloads(

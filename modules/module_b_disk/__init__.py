@@ -347,6 +347,61 @@ def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
     return artifacts
 
 
+def load_ntfs_export(ntfs_dir: Path) -> dict[str, Path]:
+    """The exported volumes under trance-acquire's disk/ntfs folder, each verified
+    against its own hashes.sha256 first, same as the profile/tor_dir copies."""
+    from modules.module_b_disk.analyze_ntfs_journal import exported_volumes
+    from modules.module_b_disk.evidence import verify_hashes
+
+    volumes = exported_volumes(ntfs_dir)
+    if not volumes:
+        raise ValueError(f"no exported $MFT/$UsnJrnl found under {ntfs_dir}")
+    for label, folder in volumes.items():
+        verification = verify_hashes(folder)
+        failures = {k: v for k, v in verification.items() if v["status"] != "match"}
+        if failures:
+            raise IntegrityError(f"Volume {label}: manifest verification failed: {failures}")
+    return volumes
+
+
+def _analyze_ntfs_export(ntfs_dir: Path, details: dict, artifacts: list, record_failure) -> None:
+    try:
+        volumes = load_ntfs_export(ntfs_dir)
+    except Exception as exc:
+        details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("ntfs", "NTFS export verification", exc)
+        return
+    try:
+        from modules.module_b_disk.analyze_ntfs_journal import (
+            analyze_exported_volume,
+            merge_ntfs_reports,
+        )
+
+        details["ntfs"] = merge_ntfs_reports(
+            {label: analyze_exported_volume(folder) for label, folder in volumes.items()}
+        )
+        if not details["ntfs"].get("error"):
+            daemon = details.get("tor_daemon", {})
+            window = daemon_window(daemon) if not daemon.get("error") else None
+            artifacts.extend(_ntfs_artifacts(details["ntfs"], window))
+    except Exception as exc:
+        details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("ntfs", "NTFS metadata analysis", exc)
+    try:
+        from modules.module_b_disk.analyze_memory_residue import (
+            carve_residue,
+            merge_residue_reports,
+        )
+
+        details["memory_residue"] = merge_residue_reports(
+            {label: carve_residue(folder) for label, folder in volumes.items()}
+        )
+        artifacts.extend(_residue_artifacts(details["memory_residue"]))
+    except Exception as exc:
+        details["memory_residue"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("memory_residue", "memory residue carve", exc)
+
+
 def run(
     config: TranceConfig,
     profile_dir: Path | None = None,
@@ -354,9 +409,10 @@ def run(
     disk_image: Path | None = None,
     disk_root: Path | None = None,
     downloads_scan: Path | None = None,
+    ntfs_dir: Path | None = None,
     **_: object,
 ) -> ModuleResult:
-    if not any((profile_dir, tor_dir, disk_image, disk_root, downloads_scan)):
+    if not any((profile_dir, tor_dir, disk_image, disk_root, downloads_scan, ntfs_dir)):
         return ModuleResult(
             module=MODULE_NAME, status="skipped", message="no disk evidence supplied"
         )
@@ -468,6 +524,11 @@ def run(
         except Exception as exc:
             details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
             _record_failure("ntfs", "NTFS metadata analysis", exc)
+
+    if ntfs_dir and not disk_root:
+        # trance-acquire's raw-volume export of the same metafiles; a mounted volume
+        # (disk_root) already covers them, and more, when both exist.
+        _analyze_ntfs_export(Path(ntfs_dir), details, artifacts, _record_failure)
 
     details["warnings"] = warnings
     # "error" only for an integrity (hash-verification) failure; "partial" for any other

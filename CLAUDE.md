@@ -484,7 +484,8 @@ What follows describes the current state.
 - **Report**: dedicated presenter `modules/module_b_disk/report.py`.
 - Note: `acquire_all.py` never produces `--disk-image` or `--disk-root` inputs — those need a
   separate imaging step (not implemented; see §8). The downloads correlation no longer needs
-  them (live scan), but `$MFT`/`$UsnJrnl` and pagefile/hiberfil residue still do.
+  them (live scan), and `$MFT`/`$UsnJrnl`/pagefile residue now come from
+  `acquire_ntfs.py`'s raw-volume export (`ntfs_dir` input; see §8).
 - Sub-step isolation (commit `db2f33a`): each sub-analysis has its own try/except; a failed
   one degrades the module to `partial` with a `details["warnings"]` entry, and the dedicated
   presenter still renders. `error` is reserved for a hash-verification (`IntegrityError`)
@@ -533,7 +534,8 @@ python -m PyInstaller --onefile --name trance-acquire acquire_all.py
 dist\trance-acquire.exe --output-dir evidence
 ```
 Flags: `--skip-registry/--skip-memory/--skip-disk`, `--ntuser-user`, `--winpmem-path`,
-`--tor-browser-dir`, `--disk-profile-src`, `--tor-dir-src`. Omitting the path flags triggers
+`--tor-browser-dir`, `--disk-profile-src`, `--tor-dir-src`, `--skip-ntfs`, `--ntfs-volume`,
+`--skip-pagefile`, `--include-hiberfil`. Omitting the path flags triggers
 auto-discovery. Every category prints its outcome now (it didn't before commit `95b462c` —
 memory/disk used to fail silently).
 
@@ -544,6 +546,7 @@ evidence/
              Amcache_<ts>.hve (+ .sha256, custody json)
   memory/    firefox_<pid>_<ts>.bin and/or fullmem_<ts>.raw (+ .sha256, custody json)
   disk/      profile/, tor_dir/ (each with hashes.sha256) + custody json
+             ntfs/<letter>/ MFT, UsnJrnl_J, pagefile.sys, swapfile.sys, ntfs_metadata.json
   acquire_manifest.json   status + path per artifact
 ```
 
@@ -761,25 +764,32 @@ workflow on large changes):
   multi-process and content processes hold page data. Consider dumping all of them.
 - Only one Tor Browser install is acquired and the analyze side only accepts one
   profile/tor_dir pair end to end (acquire → manifest → `module_b_disk.run`).
-- No acquire step produces a disk image or the read-only mount `--disk-root` needs.
-- **Planned (agreed 2026-10-04, not built): NTFS metadata collection in trance-acquire.**
-  New `modules/module_b_disk/acquire_ntfs.py` (stdlib, Windows, admin) reads the raw volume
-  and exports `disk/ntfs/{MFT, UsnJrnl_J, pagefile.sys, swapfile.sys}` + `ntfs_metadata.json`
-  + `hashes.sha256`, so Module B's `$MFT`/`$UsnJrnl`/residue analysis runs without imaging.
-  Decisions: read `$MFT`/`$J` from a **VSS snapshot device** (reuse Module A's WMI create/
-  delete), **fall back to the live volume** and record which; `$MFT` via record 0's `$DATA`
-  runlist; `$J` via the `$UsnJrnl` record under `$Extend` (record 11, follow
-  `$ATTRIBUTE_LIST`), copying **allocated runs only** into a compact file (records are
-  self-describing; original offsets kept in metadata); **pagefile + swapfile on by default**
-  from the live volume (VSS excludes them) with a free-space check and `--skip-pagefile`,
-  hiberfil opt-in; volumes = **system drive + the Tor Browser install's drive**;
-  `--skip-ntfs`; manifest `disk.ntfs`. Analyze side: Module B `ntfs_dir` input →
-  `analyze_ntfs(mft=, usnjrnl=)` + `carve_residue(ntfs_dir)` (it globs by file name), hash-
-  verified, `disk_root` wins when both exist; auto-resolved for the GUI (checklist row +
-  Inputs override). Verify: unit tests for boot sector/runlist/attribute list/compaction;
-  byte-compare the reader's `$MFT` against ntfs-3g's `/mnt/win10/$MFT` on the flattened VM
-  image and reproduce the `--disk-root` run (7,535 Tor USN events, 3 `.part` downloads,
-  382 deleted Tor files); then a real VM run.
+- No acquire step produces a disk image or the read-only mount `--disk-root` needs (the
+  `$MFT`/`$UsnJrnl`/pagefile part of that is now covered by `acquire_ntfs.py`, below).
+- **NTFS metadata collection in trance-acquire — built 2026-10-07, not yet run on Windows.**
+  `modules/module_b_disk/acquire_ntfs.py` (stdlib, Windows, admin) reads raw volumes and
+  writes `disk/ntfs/<letter>/{MFT, UsnJrnl_J, pagefile.sys, swapfile.sys}` +
+  `ntfs_metadata.json` + `hashes.sha256`; manifest `disk.ntfs`. `$MFT`/`$J` come from a VSS
+  snapshot device (Module A's WMI create / vssadmin delete), falling back to the live volume
+  (`metafile_source` records which); pagefile/swapfile always from the live volume (VSS
+  excludes them), with a free-space check; hiberfil opt-in. `$J` is copied as allocated runs
+  only (extents with original stream offsets in the metadata). The exported `MFT` is the
+  **on-disk bytes** (fixups not applied) — what `analyze_ntfs_journal` expects; `ntfscat`
+  output differs only at the fixup bytes. Volumes = system drive + every drive a Tor install
+  was seen on (`acquire_all.ntfs_volumes()`), and the step runs even when the disk step found
+  no install (the deleted-install case). Flags: `--skip-ntfs`, `--ntfs-volume X`
+  (repeatable), `--skip-pagefile`, `--include-hiberfil`. Analyze side: `--ntfs-dir` / GUI
+  "NTFS metadata" input → Module B hash-verifies each volume, runs `analyze_ntfs` +
+  `carve_residue` per volume and merges them (`merge_ntfs_reports`/`merge_residue_reports`,
+  paths prefixed `C:\`); `disk_root` wins when both exist.
+  Verified: unit tests on a hand-built volume (fragmented `$MFT` via attribute list, sparse
+  `$J`, negative LCN deltas, uninitialized tail, deleted same-name record); a real
+  `mkntfs`/`ntfscp` volume (pagefile byte-identical; `$MFT` equal to `ntfscat` after
+  fixups); the Windows-formatted `~/tor-transfer/evidence.vdi` data disk (same `$MFT`
+  equality; that disk has no `$UsnJrnl`). **Still to do:** rebuild `trance-acquire.exe` and
+  run it on the VM — the raw `\\.\C:` / shadow-device reads, a real `$J`, a 1 GB+ `$MFT`
+  and multi-GB pagefile are untested; then compare against a `--disk-root` run of the same
+  machine's image.
 
 ### P2 — smaller cleanups
 

@@ -587,6 +587,160 @@ def analyze_ntfs(
     return report
 
 
+# Layout trance-acquire's acquire_ntfs.py writes per volume (disk/ntfs/<letter>/).
+EXPORTED_MFT = "MFT"
+EXPORTED_USNJRNL = "UsnJrnl_J"
+EXPORTED_METADATA = "ntfs_metadata.json"
+
+
+def exported_volumes(ntfs_dir: Path) -> dict[str, Path]:
+    """{drive label: folder} for each exported volume under an acquire_ntfs.py output
+    folder (or the folder itself, if it is a single volume's export)."""
+    ntfs_dir = ntfs_dir.resolve(strict=True)
+    candidates = [ntfs_dir] + sorted(p for p in ntfs_dir.iterdir() if p.is_dir())
+    volumes: dict[str, Path] = {}
+    for folder in candidates:
+        if not ((folder / EXPORTED_MFT).is_file() or (folder / EXPORTED_USNJRNL).is_file()):
+            continue
+        label = folder.name
+        try:
+            meta = json.loads((folder / EXPORTED_METADATA).read_text(encoding="utf-8"))
+            label = meta.get("drive") or label
+        except (OSError, ValueError):
+            pass
+        volumes[label.rstrip(":").upper()] = folder
+    return volumes
+
+
+def analyze_exported_volume(folder: Path) -> dict:
+    mft = folder / EXPORTED_MFT
+    usn = folder / EXPORTED_USNJRNL
+    report = analyze_ntfs(
+        mft=mft if mft.is_file() else None, usnjrnl=usn if usn.is_file() else None
+    )
+    try:
+        meta = json.loads((folder / EXPORTED_METADATA).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    report["acquisition"] = {
+        "metafile_source": meta.get("metafile_source"),
+        "warnings": meta.get("warnings", []),
+    }
+    return report
+
+
+def _prefix_paths(node: object, prefix: str) -> object:
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            if key == "path" and isinstance(value, str):
+                out[key] = prefix + value
+            elif key == "paths" and isinstance(value, list):
+                out[key] = [prefix + v for v in value]
+            elif key in ("sources", "acquisition"):
+                out[key] = value
+            else:
+                out[key] = _prefix_paths(value, prefix)
+        return out
+    if isinstance(node, list):
+        return [_prefix_paths(v, prefix) for v in node]
+    return node
+
+
+def merge_ntfs_reports(reports: dict[str, dict]) -> dict:
+    """One analyze_ntfs()-shaped report from several volumes' reports, every path
+    prefixed with its drive ("C:\\Users\\..."), so Module B's presenter and artifact
+    builder treat a multi-volume export exactly like one mounted volume."""
+    prefixed = {label: _prefix_paths(report, f"{label}:\\") for label, report in reports.items()}
+    usable = {k: r for k, r in prefixed.items() if not r.get("error")}
+    merged: dict = {
+        "sources": {
+            key: "; ".join(
+                f"{label}: {r['sources'][key]}"
+                for label, r in usable.items()
+                if r["sources"].get(key)
+            )
+            or None
+            for key in ("mft", "usnjrnl")
+        },
+        "note": next(iter(prefixed.values()))["note"] if prefixed else "",
+        "volumes": {
+            label: {
+                "error": r.get("error"),
+                "mft_records": r.get("mft", {}).get("records"),
+                "usn_records": r.get("usnjrnl", {}).get("records"),
+                **r.get("acquisition", {}),
+            }
+            for label, r in prefixed.items()
+        },
+    }
+    if not usable:
+        merged["error"] = "; ".join(f"{k}: {r['error']}" for k, r in prefixed.items()) or (
+            "no exported volume found"
+        )
+        return merged
+    mfts = [r["mft"] for r in usable.values() if "mft" in r]
+    if mfts:
+        merged["mft"] = {
+            "records": sum(m["records"] for m in mfts),
+            "in_use": sum(m["in_use"] for m in mfts),
+            **{
+                key: [item for m in mfts for item in m.get(key, [])]
+                for key in (
+                    "onion_filenames",
+                    "zone_identifier_streams",
+                    "resident_onion_strings",
+                    "resident_auth_credentials",
+                    "deleted_tor_files",
+                )
+            },
+        }
+    usns = [r["usnjrnl"] for r in usable.values() if "usnjrnl" in r]
+    if usns:
+        events = sorted(
+            (e for u in usns for e in u["tor_events"]), key=lambda e: e["time_utc"] or ""
+        )[-MAX_EVENTS:]
+        windows = [u["tor_activity_window"] for u in usns if u["tor_activity_window"]]
+        firsts = [u["journal_first_utc"] for u in usns if u["journal_first_utc"]]
+        lasts = [u["journal_last_utc"] for u in usns if u["journal_last_utc"]]
+        total = sum(u["tor_events_total"] for u in usns)
+        merged["usnjrnl"] = {
+            "records": sum(u["records"] for u in usns),
+            "journal_first_utc": min(firsts) if firsts else None,
+            "journal_last_utc": max(lasts) if lasts else None,
+            "tor_events": events,
+            "tor_events_total": total,
+            "tor_events_truncated": total > len(events),
+            "tor_activity_window": (
+                {
+                    "first_utc": min(w["first_utc"] for w in windows),
+                    "last_utc": max(w["last_utc"] for w in windows),
+                    "events": sum(w["events"] for w in windows),
+                }
+                if windows
+                else None
+            ),
+            "onion_filenames": [o for u in usns for o in u["onion_filenames"]],
+            "downloads": [d for u in usns for d in u["downloads"]],
+        }
+    addresses: dict[str, dict] = {}
+    for report in usable.values():
+        for address, info in report.get("onion_addresses", {}).items():
+            entry = addresses.setdefault(address, {"sources": set(), "deleted": False, "paths": []})
+            entry["sources"].update(info["sources"])
+            entry["deleted"] = entry["deleted"] or info["deleted"]
+            entry["paths"].extend(info["paths"])
+    merged["onion_addresses"] = {
+        address: {
+            "sources": sorted(v["sources"]),
+            "deleted": v["deleted"],
+            "paths": sorted(set(v["paths"])),
+        }
+        for address, v in sorted(addresses.items())
+    }
+    return merged
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, nargs="?", help="Mounted volume root (ntfs-3g)")

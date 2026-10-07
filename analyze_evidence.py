@@ -27,6 +27,8 @@ _DEFAULT_SOURCE_TYPE = "process"
 # modules/module_b_disk/acquire.py's DOWNLOADS_SCAN_FILENAME; not imported, so this
 # wrapper doesn't pull the acquire side in.
 DOWNLOADS_SCAN_FILENAME = "zone_identifier_scan.json"
+# modules/module_b_disk/acquire_ntfs.py's MFT_FILENAME, per volume under disk/ntfs/<letter>/.
+NTFS_MFT_FILENAME = "MFT"
 
 
 def _latest(paths: list[Path]) -> Path | None:
@@ -97,6 +99,8 @@ def _resolve_from_manifest(evidence_dir: Path, manifest: dict) -> dict:
         resolved["tor_dir"] = path
     if path := ok_path(disk.get("downloads")):
         resolved["downloads_scan"] = path
+    if path := ok_path(disk.get("ntfs")):
+        resolved["ntfs_dir"] = path
 
     # Fill gaps from this same folder's own files -- never from another acquisition:
     # a step the manifest says succeeded but recorded no usable path for (older
@@ -109,7 +113,7 @@ def _resolve_from_manifest(evidence_dir: Path, manifest: dict) -> dict:
     if "dump" not in resolved and memory_ok and "dump" in globbed:
         resolved["dump"] = globbed["dump"]
         resolved["source_type"] = globbed["source_type"]
-    for key in ("tor_dir", "downloads_scan"):
+    for key in ("tor_dir", "downloads_scan", "ntfs_dir"):
         if key not in resolved and key in globbed:
             resolved[key] = globbed[key]
 
@@ -158,6 +162,9 @@ def _resolve_by_globbing(evidence_dir: Path) -> dict:
     downloads_scan = evidence_dir / "disk" / "downloads" / DOWNLOADS_SCAN_FILENAME
     if downloads_scan.is_file():
         resolved["downloads_scan"] = str(downloads_scan)
+    ntfs_dir = evidence_dir / "disk" / "ntfs"
+    if ntfs_dir.is_dir() and any(ntfs_dir.glob(f"*/{NTFS_MFT_FILENAME}")):
+        resolved["ntfs_dir"] = str(ntfs_dir)
 
     return resolved
 
@@ -188,6 +195,7 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         "disk_profile": args.disk_profile,
         "tor_dir": args.tor_dir,
         "downloads_scan": args.downloads_scan,
+        "ntfs_dir": args.ntfs_dir,
         "dump": args.dump,
         "source_type": args.source_type,
     }
@@ -200,6 +208,7 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         "disk_profile": "--disk-profile",
         "tor_dir": "--tor-dir",
         "downloads_scan": "--downloads-scan",
+        "ntfs_dir": "--ntfs-dir",
         "dump": "--dump",
         "source_type": "--source-type",
     }
@@ -260,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         "carving (not auto-discovered)",
     )
     parser.add_argument("--downloads-scan", type=Path, help="Override auto-discovery")
+    parser.add_argument("--ntfs-dir", type=Path, help="Override auto-discovery")
     parser.add_argument("--dump", type=Path, help="Override auto-discovery")
     parser.add_argument("--source-type", choices=("process", "full-memory"), default=None)
 
