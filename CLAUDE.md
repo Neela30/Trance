@@ -447,6 +447,8 @@ What follows describes the current state.
     Documents first, then every drive; skip-list of system dirs; depth ≤ 8). Several installs
     → picks the one whose `torrc` was modified most recently, records the others in
     `other_installations_found`.
+    Finding **no** install is a per-step error on `profile`/`tor_dir` only — the downloads
+    scan (and `disk.ntfs`) still run, since a deleted install is when those matter most.
   - Plain file copy (`shutil.copy2`), **not VSS** — copying while Tor Browser runs can catch a
     sqlite db mid-write. Each file is copied independently: one that can't be read (the
     running `tor.exe` keeps `lock` locked) goes under `failed` instead of aborting the rest.

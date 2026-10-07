@@ -99,8 +99,8 @@ def _acquire_disk(
 ) -> dict:
     """No path given at all isn't treated as "nothing to do" -- disk_acquire.acquire_all()
     auto-discovers a Tor Browser install by scanning the filesystem in that case (see
-    modules/module_b_disk/acquire.py), so this always attempts the step and only reports
-    "error" if that scan genuinely finds nothing."""
+    modules/module_b_disk/acquire.py). If that scan finds nothing, profile and tor_dir
+    are reported as errors but the downloads scan still runs."""
     try:
         return disk_acquire.acquire_all(
             tor_browser_dir=tor_browser_dir,

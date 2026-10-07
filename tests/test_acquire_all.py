@@ -119,8 +119,11 @@ def test_acquire_disk_reports_error_when_auto_discovery_finds_nothing(tmp_path, 
 
     result = acquire_all._acquire_disk(tmp_path, None, None, None)
 
-    assert result["status"] == "error"
-    assert "No Tor Browser installation found" in result["message"]
+    for step in ("profile", "tor_dir"):
+        assert result[step]["status"] == "error"
+        assert "No Tor Browser installation found" in result[step]["message"]
+    # The downloads scan is still attempted (skipped here only because it's not Windows).
+    assert result["downloads"]["status"] == "skipped"
 
 
 def test_acquire_memory_skips_full_image_when_no_winpmem_found(tmp_path, monkeypatch):
