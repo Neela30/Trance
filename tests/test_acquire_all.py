@@ -5,6 +5,7 @@ import pytest
 
 import acquire_all
 from core.exceptions import AcquisitionError
+from core.hashing import hash_bytes
 
 
 def test_acquire_refuses_on_non_windows(tmp_path, monkeypatch):
@@ -167,3 +168,53 @@ def test_cli_fails_cleanly_off_windows(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "linux")
     exit_code = acquire_all.main(["--output-dir", str(tmp_path)])
     assert exit_code == 1
+
+
+def _stub_live_dump_failure(monkeypatch):
+    def fail(_out):
+        raise AcquisitionError("No firefox.exe process found.")
+
+    monkeypatch.setattr(acquire_all.memory_dumper, "acquire", fail)
+
+
+def test_acquire_memory_records_winpmem_sha256(tmp_path, monkeypatch):
+    _stub_live_dump_failure(monkeypatch)
+    binary = tmp_path / "winpmem.exe"
+    binary.write_bytes(b"fake winpmem")
+    image = tmp_path / "memory" / "fullmem.raw"
+    monkeypatch.setattr(acquire_all.winpmem_acquire, "acquire", lambda p, d: image)
+
+    result = acquire_all._acquire_memory(tmp_path, binary)
+
+    assert result["full_image"]["status"] == "ok"
+    assert result["full_image"]["winpmem_sha256"] == hash_bytes(b"fake winpmem")
+
+
+def test_acquire_memory_records_winpmem_sha256_even_when_capture_fails(tmp_path, monkeypatch):
+    _stub_live_dump_failure(monkeypatch)
+    binary = tmp_path / "winpmem.exe"
+    binary.write_bytes(b"fake winpmem")
+
+    def fail(_p, _d):
+        raise AcquisitionError("driver blocked")
+
+    monkeypatch.setattr(acquire_all.winpmem_acquire, "acquire", fail)
+
+    full_image = acquire_all._acquire_memory(tmp_path, binary)["full_image"]
+
+    assert full_image["status"] == "error"
+    assert full_image["winpmem_sha256"] == hash_bytes(b"fake winpmem")
+
+
+def test_acquire_memory_hash_failure_does_not_stop_capture(tmp_path, monkeypatch):
+    _stub_live_dump_failure(monkeypatch)
+    image = tmp_path / "memory" / "fullmem.raw"
+    monkeypatch.setattr(acquire_all.winpmem_acquire, "acquire", lambda p, d: image)
+    monkeypatch.setattr(
+        acquire_all, "hash_file", lambda p: (_ for _ in ()).throw(PermissionError("locked"))
+    )
+
+    full_image = acquire_all._acquire_memory(tmp_path, tmp_path / "winpmem.exe")["full_image"]
+
+    assert full_image["status"] == "ok"
+    assert full_image["winpmem_sha256"] is None

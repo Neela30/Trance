@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.exceptions import AcquisitionError
+from core.hashing import hash_file
 from core.winadmin import is_admin
 from modules.module_a_registry import acquire as registry_acquire
 from modules.module_b_disk import acquire as disk_acquire
@@ -73,6 +74,12 @@ def _acquire_memory(output_dir: Path, winpmem_path: Path | None) -> dict:
                 result["other_winpmem_binaries_found"] = [str(p) for p in candidates[1:]]
 
     if winpmem_path is not None:
+        # Hashed before it runs so the record is of the exact binary that was executed;
+        # a hashing failure must never stop the capture itself.
+        try:
+            winpmem_sha256: str | None = hash_file(winpmem_path)
+        except OSError:
+            winpmem_sha256 = None
         try:
             image_path = winpmem_acquire.acquire(winpmem_path, output_dir / "memory")
             result["full_image"] = {
@@ -80,9 +87,15 @@ def _acquire_memory(output_dir: Path, winpmem_path: Path | None) -> dict:
                 "path": str(image_path),
                 "source_type": "full-memory",
                 "winpmem_path": str(winpmem_path),
+                "winpmem_sha256": winpmem_sha256,
             }
         except AcquisitionError as exc:
-            result["full_image"] = {"status": "error", "message": str(exc)}
+            result["full_image"] = {
+                "status": "error",
+                "message": str(exc),
+                "winpmem_path": str(winpmem_path),
+                "winpmem_sha256": winpmem_sha256,
+            }
     else:
         result["full_image"] = {
             "status": "skipped",
