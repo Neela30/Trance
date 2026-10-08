@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from core.exceptions import AcquisitionError
@@ -220,11 +222,34 @@ def test_acquire_all_logs_other_installations_but_uses_most_recent(tmp_path, mon
     assert "found 1 other Tor Browser install" in capsys.readouterr().out
 
 
-def test_acquire_all_raises_when_auto_discovery_finds_nothing(tmp_path, monkeypatch):
+def test_acquire_all_still_scans_downloads_when_auto_discovery_finds_nothing(tmp_path, monkeypatch):
+    # A deleted install: no profile or tor_dir to copy, but the files it downloaded
+    # are still on disk, so the downloads scan must run anyway.
     monkeypatch.setattr(acquire, "find_tor_browser_installations", list)
+    scan_root = tmp_path / "drive"
+    scan_root.mkdir()
 
-    with pytest.raises(AcquisitionError, match="No Tor Browser installation found"):
-        acquire.acquire_all(output_dir=tmp_path / "out")
+    results = acquire.acquire_all(output_dir=tmp_path / "out", downloads_scan_roots=[scan_root])
+
+    for step in ("profile", "tor_dir"):
+        assert results[step]["status"] == "error"
+        assert "No Tor Browser installation found" in results[step]["message"]
+    assert results["downloads"]["status"] == "ok"
+    assert Path(results["downloads"]["path"]).is_file()
+
+
+def test_acquire_all_copies_an_explicit_tor_dir_even_if_discovery_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(acquire, "find_tor_browser_installations", list)
+    tor_dir = tmp_path / "tor"
+    tor_dir.mkdir()
+    (tor_dir / "state").write_text("TorVersion x\n")
+
+    results = acquire.acquire_all(
+        tor_dir_src=tor_dir, output_dir=tmp_path / "out", downloads_scan_roots=[tmp_path / "none"]
+    )
+
+    assert results["profile"]["status"] == "error"
+    assert results["tor_dir"]["status"] == "ok"
 
 
 def _real_shutil_copy2():

@@ -7,6 +7,9 @@ from modules.module_b_disk import run as run_disk_module
 
 ONION = "jnagl5n7q47bdox4zscwgfyxcqsliulrh34qnexorwjwpbn37avtcdqd"
 AUTH = "xm3raaijein7aeuike2d53kodwwpx4uhc5fg2wromy547ohbphoriaid"
+# Synthetic x25519 key (52 base32 chars) -- format only, not a real credential.
+KEY = "a" * 52
+CRED = f"{AUTH}:descriptor:x25519:{KEY}\n".encode()
 T0 = dt.datetime(2026, 9, 19, 8, 0, tzinfo=dt.timezone.utc)
 
 
@@ -77,7 +80,7 @@ def _mft(tmp_path):
         66: _mft_record(66, "Downloads", 65, is_dir=True),
         70: _mft_record(70, "Tor Browser", 65, is_dir=True),
         71: _mft_record(71, "onion-auth", 70, is_dir=True),
-        80: _mft_record(80, f"{AUTH}.auth_private", 71, in_use=False),
+        80: _mft_record(80, f"{AUTH}.auth_private", 71, in_use=False, data=CRED),
         81: _mft_record(
             81,
             "gone.txt",
@@ -87,6 +90,8 @@ def _mft(tmp_path):
         ),
         82: _mft_record(82, "notes.txt", 66, data=f"see http://{ONION}.onion/x".encode()),
         83: _mft_record(83, "state", 70, in_use=False),
+        # A hand-made copy with the wrong extension: tor never loads it.
+        84: _mft_record(84, "key.auth_private.txt", 65, data=CRED),
     }
     blob = b"".join(records.get(i, b"\x00" * 1024) for i in range(90))
     path = tmp_path / "MFT"
@@ -165,7 +170,7 @@ def test_mft_parses_names_paths_streams_and_deleted_records(tmp_path):
     records = analyze_ntfs_journal.parse_mft(_mft(tmp_path))
     assert analyze_ntfs_journal.resolve_path(records, 81) == "Users\\u\\Downloads\\gone.txt"
     report = analyze_ntfs_journal.analyze_mft_records(records)
-    assert report["in_use"] == 7
+    assert report["in_use"] == 8
     [onion] = report["onion_filenames"]
     assert onion["onion_address"] == AUTH + ".onion"
     assert onion["deleted"] is True
@@ -176,6 +181,36 @@ def test_mft_parses_names_paths_streams_and_deleted_records(tmp_path):
     assert resident["onion_addresses"] == [ONION + ".onion"]
     deleted_names = {d["name"] for d in report["deleted_tor_files"]}
     assert deleted_names == {f"{AUTH}.auth_private", "state"}
+
+
+def test_mft_recovers_credential_content_from_deleted_resident_file(tmp_path):
+    """An .auth_private file is small enough to live inside its MFT record, so the
+    credential itself (stored bare, without ".onion") survives deletion."""
+    records = analyze_ntfs_journal.parse_mft(_mft(tmp_path))
+    creds = analyze_ntfs_journal.analyze_mft_records(records)["resident_auth_credentials"]
+    by_record = {c["record"]: c for c in creds}
+    assert set(by_record) == {80, 84}
+    deleted = by_record[80]
+    assert deleted["onion_address"] == AUTH + ".onion"
+    assert deleted["x25519_private_key"] == KEY
+    assert deleted["deleted"] is True and deleted["loadable_by_tor"] is True
+    assert deleted["path"] == f"Users\\u\\Tor Browser\\onion-auth\\{AUTH}.auth_private"
+    assert by_record[84]["loadable_by_tor"] is False
+    assert by_record[84]["deleted"] is False
+
+
+def test_mft_credential_scan_rejects_invalid_address(tmp_path):
+    records = {
+        5: analyze_ntfs_journal.parse_mft_record(_mft_record(5, ".", 5, is_dir=True), 5),
+        90: analyze_ntfs_journal.parse_mft_record(
+            _mft_record(
+                90, "x.auth_private", 5, data=f"{'a' * 56}:descriptor:x25519:{KEY}".encode()
+            ),
+            90,
+        ),
+    }
+    report = analyze_ntfs_journal.analyze_mft_records(records)
+    assert report["resident_auth_credentials"] == []
 
 
 def test_usn_journal_yields_addresses_and_window(tmp_path):
@@ -200,9 +235,12 @@ def test_analyze_ntfs_merges_sources_and_reports_missing(tmp_path):
     assert report["onion_addresses"] == {
         AUTH
         + ".onion": {
-            "sources": ["mft", "usnjrnl"],
+            "sources": ["mft", "mft_resident_credential", "usnjrnl"],
             "deleted": True,
-            "paths": [f"Users\\u\\Tor Browser\\onion-auth\\{AUTH}.auth_private"],
+            "paths": [
+                f"Users\\u\\Tor Browser\\onion-auth\\{AUTH}.auth_private",
+                "Users\\u\\key.auth_private.txt",
+            ],
         },
         ONION
         + ".onion": {
@@ -254,7 +292,15 @@ def test_module_b_runs_residue_and_ntfs_under_disk_root(tmp_path, monkeypatch):
         "ntfs_onion_address",
         "ntfs_deleted_download",
         "ntfs_tor_activity_window",
+        "ntfs_onion_client_auth",
     } <= types
+    creds = [a for a in result.artifacts if a.artifact_type == "ntfs_onion_client_auth"]
+    assert len(creds) == 2
+    real = next(a for a in creds if "deleted file" in a.description)
+    assert AUTH in real.description and "never loaded" not in real.description
+    assert KEY not in real.description
+    copy = next(a for a in creds if "key.auth_private.txt" in a.description)
+    assert "tor never loaded it" in copy.description
     deleted = next(a for a in result.artifacts if a.artifact_type == "ntfs_deleted_download")
     assert "gone.txt" in deleted.description
     auth = next(

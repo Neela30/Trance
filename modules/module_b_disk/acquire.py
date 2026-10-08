@@ -274,7 +274,7 @@ def acquire_profile(src: Path, output_dir: Path, custody: CustodyLog) -> dict:
                 notes="Tor Browser profile file, plain copy (not VSS)",
             )
         )
-    return {"path": str(dest), **copy_result}
+    return {"path": str(dest), "source_dir": str(src), **copy_result}
 
 
 def acquire_tor_datadir(src: Path, output_dir: Path, custody: CustodyLog) -> dict:
@@ -292,7 +292,12 @@ def acquire_tor_datadir(src: Path, output_dir: Path, custody: CustodyLog) -> dic
                 notes="Tor daemon data directory file, plain copy (not VSS)",
             )
         )
-    return {"path": str(dest), "tor_running_at_capture": running, **copy_result}
+    return {
+        "path": str(dest),
+        "source_dir": str(src),
+        "tor_running_at_capture": running,
+        **copy_result,
+    }
 
 
 def acquire_downloads(
@@ -354,29 +359,38 @@ def acquire_all(
     output_dir: Path = Path("captures/disk"),
     downloads_scan_roots: list[Path] | None = None,
 ) -> dict:
-    """Best-effort: profile and Tor data dir are attempted independently, same
-    isolation philosophy as module_a_registry.acquire.acquire_all(). Explicit
-    profile_src/tor_dir_src override tor_browser_dir discovery, which in turn
+    """Best-effort: profile, Tor data dir and downloads scan are attempted
+    independently, same isolation philosophy as module_a_registry.acquire.acquire_all().
+    Explicit profile_src/tor_dir_src override tor_browser_dir discovery, which in turn
     overrides auto-discovery (find_tor_browser_installations()) -- so this still
-    works with no path given at all, not just as a fallback."""
+    works with no path given at all, not just as a fallback.
+
+    Finding no install is a per-step error on profile/tor_dir, not a reason to stop:
+    the downloads scan doesn't depend on the install, and a deleted install is exactly
+    when the files it downloaded are the evidence left."""
     other_installations: list[str] = []
+    discovery_error: str | None = None
     if profile_src is None or tor_dir_src is None:
-        if tor_browser_dir is not None:
-            chosen = tor_browser_dir
-        else:
-            installations = find_tor_browser_installations()
-            if not installations:
-                raise AcquisitionError(
-                    "No Tor Browser installation found (searched the home directory, "
-                    "Desktop, Downloads, Documents, then every drive). Pass "
-                    "--tor-browser-dir, or both --disk-profile-src and --tor-dir-src, "
-                    "explicitly if it's somewhere this scan wouldn't find it."
-                )
-            chosen = _most_recently_active(installations)
-            other_installations = [str(p) for p in installations if p != chosen]
-        discovered_profile, discovered_tor_dir = discover_tor_browser_paths(chosen)
-        profile_src = profile_src or discovered_profile
-        tor_dir_src = tor_dir_src or discovered_tor_dir
+        try:
+            if tor_browser_dir is not None:
+                chosen = tor_browser_dir
+            else:
+                installations = find_tor_browser_installations()
+                if not installations:
+                    raise AcquisitionError(
+                        "No Tor Browser installation found (searched the home directory, "
+                        "Desktop, Downloads, Documents, then every drive). Pass "
+                        "--tor-browser-dir, or both --disk-profile-src and --tor-dir-src, "
+                        "explicitly if it's somewhere this scan wouldn't find it."
+                    )
+                chosen = _most_recently_active(installations)
+                other_installations = [str(p) for p in installations if p != chosen]
+            discovered_profile, discovered_tor_dir = discover_tor_browser_paths(chosen)
+            profile_src = profile_src or discovered_profile
+            tor_dir_src = tor_dir_src or discovered_tor_dir
+        except AcquisitionError as exc:
+            discovery_error = str(exc)
+            print(f"[!] {discovery_error}", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     custody = CustodyLog(output_dir / f"disk_acquire_{_timestamp()}.custody.json")
@@ -388,25 +402,31 @@ def acquire_all(
             f"not acquired (used the most recently active one): {other_installations}"
         )
 
-    try:
-        results["profile"] = {
-            "status": "ok",
-            **acquire_profile(profile_src, output_dir, custody),
-        }
-        print(f"[*] profile: {results['profile']['path']}")
-    except (AcquisitionError, OSError) as exc:
-        results["profile"] = {"status": "error", "message": str(exc)}
-        print(f"[!] profile failed: {exc}", file=sys.stderr)
+    if profile_src is None:
+        results["profile"] = {"status": "error", "message": discovery_error}
+    else:
+        try:
+            results["profile"] = {
+                "status": "ok",
+                **acquire_profile(profile_src, output_dir, custody),
+            }
+            print(f"[*] profile: {results['profile']['path']}")
+        except (AcquisitionError, OSError) as exc:
+            results["profile"] = {"status": "error", "message": str(exc)}
+            print(f"[!] profile failed: {exc}", file=sys.stderr)
 
-    try:
-        results["tor_dir"] = {
-            "status": "ok",
-            **acquire_tor_datadir(tor_dir_src, output_dir, custody),
-        }
-        print(f"[*] tor_dir: {results['tor_dir']['path']}")
-    except (AcquisitionError, OSError) as exc:
-        results["tor_dir"] = {"status": "error", "message": str(exc)}
-        print(f"[!] tor_dir failed: {exc}", file=sys.stderr)
+    if tor_dir_src is None:
+        results["tor_dir"] = {"status": "error", "message": discovery_error}
+    else:
+        try:
+            results["tor_dir"] = {
+                "status": "ok",
+                **acquire_tor_datadir(tor_dir_src, output_dir, custody),
+            }
+            print(f"[*] tor_dir: {results['tor_dir']['path']}")
+        except (AcquisitionError, OSError) as exc:
+            results["tor_dir"] = {"status": "error", "message": str(exc)}
+            print(f"[!] tor_dir failed: {exc}", file=sys.stderr)
 
     try:
         results["downloads"] = acquire_downloads(output_dir, custody, downloads_scan_roots)

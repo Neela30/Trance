@@ -32,6 +32,7 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
             "disk_image": _path("disk_image"),
             "disk_root": _path("disk_root"),
             "downloads_scan": _path("downloads_scan"),
+            "ntfs_dir": _path("ntfs_dir"),
         },
         "module_c_memory": {
             "dump": _path("dump"),

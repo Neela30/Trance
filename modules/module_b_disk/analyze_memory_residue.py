@@ -116,6 +116,28 @@ def carve_residue(root: Path) -> dict:
     }
 
 
+def merge_residue_reports(reports: dict[str, dict]) -> dict:
+    """One carve_residue()-shaped report from several volumes' (drive label -> report),
+    file paths prefixed with their drive."""
+    files = []
+    addresses: dict[str, dict] = {}
+    for label, report in reports.items():
+        prefix = f"{label}:\\"
+        for record in report["files"]:
+            files.append({**record, "path": prefix + record["path"]})
+        for address, hit in report["onion_addresses"].items():
+            entry = addresses.setdefault(address, {"occurrences": 0, "files": []})
+            entry["occurrences"] += hit["occurrences"]
+            entry["files"].extend(prefix + f for f in hit["files"])
+    return {
+        "volume_root": "; ".join(f"{label}: {r['volume_root']}" for label, r in reports.items()),
+        "files": files,
+        "onion_addresses": addresses,
+        "hibernation_present": any(r["hibernation_present"] for r in reports.values()),
+        "note": next(iter(reports.values()))["note"] if reports else "",
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="Root of the read-only mounted NTFS volume")

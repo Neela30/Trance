@@ -188,7 +188,7 @@ def _num(value: str | None) -> str:
 
 
 def _downloads_context(scan: dict) -> dict:
-    hits = [
+    all_hits = [
         {
             "path": h["path"],
             "size": h["size"],
@@ -211,6 +211,9 @@ def _downloads_context(scan: dict) -> dict:
         }
         for h in scan.get("internet_origin_files", [])
     ]
+    # Only files created inside the Tor daemon window are listed (same rule as the
+    # artifacts); the rest are counted so the report still says how many were skipped.
+    hits = [h for h in all_hits if h["within_window"] is True]
     window = scan.get("tor_daemon_window")
     return {
         "volume_root": scan.get("volume_root"),
@@ -228,10 +231,11 @@ def _downloads_context(scan: dict) -> dict:
             else None
         ),
         "hits": hits,
+        "total": len(all_hits),
         "recycled": sum(1 for h in hits if h["recycled"]),
-        "inside": sum(1 for h in hits if h["within_window"] is True),
-        "outside": sum(1 for h in hits if h["within_window"] is False),
-        "unknown": sum(1 for h in hits if h["within_window"] is None),
+        "inside": len(hits),
+        "outside": sum(1 for h in all_hits if h["within_window"] is False),
+        "unknown": sum(1 for h in all_hits if h["within_window"] is None),
         "any_url_fields": any(h["host_url"] or h["referrer_url"] for h in hits),
         "note": scan.get("note"),
     }
@@ -296,7 +300,9 @@ def _ntfs_context(ntfs: dict) -> dict:
                 "sources": v["sources"],
                 "deleted": v["deleted"],
                 "paths": v.get("paths", []),
-                "filename_evidence": bool(set(v["sources"]) & {"mft", "usnjrnl"}),
+                "filename_evidence": bool(
+                    set(v["sources"]) & {"mft", "usnjrnl", "mft_resident_credential"}
+                ),
             }
             for a, v in ntfs.get("onion_addresses", {}).items()
         ],
@@ -313,6 +319,17 @@ def _ntfs_context(ntfs: dict) -> dict:
         "resident_onion_files": [
             {"path": r["path"], "deleted": r["deleted"], "addresses": r["onion_addresses"]}
             for r in mft.get("resident_onion_strings", [])
+        ],
+        "resident_credentials": [
+            {
+                "address": c["onion_address"],
+                "path": c["path"],
+                "record": c["record"],
+                "deleted": c["deleted"],
+                "loadable_by_tor": c["loadable_by_tor"],
+                "created": _iso(c.get("created_utc")),
+            }
+            for c in mft.get("resident_auth_credentials", [])
         ],
         "deleted_tor_files": [
             {"path": d["path"], "modified": _iso(d.get("modified_utc"))}

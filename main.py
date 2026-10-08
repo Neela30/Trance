@@ -231,6 +231,13 @@ def main(argv: list[str] | None = None) -> int:
         "zone_identifier_scan.json); correlated against the Tor daemon window like "
         "--disk-root, which takes precedence when both are given",
     )
+    disk.add_argument(
+        "--ntfs-dir",
+        type=Path,
+        help="NTFS metadata exported by trance-acquire (disk/ntfs/: $MFT, $UsnJrnl:$J, "
+        "pagefile/swapfile per volume); same analysis as --disk-root's $MFT/$UsnJrnl and "
+        "memory-residue passes, which take precedence when both are given",
+    )
 
     memory = parser.add_argument_group("module_c_memory")
     memory.add_argument(
@@ -289,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     output_dir = args.output_dir / args.case
-    for evidence_root in (args.disk_profile, args.tor_dir, args.disk_root):
+    for evidence_root in (args.disk_profile, args.tor_dir, args.disk_root, args.ntfs_dir):
         if evidence_root and output_dir.resolve().is_relative_to(evidence_root.resolve()):
             parser.error(f"case output directory must be outside disk evidence: {evidence_root}")
     existing_outputs = [
@@ -320,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
             "disk_image": args.disk_image,
             "disk_root": args.disk_root,
             "downloads_scan": args.downloads_scan,
+            "ntfs_dir": args.ntfs_dir,
         },
         "module_c_memory": {
             "dump": args.dump,

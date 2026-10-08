@@ -34,6 +34,7 @@ INPUT_SPECS = (
     InputSpec("disk_profile", "Tor Browser profile", True),
     InputSpec("tor_dir", "Tor data folder", True),
     InputSpec("downloads_scan", "Downloads scan", False),
+    InputSpec("ntfs_dir", "NTFS metadata", True),
 )
 INPUT_KEYS = tuple(spec.key for spec in INPUT_SPECS)
 
@@ -271,6 +272,7 @@ def summary_rows(request: AnalysisRequest, inputs: dict) -> list[SummaryRow]:
         row("Tor Browser profile", "disk_profile"),
         row("Tor data folder", "tor_dir"),
         row("Downloads scan", "downloads_scan"),
+        row("NTFS metadata", "ntfs_dir"),
     ]
     if request.disk_image and (request.mount_image or request.carve_image):
         actions = [

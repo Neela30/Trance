@@ -190,22 +190,23 @@ def _carve_artifacts(report: dict) -> list[Artifact]:
 
 
 def _download_artifacts(scan: dict) -> list[Artifact]:
+    """One artifact per internet-origin file created while the Tor daemon was running.
+
+    Zone.Identifier is on every browser download and every file extracted from a
+    downloaded archive, so a whole-disk scan finds hundreds. Only files correlated to the
+    daemon window are findings; the full list stays in `details` as observations."""
     source = scan["volume_root"]
-    window = scan.get("tor_daemon_window")
+    window = scan.get("tor_daemon_window") or {}
     artifacts = []
     for hit in scan["internet_origin_files"]:
+        if hit.get("within_tor_daemon_window") is not True:
+            continue
         stamps = hit["timestamps"]
         created = stamps["created_utc"] or stamps["modified_utc"]
-        within = hit.get("within_tor_daemon_window")
-        if within is True:
-            correlation = (
-                f"created while the Tor daemon was running ({window['start_utc']} to "
-                f"{window['end_utc']}); network origin established, source URL not recoverable"
-            )
-        elif within is False:
-            correlation = "created outside the last recorded Tor daemon window"
-        else:
-            correlation = "no Tor daemon window available for correlation"
+        correlation = (
+            f"created while the Tor daemon was running ({window['start_utc']} to "
+            f"{window['end_utc']}); network origin established, source URL not recoverable"
+        )
         recycled = hit.get("recycle_bin")
         if recycled:
             deleted = f", deleted {recycled['deleted_utc']}" if recycled.get("deleted_utc") else ""
@@ -273,6 +274,24 @@ def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
                 "verify this is not an examiner transfer file before treating it as evidence"
             )
         artifacts.append(Artifact(MODULE_NAME, "ntfs_onion_address", source, description))
+    for cred in ntfs.get("mft", {}).get("resident_auth_credentials", []):
+        state = "deleted file" if cred["deleted"] else "file"
+        loadable = (
+            ""
+            if cred["loadable_by_tor"]
+            else "; filename does not end in .auth_private, so tor never loaded it"
+        )
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "ntfs_onion_client_auth",
+                source,
+                f"Client credential for {cred['onion_address']} recovered from the content of "
+                f"{state} {cred['path']} ($MFT record {cred['record']}){loadable}; "
+                "configuration, not proof of a visit",
+                timestamp=cred.get("created_utc"),
+            )
+        )
     for stream in ntfs.get("mft", {}).get("zone_identifier_streams", []):
         if not stream["deleted"]:
             continue
@@ -328,6 +347,61 @@ def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
     return artifacts
 
 
+def load_ntfs_export(ntfs_dir: Path) -> dict[str, Path]:
+    """The exported volumes under trance-acquire's disk/ntfs folder, each verified
+    against its own hashes.sha256 first, same as the profile/tor_dir copies."""
+    from modules.module_b_disk.analyze_ntfs_journal import exported_volumes
+    from modules.module_b_disk.evidence import verify_hashes
+
+    volumes = exported_volumes(ntfs_dir)
+    if not volumes:
+        raise ValueError(f"no exported $MFT/$UsnJrnl found under {ntfs_dir}")
+    for label, folder in volumes.items():
+        verification = verify_hashes(folder)
+        failures = {k: v for k, v in verification.items() if v["status"] != "match"}
+        if failures:
+            raise IntegrityError(f"Volume {label}: manifest verification failed: {failures}")
+    return volumes
+
+
+def _analyze_ntfs_export(ntfs_dir: Path, details: dict, artifacts: list, record_failure) -> None:
+    try:
+        volumes = load_ntfs_export(ntfs_dir)
+    except Exception as exc:
+        details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("ntfs", "NTFS export verification", exc)
+        return
+    try:
+        from modules.module_b_disk.analyze_ntfs_journal import (
+            analyze_exported_volume,
+            merge_ntfs_reports,
+        )
+
+        details["ntfs"] = merge_ntfs_reports(
+            {label: analyze_exported_volume(folder) for label, folder in volumes.items()}
+        )
+        if not details["ntfs"].get("error"):
+            daemon = details.get("tor_daemon", {})
+            window = daemon_window(daemon) if not daemon.get("error") else None
+            artifacts.extend(_ntfs_artifacts(details["ntfs"], window))
+    except Exception as exc:
+        details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("ntfs", "NTFS metadata analysis", exc)
+    try:
+        from modules.module_b_disk.analyze_memory_residue import (
+            carve_residue,
+            merge_residue_reports,
+        )
+
+        details["memory_residue"] = merge_residue_reports(
+            {label: carve_residue(folder) for label, folder in volumes.items()}
+        )
+        artifacts.extend(_residue_artifacts(details["memory_residue"]))
+    except Exception as exc:
+        details["memory_residue"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("memory_residue", "memory residue carve", exc)
+
+
 def run(
     config: TranceConfig,
     profile_dir: Path | None = None,
@@ -335,9 +409,10 @@ def run(
     disk_image: Path | None = None,
     disk_root: Path | None = None,
     downloads_scan: Path | None = None,
+    ntfs_dir: Path | None = None,
     **_: object,
 ) -> ModuleResult:
-    if not any((profile_dir, tor_dir, disk_image, disk_root, downloads_scan)):
+    if not any((profile_dir, tor_dir, disk_image, disk_root, downloads_scan, ntfs_dir)):
         return ModuleResult(
             module=MODULE_NAME, status="skipped", message="no disk evidence supplied"
         )
@@ -449,6 +524,11 @@ def run(
         except Exception as exc:
             details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
             _record_failure("ntfs", "NTFS metadata analysis", exc)
+
+    if ntfs_dir and not disk_root:
+        # trance-acquire's raw-volume export of the same metafiles; a mounted volume
+        # (disk_root) already covers them, and more, when both exist.
+        _analyze_ntfs_export(Path(ntfs_dir), details, artifacts, _record_failure)
 
     details["warnings"] = warnings
     # "error" only for an integrity (hash-verification) failure; "partial" for any other

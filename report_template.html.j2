@@ -529,7 +529,7 @@
       {% if disk.downloads %}
       <div class="tile{{ '' if disk.downloads.inside else ' gap' }}">
         <h3>Internet-origin files</h3>
-        <p>{{ disk.downloads.hits|length }} file{{ "s" if disk.downloads.hits|length != 1 }} on the whole volume carr{{ "ies" if disk.downloads.hits|length == 1 else "y" }} a <span class="mono">Zone.Identifier</span> stream{% if disk.downloads.window %}; {{ disk.downloads.inside }} created while the Tor daemon was running, {{ disk.downloads.outside }} outside that window{% else %}; no daemon window to correlate against{% endif %}.</p>
+        <p>{{ disk.downloads.total }} file{{ "s" if disk.downloads.total != 1 }} on the whole volume carr{{ "ies" if disk.downloads.total == 1 else "y" }} a <span class="mono">Zone.Identifier</span> stream{% if disk.downloads.window %}; {{ disk.downloads.inside }} created while the Tor daemon was running, {{ disk.downloads.outside }} outside that window{% else %}; no daemon window to correlate against{% endif %}.</p>
       </div>
       {% endif %}
       {% if disk.residue %}
@@ -620,18 +620,19 @@
 
   {% if disk.downloads %}
   <section>
-    <div class="section-head"><h2>Internet-origin files</h2><span class="count">{{ disk.downloads.hits|length }} on the whole volume, no folder assumed</span></div>
+    <div class="section-head"><h2>Internet-origin files</h2><span class="count">{{ disk.downloads.inside }} created in the Tor window, of {{ disk.downloads.total }} on the whole volume</span></div>
     <div class="ribbon">
       <strong>Network origin and timing, not the source site.</strong> Windows tags every file a browser saves from the network with a <span class="mono">Zone.Identifier</span> stream; locally created or USB/ISO-copied files never carry one. Tor Browser deliberately omits the <span class="mono">HostUrl</span>/<span class="mono">ReferrerUrl</span> fields other browsers write there, so the originating address is not recoverable from the file. Only the last Tor session's window is reconstructable from daemon artifacts.
     </div>
     {% if disk.downloads.window %}
     <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>{% if disk.downloads.window.end_basis %} (end: {{ disk.downloads.window.end_basis }}){% endif %}.</p>
     {% elif 'tor_daemon' in disk.supplied %}
-    <p class="note" style="margin-bottom:12px;">No daemon window could be derived (missing <span class="mono">lock</span> or <span class="mono">state</span>) — files are listed without correlation.</p>
+    <p class="note" style="margin-bottom:12px;">No daemon window could be derived (missing <span class="mono">lock</span> or <span class="mono">state</span>) — no files are listed because none can be correlated.</p>
     {% else %}
     <p class="note" style="margin-bottom:12px;">Supply <span class="mono">--tor-dir</span> alongside <span class="mono">--disk-root</span> to correlate these against the Tor daemon's session window.</p>
     {% endif %}
     {% if disk.downloads.hits %}
+    <p class="note" style="margin-bottom:8px;">Only files created while the Tor daemon was running are listed; the other {{ disk.downloads.total - disk.downloads.inside }} marked file{{ "s" if disk.downloads.total - disk.downloads.inside != 1 }} (ordinary browser downloads and extracted archives) are omitted here and kept in <span class="mono">findings.json</span>.</p>
     <div class="table-scroll">
       <table class="evidence-table">
         <thead><tr><th>Path on volume</th><th>Created (NTFS)</th><th>Tor running?</th><th>Zone</th><th>Size</th><th>SHA-256</th></tr></thead>
@@ -652,6 +653,8 @@
     {% if disk.downloads.xattr_support is false %}
     <p class="note" style="margin-top:8px;"><span class="flag-warn">⚠</span> Volume not mounted through ntfs-3g — NTFS creation times unavailable, modification times shown instead.</p>
     {% endif %}
+    {% elif disk.downloads.total %}
+    <p class="note">{{ disk.downloads.total }} file{{ "s" if disk.downloads.total != 1 }} carry a <span class="mono">Zone.Identifier</span> stream, but none {% if disk.downloads.window %}was created while the Tor daemon was running{% else %}could be correlated to a Tor session{% endif %}; the list is kept in <span class="mono">findings.json</span>.</p>
     {% else %}
     <p class="note">No file on the volume carries a <span class="mono">Zone.Identifier</span> stream.{% if disk.downloads.xattr_support is none %} If the volume was not mounted through ntfs-3g the stream is invisible to this scan, so this is not proof that nothing was downloaded.{% endif %}</p>
     {% endif %}
@@ -732,6 +735,20 @@
         </tbody>
       </table>
     </div>
+    {% if disk.ntfs.resident_credentials %}
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Client-auth credentials recovered from the MFT</h3><span class="count">{{ disk.ntfs.resident_credentials|length }} — file small enough to be stored inside its MFT record</span></div>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Address</th><th>File</th><th>MFT record</th><th>Created (NTFS)</th><th>File status</th></tr></thead>
+        <tbody>
+          {% for c in disk.ntfs.resident_credentials %}
+          <tr><td class="val">{{ c.address }}</td><td class="val">{{ c.path }}{% if not c.loadable_by_tor %} <span class="chip low">not loadable by tor</span>{% endif %}</td><td class="mono">{{ c.record }}</td><td class="mono">{{ c.created or "—" }}</td><td>{% if c.deleted %}<span class="chip low">deleted</span>{% else %}<span class="chip ok">present</span>{% endif %}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="margin-top:8px;">The full credential (address and key) survives in the MFT record until Windows reuses that record, even after the file or the whole Tor Browser folder is deleted. A credential shows the hidden service was configured for access; on its own it does not prove a visit. Tor only loads files whose name ends exactly in <span class="mono">.auth_private</span>.</p>
+    {% endif %}
     {% if disk.ntfs.resident_onion_files %}
     <p class="note" style="margin-top:8px;">Addresses found inside small files stored in the MFT itself: {% for r in disk.ntfs.resident_onion_files %}<span class="mono">{{ r.path }}</span>{{ " (deleted)" if r.deleted }}{{ "; " if not loop.last }}{% endfor %} — check whether these are the examiner's own transfer files before counting them as browsing evidence.</p>
     {% endif %}

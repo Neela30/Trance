@@ -18,6 +18,7 @@ def _base_args(**overrides):
         "disk_profile": None,
         "tor_dir": None,
         "downloads_scan": None,
+        "ntfs_dir": None,
         "disk_image": None,
         "disk_root": None,
         "dump": None,
