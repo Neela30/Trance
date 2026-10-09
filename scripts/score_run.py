@@ -117,10 +117,12 @@ def classify_file(path: Path) -> str:
         ("ntuser", "usrclass", "system", "software", "amcache")
     ):
         return "registry"
-    if "/disk/profile" in low:
+    if "/disk/profile" in low or "/profile.default" in low:
         return "browser-profile"
-    if "/disk/tor_dir" in low:
+    if "/disk/tor_dir" in low or "/torbrowser/data/tor/" in low:
         return "tor-dir"
+    if "/downloads/" in low:
+        return "downloads"
     return "other"
 
 
