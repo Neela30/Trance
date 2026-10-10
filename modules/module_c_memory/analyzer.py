@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import re
 import sys
@@ -44,6 +45,23 @@ SOURCE_TYPE_RECORD_CAPS = {
     "full-memory": 200_000,
 }
 DEFAULT_SOURCE_TYPE = "process"
+
+# Proximity anchoring. A hit that carries no host of its own (a login pair, a form body)
+# is attributed to the target when a string that does mention the target host/onion sits
+# this close to it in the dump. Measured on a real full-RAM capture of a scripted session:
+# the password sat 352 bytes, the username 432 and a posted form 768 bytes from the nearest
+# target mention, so a couple of KB covers them without admitting page-sized neighbourhoods.
+PROXIMITY_WINDOW = 2048
+# Firefox keeps a form's field names as one-byte strings and the typed values as UTF-16, a
+# few bytes apart ("username" <binary> "alice" ... "password" <binary> "hunter2"), so a
+# field name and its value are never one extracted string. A value counts as belonging to
+# the field name just before it when it starts within ADJACENT_GAP bytes of that name, and
+# pairs less than ADJACENT_GROUP_GAP apart are one login form.
+ADJACENT_GAP = 64
+ADJACENT_GROUP_GAP = 256
+CREDENTIAL_FIELD_NAMES = frozenset(
+    {"username", "user", "uname", "login", "email", "password", "passwd", "pwd"}
+)
 
 # Trailing charset stops at , ^ | ] ) } as well as whitespace/quotes: Firefox's in-memory
 # cache and principal keys wrap URLs in exactly those ("<host>,p,:http://…",
@@ -189,8 +207,9 @@ def _utf16le_pattern(min_len: int) -> re.Pattern[bytes]:
     return re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)
 
 
-def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[int, str]]:
-    """Yield (offset, string) for printable ASCII and UTF-16LE runs, chunked to bound memory use."""
+def iter_strings_ex(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[int, str, int]]:
+    """Yield (offset, string, length_in_bytes) for printable ASCII and UTF-16LE runs, in
+    offset order, chunked to bound memory use."""
     ascii_re = _ascii_pattern(min_len)
     utf16_re = _utf16le_pattern(min_len)
     # finditer() yields strictly increasing start offsets within a window, and the only
@@ -209,18 +228,35 @@ def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[i
                 break
             window = carry + chunk
             window_start = offset - len(carry)
+            found: list[tuple[int, str, int]] = []
             for m in ascii_re.finditer(window):
                 abs_off = window_start + m.start()
                 if abs_off > ascii_floor:
                     ascii_floor = abs_off
-                    yield abs_off, m.group().decode("ascii")
+                    found.append((abs_off, m.group().decode("ascii"), m.end() - m.start()))
             for m in utf16_re.finditer(window):
                 abs_off = window_start + m.start()
                 if abs_off > utf16_floor:
                     utf16_floor = abs_off
-                    yield abs_off, m.group().decode("utf-16-le", errors="ignore")
+                    found.append(
+                        (
+                            abs_off,
+                            m.group().decode("utf-16-le", errors="ignore"),
+                            m.end() - m.start(),
+                        )
+                    )
+            # Offset order across both encodings, so neighbouring strings (a field name
+            # and its value are different encodings) are seen next to each other.
+            found.sort(key=lambda t: t[0])
+            yield from found
             offset += len(chunk)
             carry = window[-OVERLAP:] if len(window) > OVERLAP else window
+
+
+def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[int, str]]:
+    """Yield (offset, string) for printable ASCII and UTF-16LE runs, in offset order."""
+    for offset, string, _ in iter_strings_ex(path, min_len):
+        yield offset, string
 
 
 def verify_integrity(dump_path: Path) -> bool | None:
@@ -235,6 +271,20 @@ def verify_integrity(dump_path: Path) -> bool | None:
             f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual}"
         )
     return True
+
+
+def _is_plausible_credential_value(value: str) -> bool:
+    return (
+        3 <= len(value) <= 120
+        and value not in CREDENTIAL_FIELD_NAMES
+        and not _is_noise_value(value)
+        and sum(ch.isalnum() for ch in value) >= 3
+    )
+
+
+def _near_any(sorted_offsets: list[int], offset: int, window: int) -> bool:
+    i = bisect.bisect_left(sorted_offsets, offset - window)
+    return i < len(sorted_offsets) and sorted_offsets[i] <= offset + window
 
 
 def _build_timeline(
@@ -359,6 +409,12 @@ def analyze(
     unanchored_counts = {"credentials": 0, "search_queries": 0}
     unanchored_samples: dict[str, list[str]] = {"credentials": [], "search_queries": []}
 
+    # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
+    anchor_enabled = bool(targets) or bool(username)
+    target_offsets: list[int] = []
+    pending_field: tuple[str, int] | None = None
+    adjacent_pairs: list[dict] = []
+
     def record_unanchored(category: str, value: str) -> None:
         unanchored_counts[category] += 1
         sample = unanchored_samples[category]
@@ -385,9 +441,24 @@ def analyze(
             "artifacts",
         )
 
-    for offset, s in iter_strings(dump_path, min_len=min_len):
+    for offset, s, nbytes in iter_strings_ex(dump_path, min_len=min_len):
         total_strings += 1
-        s_matches_target = require_host_anchor and any(t in s.lower() for t in targets)
+        s_low = s.lower() if targets else ""
+        mentions_target = bool(targets) and any(t in s_low for t in targets)
+        s_matches_target = require_host_anchor and mentions_target
+        if mentions_target:
+            target_offsets.append(offset)
+
+        if anchor_enabled:
+            if s in CREDENTIAL_FIELD_NAMES:
+                pending_field = (s, offset + nbytes)
+            elif pending_field is not None:
+                gap = offset - pending_field[1]
+                if 0 <= gap <= ADJACENT_GAP and _is_plausible_credential_value(s):
+                    adjacent_pairs.append({"offset": offset, "field": pending_field[0], "value": s})
+                    pending_field = None
+                elif gap > ADJACENT_GAP:
+                    pending_field = None
 
         url_spans: list[tuple[int, int]] = []
         url_hits: list[tuple[int, str, str, str]] = []
@@ -517,6 +588,40 @@ def analyze(
                 "downloads",
             )
             record_artifact("download", match_offset, value)
+
+    # A login form's name/value pairs are anchored as a group: by the target username
+    # appearing as one of the values, or by a target mention within PROXIMITY_WINDOW.
+    target_offsets.sort()
+    adjacent_pairs.sort(key=lambda p: p["offset"])
+    groups: list[list[dict]] = []
+    for pair in adjacent_pairs:
+        if groups and pair["offset"] - groups[-1][-1]["offset"] <= ADJACENT_GROUP_GAP:
+            groups[-1].append(pair)
+        else:
+            groups.append([pair])
+    for group in groups:
+        anchored_by = None
+        if username and any(username.lower() in p["value"].lower() for p in group):
+            anchored_by = "username"
+        elif any(_near_any(target_offsets, p["offset"], PROXIMITY_WINDOW) for p in group):
+            anchored_by = "host"
+        for p in group:
+            if anchored_by is None:
+                record_unanchored("credentials", f"{p['field']}={p['value']}")
+                continue
+            append_capped(
+                credentials,
+                {
+                    "offset": hex(p["offset"]),
+                    "field": p["field"],
+                    "value": p["value"],
+                    "shape": "adjacent",
+                    "confidence": "high",
+                    "anchored_by": anchored_by,
+                },
+                "credentials",
+            )
+            record_artifact("credential", p["offset"], f"{p['field']}={p['value']}")
 
     # Tor Browser itself talks to a handful of bundled default onion services
     # (search engine, connectivity checks) whether or not the user does

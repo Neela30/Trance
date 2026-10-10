@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from modules.module_c_memory.analyzer import analyze
+from modules.module_c_memory.analyzer import PROXIMITY_WINDOW, analyze
 
 
 def make_dump(tmp_path: Path, data: bytes) -> Path:
@@ -112,3 +112,97 @@ def test_noise_value_filters_code_shaped_cookie_values(tmp_path):
         == "low"
     )
     assert by_value["c[0],l.count=uo(c[2])+1,l.upgrade=uo(c[3]),l.upload=c.length"] == "low"
+
+
+def _u16(text: str) -> bytes:
+    return text.encode("utf-16-le")
+
+
+# Real layout seen in Firefox's heap: a field name as a one-byte string, a few binary
+# bytes, then the typed value as UTF-16. Field name and value are never one string.
+SEP = b"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0b\x0c\x0e"
+
+
+def _login_form(user: str, password: str) -> bytes:
+    return (
+        b"\x00\x00"
+        + b"username"
+        + SEP
+        + _u16(user)
+        + SEP
+        + b"password"
+        + SEP
+        + _u16(password)
+        + SEP
+    )
+
+
+def test_iter_strings_yields_both_encodings_in_offset_order(tmp_path):
+    from modules.module_c_memory.analyzer import iter_strings
+
+    dump = make_dump(tmp_path, b"asciione" + SEP + _u16("utftwo!!") + SEP + b"asciithree")
+    offsets = [o for o, _ in iter_strings(dump)]
+    assert offsets == sorted(offsets)
+    assert [s for _, s in iter_strings(dump)] == ["asciione", "utftwo!!", "asciithree"]
+
+
+def test_adjacent_credentials_anchored_by_target_username(tmp_path):
+    data = _login_form("alice.test", "S3cret-Pass-9") + b"X" * 8192  # no host nearby at all
+    report = analyze(
+        dump := make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username="alice.test",
+        source_type="full-memory",
+    )
+    assert dump.exists()
+    found = {(c["field"], c["value"]) for c in report["targeted"]["credentials"]}
+    assert ("username", "alice.test") in found
+    assert ("password", "S3cret-Pass-9") in found
+    assert all(c["shape"] == "adjacent" for c in report["targeted"]["credentials"])
+    descriptions = {a["description"] for a in report["artifacts"]}
+    assert "password=S3cret-Pass-9" in descriptions
+
+
+def test_adjacent_credentials_anchored_by_nearby_target_host(tmp_path):
+    data = b"http://target.onion/login\x00" + _login_form("someone", "Pw-12345-xyz")
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    anchors = {c["anchored_by"] for c in report["targeted"]["credentials"]}
+    assert anchors == {"host"}
+    assert ("password", "Pw-12345-xyz") in {
+        (c["field"], c["value"]) for c in report["targeted"]["credentials"]
+    }
+
+
+def test_adjacent_credentials_far_from_target_are_kept_out(tmp_path):
+    # Same shape from an unrelated process: no target username, no target host close by.
+    data = (
+        b"http://target.onion/login\x00"
+        + b"Z" * (PROXIMITY_WINDOW * 3)
+        + _login_form("stranger", "Other-Pass-1")
+    )
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username="alice.test",
+        source_type="full-memory",
+    )
+    assert not report["targeted"]["credentials"]
+    assert report["host_anchoring"]["unanchored"]["credentials"]["count"] == 2
+
+
+def test_adjacent_credentials_need_a_target_to_anchor_to(tmp_path):
+    report = analyze(
+        make_dump(tmp_path, _login_form("alice.test", "S3cret-Pass-9")),
+        onion=None,
+        host=None,
+        username=None,
+    )
+    assert not report["targeted"]["credentials"]
