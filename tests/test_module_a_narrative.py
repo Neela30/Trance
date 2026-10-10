@@ -825,15 +825,93 @@ class TestDescribeSourceTimeGap:
         component = {"userassist_last_run": _dt("2026-10-04T07:30:42+00:00"), "bam_last_run": None}
         assert describe_source_time_gap(component, None) is None
 
+    def test_bam_well_after_the_opening_is_most_likely_the_end_of_that_use(self):
+        component = {
+            "userassist_last_run": _dt("2026-10-09T18:05:31+00:00"),
+            "bam_last_run": _dt("2026-10-09T18:15:59+00:00"),
+        }
+        result = describe_source_time_gap(component, None)
+        assert "10 minutes later" in result
+        assert "end of that use" in result
+        assert "same use" not in result
+
+    def test_bam_older_than_the_opening_fits_a_browser_still_running(self):
+        component = {
+            "userassist_last_run": _dt("2026-10-09T18:05:31+00:00"),
+            "bam_last_run": _dt("2026-10-08T09:00:00+00:00"),
+        }
+        assert "still running" in describe_source_time_gap(component, None)
+
 
 class TestDescribeLastUseSummary:
-    def test_picks_the_later_of_the_two_and_names_its_source(self):
+    def test_names_the_opening_and_the_last_recorded_running_time_separately(self):
         component = {
-            "userassist_last_run": _dt("2026-10-04T07:30:42+00:00"),
-            "bam_last_run": _dt("2026-10-04T07:31:01+00:00"),
+            "userassist_last_run": _dt("2026-10-09T18:05:31+00:00"),
+            "bam_last_run": _dt("2026-10-09T18:15:59+00:00"),
         }
         result = describe_last_use_summary(component, None)
-        assert "recorded by BAM" in result
+        opened, running = result.split("Last recorded running:")
+        assert "Most recently opened:" in opened and "18:05:31" in opened
+        assert "UserAssist" in opened
+        assert "18:15:59" in running and "BAM" in running
+
+    def test_userassist_only(self):
+        result = describe_last_use_summary(
+            {"userassist_last_run": _dt("2026-10-09T18:05:31+00:00")}, None
+        )
+        assert result.startswith("Most recently opened:")
+        assert "BAM" not in result
 
     def test_none_when_neither_source_present(self):
         assert describe_last_use_summary({}, None) is None
+
+
+class TestOpenedVersusLastRunning:
+    """Real capture: UserAssist recorded the opening at 18:05:31 and BAM 18:15:59, the
+    moment the browser process exited. "Opened" must be the launch, and the BAM time its
+    own, carefully worded sentence."""
+
+    def _setup(self, bam_iso):
+        annotated_by_type = {
+            "UserAssist": [
+                {
+                    "path": r"C:\Users\a\Desktop\Tor Browser\Browser\firefox.exe",
+                    "timestamp": "2026-10-09T18:05:31+00:00",
+                    "run_count": 3,
+                    "focus_count": 0,
+                    "total_focus_time_ms": 0,
+                },
+            ],
+            "BAM": [
+                {
+                    "path": r"C:\Users\a\Desktop\Tor Browser\Browser\firefox.exe",
+                    "timestamp": bam_iso,
+                }
+            ],
+        }
+        component_timeline = [
+            {
+                "basename": "firefox.exe",
+                "seen_in": ["UserAssist", "BAM"],
+                "userassist_last_run": _dt("2026-10-09T18:05:31+00:00"),
+                "bam_last_run": _dt(bam_iso),
+            }
+        ]
+        return build_narrative(annotated_by_type, component_timeline, [], [], [], None)
+
+    def test_opened_is_the_launch_and_the_end_gets_its_own_sentence(self):
+        result = self._setup("2026-10-09T18:15:59+00:00")
+        assert "18:05" in result["key_finding"]
+        assert "18:15" not in result["key_finding"]
+        launch = next(t for t in result["timeline"] if "opened 3 times" in t)
+        assert "18:05" in launch and "18:15" not in launch
+        end = [t for t in result["timeline"] if "last recorded Tor Browser running" in t]
+        assert len(end) == 1 and "18:15" in end[0] and "about 10 minutes" in end[0]
+        assert result["timeline"].index(end[0]) > result["timeline"].index(launch)
+        plain = result["key_finding"] + " ".join(result["timeline"])
+        for term in ("UserAssist", "BAM"):
+            assert term not in plain
+
+    def test_a_bam_time_seconds_after_the_launch_adds_nothing(self):
+        result = self._setup("2026-10-09T18:05:40+00:00")
+        assert not [t for t in result["timeline"] if "last recorded Tor Browser running" in t]

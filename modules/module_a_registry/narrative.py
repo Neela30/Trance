@@ -603,9 +603,9 @@ def local_systemtime_to_utc(local_iso: str, bias_minutes: int) -> str:
 def find_latest_tor_use_iso(
     annotated_by_type: dict[str, list[dict]], component_timeline: list[dict]
 ) -> str | None:
-    """Standalone re-run of build_narrative()'s own "most recent Tor use" computation
-    (UserAssist run_count candidates, extended by the strongest component's BAM time if
-    later) -- exposed so report.py can resolve the Tor launch instant for network
+    """Standalone re-run of build_narrative()'s own "most recently opened" computation
+    (the latest UserAssist launch; BAM is not used, see BAM_SAME_USE_SECONDS) -- exposed so
+    report.py can resolve the Tor launch instant for network
     correlation before build_narrative() exists to hand it back out. Same "second,
     independent call rather than threading internal state out" precedent as
     find_install_location_path()'s own docstring (both compute the same deterministic
@@ -625,14 +625,7 @@ def find_latest_tor_use_iso(
     if not launch_candidates:
         return None
     latest = max(launch_candidates, key=lambda f: f["timestamp"])
-    latest_use_iso = latest["timestamp"]
-
-    bam_dt = component_timeline[0].get("bam_last_run") if component_timeline else None
-    if bam_dt:
-        latest_ua_dt = datetime.fromisoformat(latest_use_iso)
-        if bam_dt > latest_ua_dt:
-            latest_use_iso = bam_dt.isoformat()
-    return latest_use_iso
+    return latest["timestamp"]
 
 
 _NETWORK_HISTORY_CAVEAT = (
@@ -942,57 +935,101 @@ def describe_install_date_plain(
 # ---------------------------------------------------------------------------
 
 
+# UserAssist records a program being opened from the desktop or Start menu; BAM records the
+# program's last activity, and is typically written when it stops. They describe the same
+# start only when they are this close. A later BAM time was assumed to be "the same use,
+# moments later" and promoted to "most recent use" -- on a real capture that put "last
+# opened" at the moment the browser process exited, ten minutes after it was opened.
+BAM_SAME_USE_SECONDS = 60
+
+
+def _minutes_phrase(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if minutes < 1:
+        return f"{round(seconds)} seconds"
+    if minutes < 120:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    hours = round(minutes / 60)
+    return f"{hours} hours"
+
+
+def describe_bam_after_launch(component: dict, local_tz: str | None) -> str | None:
+    """Plain-English timeline sentence for a BAM time well after the latest launch: what it
+    most likely means, without claiming more than the data shows."""
+    userassist_dt = component.get("userassist_last_run")
+    bam_dt = component.get("bam_last_run")
+    if not userassist_dt or not bam_dt:
+        return None
+    gap = (bam_dt - userassist_dt).total_seconds()
+    if gap <= BAM_SAME_USE_SECONDS:
+        return None
+    return (
+        f"Windows last recorded Tor Browser running on {format_dual_time_plain(bam_dt.isoformat(), local_tz)}, "
+        f"about {_minutes_phrase(gap)} after it was last opened. Windows usually records this "
+        "when a program stops, so this most likely marks when that use ended; it could also be "
+        "a later start that did not go through the desktop or Start menu."
+    )
+
+
 def describe_source_time_gap(component: dict, local_tz: str | None) -> str | None:
     """Technical version, for the appendix: when the strongest component has both a
-    UserAssist and a BAM last-run time and they differ, explains the gap once instead of
-    leaving a reader to notice two slightly different timestamps in the table and wonder
-    if they're two different events. A gap here is expected -- UserAssist records the
-    desktop click, BAM the OS's own view of the program actually running moments later."""
+    UserAssist and a BAM time and they differ, says what the difference means once, instead
+    of leaving a reader to notice two different timestamps and wonder if they're two
+    different events. Within BAM_SAME_USE_SECONDS they are the same start; a later BAM time
+    most likely marks the end of that use; an earlier one means BAM has not been written
+    since that launch -- expected while the program is still running."""
     userassist_dt = component.get("userassist_last_run")
     bam_dt = component.get("bam_last_run")
     if not userassist_dt or not bam_dt or userassist_dt == bam_dt:
         return None
-    if userassist_dt < bam_dt:
-        earlier_label, earlier_dt, later_label, later_dt = (
-            "UserAssist",
-            userassist_dt,
-            "BAM",
-            bam_dt,
+    ua = format_dual_time(userassist_dt.isoformat(), local_tz)
+    bam = format_dual_time(bam_dt.isoformat(), local_tz)
+    gap = (bam_dt - userassist_dt).total_seconds()
+    if abs(gap) <= BAM_SAME_USE_SECONDS:
+        seconds = round(abs(gap))
+        unit = "second" if seconds == 1 else "seconds"
+        earlier, later = (
+            (("UserAssist", ua), ("BAM", bam)) if gap > 0 else (("BAM", bam), ("UserAssist", ua))
         )
-    else:
-        earlier_label, earlier_dt, later_label, later_dt = (
-            "BAM",
-            bam_dt,
-            "UserAssist",
-            userassist_dt,
+        return (
+            f"{earlier[0]} recorded this at {earlier[1]}; {later[0]} recorded it at {later[1]} — a "
+            f"gap of {seconds} {unit}. This is normal and refers to the same use, not two "
+            "different events."
         )
-    gap_seconds = round((later_dt - earlier_dt).total_seconds())
-    unit = "second" if gap_seconds == 1 else "seconds"
+    if gap > 0:
+        return (
+            f"UserAssist recorded the last opening at {ua}; BAM last recorded the program at "
+            f"{bam}, {_minutes_phrase(gap)} later. BAM is usually written when a program stops, "
+            "so the BAM time most likely marks the end of that use, not a second opening; it "
+            "could also be a later start that did not go through the desktop or Start menu, "
+            "which UserAssist does not record."
+        )
     return (
-        f"{earlier_label} recorded this at {format_dual_time(earlier_dt.isoformat(), local_tz)}; "
-        f"{later_label} recorded it at {format_dual_time(later_dt.isoformat(), local_tz)} — a "
-        f"gap of {gap_seconds} {unit}. This is normal and refers to the same use, not two "
-        "different events."
+        f"UserAssist recorded the last opening at {ua}; BAM's entry is older ({bam}). BAM is "
+        "usually written when a program stops, so this is expected if Tor Browser was still "
+        "running when the evidence was collected."
     )
 
 
 def describe_last_use_summary(component: dict, local_tz: str | None) -> str | None:
-    """Technical version: states the single most-recent-use time this report leads with
-    everywhere (the plain-English key finding/timeline use the same underlying value, via
-    format_dual_time_plain) together with which source it came from, so a reader of the
-    appendix never has to cross-check that the headline time matches the detail tables."""
-    candidates = []
-    if component.get("userassist_last_run"):
-        candidates.append(("UserAssist", component["userassist_last_run"]))
-    if component.get("bam_last_run"):
-        candidates.append(("BAM", component["bam_last_run"]))
-    if not candidates:
-        return None
-    label, dt = max(candidates, key=lambda c: c[1])
-    return (
-        f"Most recent recorded use: {format_dual_time(dt.isoformat(), local_tz)}, "
-        f"recorded by {label}."
-    )
+    """Technical version: the time the report leads with everywhere as "last opened" (the
+    plain-English key finding and timeline use the same UserAssist value), plus BAM's
+    last-recorded-running time when it differs, each named with its source -- so a reader
+    of the appendix never has to cross-check the headline against the detail tables."""
+    userassist_dt = component.get("userassist_last_run")
+    bam_dt = component.get("bam_last_run")
+    parts = []
+    if userassist_dt:
+        parts.append(
+            f"Most recently opened: {format_dual_time(userassist_dt.isoformat(), local_tz)}, "
+            "recorded by UserAssist."
+        )
+    if bam_dt and bam_dt != userassist_dt:
+        parts.append(
+            f"Last recorded running: {format_dual_time(bam_dt.isoformat(), local_tz)}, "
+            "recorded by BAM."
+        )
+    return " ".join(parts) or None
 
 
 # ---------------------------------------------------------------------------
@@ -1145,16 +1182,10 @@ def build_narrative(
     if launch_candidates:
         launch_count = max(f["run_count"] for f in launch_candidates)
         latest = max(launch_candidates, key=lambda f: f["timestamp"])
+        # "Opened" is the UserAssist launch time only: a later BAM time is usually the end
+        # of that use, not a new opening (see BAM_SAME_USE_SECONDS); it gets its own
+        # timeline sentence below. describe_last_use_summary() shows the same pair.
         latest_use_iso = latest["timestamp"]
-        # The report's single "most recent use" also considers the strongest component's
-        # BAM-recorded time (component_timeline is already strongest-first) -- the same
-        # pair of numbers the technical appendix's describe_last_use_summary() shows, so
-        # the plain-English headline and the technical detail can never disagree.
-        bam_dt = component_timeline[0].get("bam_last_run") if component_timeline else None
-        if bam_dt:
-            latest_ua_dt = datetime.fromisoformat(latest_use_iso)
-            if bam_dt > latest_ua_dt:
-                latest_use_iso = bam_dt.isoformat()
 
         when = format_dual_time_plain(latest_use_iso, local_tz)
         latest_path = (latest.get("path") or "").lower()
@@ -1196,6 +1227,10 @@ def build_narrative(
     dated_events: list[tuple[datetime, str]] = []
     if launch_sentence and latest_use_iso:
         dated_events.append((datetime.fromisoformat(latest_use_iso), launch_sentence))
+        strongest_component = component_timeline[0] if component_timeline else {}
+        bam_sentence = describe_bam_after_launch(strongest_component, local_tz)
+        if bam_sentence:
+            dated_events.append((strongest_component["bam_last_run"], bam_sentence))
     for finding in annotated_by_type.get("ShellBags", []):
         sb_path = finding.get("path")
         sb_timestamp = finding.get("timestamp")

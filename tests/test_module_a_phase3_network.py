@@ -404,7 +404,10 @@ class TestFindLatestTorUseIso:
         }
         assert find_latest_tor_use_iso(annotated, []) == "2026-01-05T00:00:00+00:00"
 
-    def test_bam_extends_latest_use_when_later(self):
+    def test_bam_does_not_move_the_launch_time(self):
+        # A later BAM time is usually the program stopping, not a new opening: on a real
+        # capture it was the browser's exit, ten minutes after the launch. The network
+        # correlation needs the launch instant.
         from datetime import datetime, timezone
 
         annotated = {
@@ -418,7 +421,7 @@ class TestFindLatestTorUseIso:
         }
         component_timeline = [{"bam_last_run": datetime(2026, 1, 2, 0, 0, 0, tzinfo=timezone.utc)}]
         assert find_latest_tor_use_iso(annotated, component_timeline) == (
-            "2026-01-02T00:00:00+00:00"
+            "2026-01-01T00:00:00+00:00"
         )
 
 
