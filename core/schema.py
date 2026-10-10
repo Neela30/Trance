@@ -47,6 +47,9 @@ class ModuleResult:
               log-level debugging) -- the shared shape root report.py's Module-status card
               renders for any module, not just Module A.
     message:  human-readable reason for a non-ok status, or None.
+    duration_seconds: wall-clock time the module's run() took, set by main.run_module (None
+              when a result was built any other way), so a slow stage can be found by
+              reading findings.json instead of guessing.
     """
 
     module: str
@@ -54,3 +57,4 @@ class ModuleResult:
     artifacts: list[Artifact] = field(default_factory=list)
     details: dict = field(default_factory=dict)
     message: str | None = None
+    duration_seconds: float | None = None

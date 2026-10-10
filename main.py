@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import multiprocessing
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -33,6 +35,13 @@ CUSTODY_FILENAME = "custody.json"
 
 def run_module(name: str, config: TranceConfig, kwargs: dict) -> ModuleResult:
     """Import and run one module, converting every failure mode into a ModuleResult."""
+    started = time.monotonic()
+    result = _run_module(name, config, kwargs)
+    result.duration_seconds = round(time.monotonic() - started, 2)
+    return result
+
+
+def _run_module(name: str, config: TranceConfig, kwargs: dict) -> ModuleResult:
     try:
         module = importlib.import_module(f"modules.{name}")
     except Exception as exc:  # a module may not even import on this platform (Windows-only APIs)
@@ -359,4 +368,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A frozen Windows exe re-launches itself for every worker process of the memory
+    # scan's pool; without this each worker would start the whole app again.
+    multiprocessing.freeze_support()
     sys.exit(main())

@@ -13,6 +13,7 @@ two child processes, dispatched before Qt is imported:
 from __future__ import annotations
 
 import argparse
+import multiprocessing
 import os
 import sys
 from pathlib import Path
@@ -57,4 +58,7 @@ def _run_gui(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # A frozen Windows exe re-launches itself for every worker process of the memory
+    # scan's pool; without this each worker would start the whole app again.
+    multiprocessing.freeze_support()
     sys.exit(main())
