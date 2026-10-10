@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -50,6 +50,53 @@ def _format_timestamp(value: str | datetime | None) -> str:
     if not isinstance(dt, datetime):
         return str(dt)
     return dt.strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+
+
+# Registry and memory times for one event agree to the second when they are the same event.
+SAME_INSTANT = timedelta(seconds=5)
+# A browser process this much older than the last opening the registry records is an earlier run.
+EARLIER_RUN = timedelta(seconds=60)
+
+
+def _relate_processes_to_registry(registry: dict | None, memory: dict | None) -> list[str]:
+    """Plain notes juxtaposing Module A's last-opened / last-running times with the browser
+    processes Volatility3 found in memory -- the two are independent evidence, so where they
+    meet the report says so (and where memory shows more, it says that). Not a merge or a
+    score: each note names both sources."""
+    if not registry or not memory:
+        return []
+    activity = (memory.get("volatility3") or {}).get("process_activity") or {}
+    if not activity.get("groups"):
+        return []
+    components = registry.get("component_timeline") or []
+    firefox = next((c for c in components if c.get("basename") == "firefox.exe"), None)
+    component = firefox or (components[0] if components else {})
+    opened = component.get("userassist_last_run")
+    last_running = component.get("bam_last_run")
+    notes = []
+    if opened:
+        earlier = [g for g in activity["groups"] if g["first_start"] < opened - EARLIER_RUN]
+        if earlier:
+            started = min(g["first_start"] for g in earlier)
+            note = (
+                f"Tor Browser processes in memory started at {_format_timestamp(started)}, "
+                f"before the last opening the registry records ({_format_timestamp(opened)}): "
+                "Tor Browser also ran earlier than that"
+            )
+            if not any(g["still_running"] for g in earlier):
+                ended = max(g["last_exit"] for g in earlier)
+                note += f" (those processes had all exited by {_format_timestamp(ended)})"
+            notes.append(note + ".")
+    if last_running:
+        for exited, pid, name in activity.get("exits", []):
+            if name == "firefox.exe" and abs(exited - last_running) <= SAME_INSTANT:
+                notes.append(
+                    f"The registry's last-recorded-running time ({_format_timestamp(last_running)}) "
+                    f"matches firefox.exe (PID {pid}) exiting at {_format_timestamp(exited)} in "
+                    "memory: it marks when that run ended, not a new opening."
+                )
+                break
+    return notes
 
 
 def _wrap_path(value: str | None) -> Markup:
@@ -128,6 +175,12 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
     # narrative.py for the reference shape); merged once here so a term defined by more
     # than one module (e.g. "UTC") only appears once, alphabetically, at the bottom of
     # the whole report rather than repeated per module section.
+    memory_context = presented.get("module_c_memory")
+    if memory_context is not None:
+        memory_context["process_registry_notes"] = _relate_processes_to_registry(
+            presented.get("module_a_registry"), memory_context
+        )
+
     glossary: dict[str, str] = {}
     for context in presented.values():
         glossary.update(context.get("glossary", {}))

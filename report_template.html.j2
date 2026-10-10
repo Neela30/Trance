@@ -1143,6 +1143,39 @@
       </ul>
     </div>
     {% endif %}
+    {% set pa = memory.volatility3.process_activity %}
+    {% if pa %}
+    <div class="section-head" style="margin-top:22px;">
+      <h3 style="font-size:15px; font-weight:600;">Tor Browser processes</h3>
+      <span class="count">from windows.psscan, grouped by parent process</span>
+    </div>
+    {% if pa.groups %}
+    <p class="note">{{ pa.process_count }} Tor Browser process{{ "es" if pa.process_count != 1 }} (firefox.exe / tor.exe) ran from {{ pa.first_start|fmt_ts }}{% if pa.still_running %}, and some were still running when the image was taken{% else %} to {{ pa.last_exit|fmt_ts }}{% endif %}, in {{ pa.groups|length }} group{{ "s" if pa.groups|length != 1 }} by parent process. A group is the set of processes one parent started: Tor Browser starts several per run and their parents have often exited, so a group is not necessarily one launch.</p>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Parent PID</th><th>Processes</th><th>First started</th><th>Last exited</th></tr></thead>
+        <tbody>
+          {% for g in pa.groups %}
+          <tr>
+            <td class="mono">{{ g.parent_pid }}</td>
+            <td>{{ g.count }} &times; {{ g.names|join(", ") }}</td>
+            <td class="off">{{ g.first_start|fmt_ts }}</td>
+            <td class="off">{% if g.still_running %}still running at capture{% else %}{{ g.last_exit|fmt_ts }}{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% for note in memory.process_registry_notes %}
+    <p class="note"><strong>Compared with the registry:</strong> {{ note }}</p>
+    {% endfor %}
+    {% if pa.clock_anomalies %}
+    <div class="callout">
+      <strong>Clock anomaly:</strong> {{ pa.clock_anomalies|length }} process{{ "es" if pa.clock_anomalies|length != 1 }} in the table below show{{ "s" if pa.clock_anomalies|length == 1 }} a creation time after this image was taken ({{ pa.capture_time|fmt_ts }}), which is impossible: the computer's clock was wrong when they started (for example before it synchronised its time). They are left out of the timing above; treat their timestamps as unreliable. First few: {% for a in pa.clock_anomalies[:5] %}<span class="mono">{{ a.name }} (PID {{ a.pid }}, {{ a.created|fmt_ts }})</span>{{ ", " if not loop.last }}{% endfor %}.
+    </div>
+    {% endif %}
+    {% endif %}
     {% for p in memory.volatility3.plugins %}
     <div class="section-head" style="margin-top:22px;">
       <h3 style="font-size:15px; font-weight:600;">{{ p.label }}</h3>
