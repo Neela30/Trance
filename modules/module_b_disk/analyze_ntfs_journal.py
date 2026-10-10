@@ -139,6 +139,7 @@ def parse_mft_record(raw: bytes, number: int) -> dict | None:
         "name": None,
         "namespace": None,
         "parent": None,
+        "parent_sequence": None,
         "created_utc": None,
         "modified_utc": None,
         "fn_created_utc": None,
@@ -183,6 +184,7 @@ def parse_mft_record(raw: bytes, number: int) -> dict | None:
                 entry["name"] = fname
                 entry["namespace"] = namespace
                 entry["parent"] = parent_ref & 0xFFFFFFFFFFFF
+                entry["parent_sequence"] = parent_ref >> 48
                 entry["fn_created_utc"] = _filetime(fn_created)
                 entry["size"] = real_size
         elif attr_type == ATTR_DATA:
@@ -212,27 +214,71 @@ def parse_mft(path: Path) -> dict[int, dict]:
     return records
 
 
-def resolve_path(records: dict[int, dict], number: int) -> str:
+def _is_parent_of(entry: dict, sequence: int | None) -> bool:
+    """Whether MFT entry `entry` is still the directory a reference with `sequence` meant.
+
+    A file reference is a record number plus a sequence number, and NTFS reuses record
+    numbers: when it frees a record it increments the sequence, so a stale reference stops
+    matching. Resolving by record number alone (as this used to) attached old entries to
+    whatever now holds the number -- a reviewer found "prefs.js\\contrast-black" and
+    "Tor\\state\\LargeTile.scale-100.png" (files used as folders), and unrelated WindowsApps
+    files counted as Tor activity. A parent must be a directory, and its sequence must match,
+    or be one higher on a record that is no longer in use (a deleted directory that still
+    holds its name). A sequence of 0 means none was recorded, so only the directory check
+    applies."""
+    if not entry["is_dir"]:
+        return False
+    if not sequence:
+        return True
+    current = entry["sequence"]
+    return current == sequence or (not entry["in_use"] and current == (sequence + 1) & 0xFFFF)
+
+
+def _folder_path(records: dict[int, dict], parent: int | None, sequence: int | None) -> str:
+    """The folder a reference (record number + sequence) points at, as a path from the root;
+    "<unresolved:N>" where a link in the chain is missing, reused or not a directory."""
     parts = []
     seen = set()
-    current = number
-    while current in records and current not in seen and current != ROOT_RECORD:
+    current, expected = parent, sequence
+    while current is not None and current != ROOT_RECORD:
+        entry = records.get(current)
+        if entry is None or current in seen or not _is_parent_of(entry, expected):
+            parts.append(f"<unresolved:{current}>")
+            break
         seen.add(current)
-        entry = records[current]
         parts.append(entry["name"])
-        current = entry["parent"]
-    if current != ROOT_RECORD:
-        parts.append(f"<unresolved:{current}>")
+        current, expected = entry["parent"], entry.get("parent_sequence")
     return "\\".join(reversed(parts))
 
 
+def resolve_path(records: dict[int, dict], number: int) -> str:
+    if number == ROOT_RECORD:
+        return ""
+    entry = records.get(number)
+    if entry is None:
+        return f"<unresolved:{number}>"
+    folder = _folder_path(records, entry["parent"], entry.get("parent_sequence"))
+    return f"{folder}\\{entry['name']}" if folder else entry["name"]
+
+
+# Daemon file names other programs use too. Like Firefox's own profile file names (a plain
+# Firefox install writes places.sqlite and prefs.js as well), they only count inside a Tor
+# folder: by name alone, every "state" file Windows writes was counted as Tor activity.
+GENERIC_DAEMON_FILES = frozenset({"state", "lock"})
+# A Tor Browser install, or a folder named "tor" (the tor daemon's own default data folder,
+# %APPDATA%\tor, and the Data\Tor folder inside Tor Browser).
+TOR_FOLDER_RE = re.compile(r"tor ?browser|torbrowser|(?:^|\\)tor(?:\\|$)", re.IGNORECASE)
+
+
 def _is_tor_related(name: str, path: str) -> bool:
-    return bool(
-        TOR_PATH_RE.search(path)
-        or AUTH_PRIVATE_RE.match(name)
-        or name in TOR_DAEMON_FILES
-        or PROFILE_FILE_RE.match(name)
-    )
+    if TOR_PATH_RE.search(path) or AUTH_PRIVATE_RE.match(name):
+        return True
+    if name in TOR_DAEMON_FILES and name not in GENERIC_DAEMON_FILES:
+        return True
+    if name in GENERIC_DAEMON_FILES or PROFILE_FILE_RE.match(name):
+        folder = path.rsplit("\\", 1)[0] if "\\" in path else ""
+        return bool(TOR_FOLDER_RE.search(folder))
+    return False
 
 
 def analyze_mft_records(records: dict[int, dict]) -> dict:
@@ -406,6 +452,7 @@ def parse_usn_record(record: bytes) -> dict | None:
         "reasons": [label for bit, label in USN_REASONS.items() if reason & bit],
         "record": file_ref & 0xFFFFFFFFFFFF,
         "parent": parent_ref & 0xFFFFFFFFFFFF,
+        "parent_sequence": parent_ref >> 48,
         "name": name,
     }
 
@@ -435,12 +482,13 @@ def analyze_usn(path: Path, records: dict[int, dict]) -> dict:
     temp_created: dict[int, dict] = {}
     pending_rename: dict[int, dict] = {}
     recent_download: dict[int, dict] = {}
-    path_cache: dict[int, str] = {}
+    path_cache: dict[tuple[int, int], str] = {}
 
-    def parent_path(parent: int) -> str:
-        if parent not in path_cache:
-            path_cache[parent] = resolve_path(records, parent) if records else ""
-        return path_cache[parent]
+    def parent_path(parent: int, sequence: int) -> str:
+        key = (parent, sequence)
+        if key not in path_cache:
+            path_cache[key] = _folder_path(records, parent, sequence) if records else ""
+        return path_cache[key]
 
     for raw in _iter_usn_records(path):
         rec = parse_usn_record(raw)
@@ -449,7 +497,7 @@ def analyze_usn(path: Path, records: dict[int, dict]) -> dict:
         total += 1
         first = first or rec["time_utc"]
         last = rec["time_utc"] or last
-        folder = parent_path(rec["parent"])
+        folder = parent_path(rec["parent"], rec["parent_sequence"])
         full = f"{folder}\\{rec['name']}" if folder else rec["name"]
         match = AUTH_PRIVATE_RE.match(rec["name"])
         if match:
