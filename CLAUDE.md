@@ -515,6 +515,48 @@ What follows describes the current state.
   with the target host in the same extracted string ("host anchoring"); failures go to
   `host_anchoring.unanchored`. Produces `key_findings` (deduped, high-confidence only) and an
   offset-ordered pseudo-timeline (explicitly **not** chronological).
+  - **Evaluated against 4 scripted runs (2026-10-09/10; see `scripts/score_run.py`)**: a
+    plain strings search found every planted item in a full-RAM capture taken with the
+    browser open, but the analyzer recovered only 22/37. Three extractor gaps were closed,
+    each measured on the real image first rather than guessed:
+    - **Login pairs** (`username`/`password`): Firefox keeps field names as one-byte strings
+      and typed values as UTF-16 a few bytes apart, so `field=value`/JSON never matched.
+      Field name + a value starting within `ADJACENT_GAP` (64 B) are paired, grouped, and
+      kept only if the target username is among the values or a target mention is within
+      `PROXIMITY_WINDOW` (2 KiB; measured 352/432/768 B on the capture). Needs `--onion`/
+      `--host`/`--username` to anchor to; with none, nothing new is emitted.
+    - **Form bodies** (`details.targeted.form_submissions`): `name=value&...` bodies, decoded,
+      same proximity/username anchor; Firefox origin-attribute strings
+      (`privateBrowsingId=1&firstPartyDomain=...`) are excluded (they made 37 junk entries).
+    - **Page titles** (`details.targeted.page_titles`): `<title>` can't be anchored by
+      distance (0/10 real titles within 4 KiB of the host) so a title is kept when the HTML
+      right after it links to >= `MIN_TITLE_LINKS` (3) paths already seen under the target
+      host. Real capture: 10/10 visited titles, 0 of the unvisited ones, no foreign title.
+  - **Artifacts are findings only**: observations (every hit, low confidence included) stay
+    in `details.targeted`; `artifacts` gets only target URLs, high-confidence cookies /
+    credentials / downloads and non-placeholder searches, once per distinct (type,
+    description). A negative-control capture went from 3,175 to 28 B/C artifacts.
+  - **Cookie names are an input** (`--cookie-name`, repeatable; GUI "Cookie names"; default
+    = the control site's `session`/`trance_user`/`trance_pref`). Cookies sit 24 KB+ from any
+    host string, so they can't be proximity-anchored; they are found by name.
+  - **Speed**: the scan is split into CHUNK-aligned segments run in a process pool (up to 8
+    workers; `TRANCE_WORKERS=1` = fully sequential, also serialises the modules), the file
+    is hashed once beside the scans, and each regex is skipped when the literal text it
+    needs is absent. A segment owns strings that *start* in it and reads 64 KiB past its end;
+    past its end it only finishes pairs/titles it began. Module B's onion carve got the same
+    per-chunk literal gates. `run_pipeline` runs A/B/C concurrently and still assembles
+    results in `MODULES` order. Full 8.6 GB capture: ~16 min -> ~2.4 min. Each module's
+    wall time is in `findings.json` (`modules.<name>.duration_seconds`). Outputs were checked
+    identical to the old sequential code on real data (only the raw string count can differ
+    by one where a long run straddled a read window). A frozen exe needs
+    `multiprocessing.freeze_support()` (called at the three entry points) -- **not yet tried
+    in a built Windows exe**.
+  - **Known limits**: the extractors were designed while looking at the same capture they
+    are scored on, so 37/37 is *not* an independent result -- validate on a fresh run.
+    "Seen" vs "visited" URLs is not separable from string shape (a decoy download link sits
+    in the same kind of string list as a real download URL); the decoy claims-form link is
+    still reported as a URL artifact. Cross-module corroboration (a `/download/` URL with no
+    file in Downloads) is the likely fix.
 - **Structural pass** (`volatility_analyze.py`, opt-in `--vol3-path`): shells out to
   Volatility3's `vol` CLI (psscan/netscan/filescan/cmdline/hivelist) — never imported
   in-process. `--vol3-extract-process firefox.exe` narrows a full image to one process first.
@@ -574,8 +616,11 @@ from the extension-less `SYSTEM_*` glob, and prefers a full-memory image over a 
 ### Dev loop
 ```bash
 source .venv/bin/activate
-python -m pytest -q          # ~210 tests, ~5s
+python -m pytest -q          # ~635 tests, ~15s
 ruff check . && black --check .
+# Score a run against the planted ground truth (recall, decoy hits, strings baseline):
+python scripts/score_run.py score --ground-truth ground_truth.json --findings <case>/findings.json \
+    --run-id c4-r01 --condition C4 --baseline <evidence folder>
 ```
 
 ---
@@ -695,6 +740,11 @@ PyInstaller never cross-compiles: Windows exes must be built on Windows. `*.spec
    separate run).
 
 ### P1 — rule-based findings instead of regex-hit dumping (the main quality problem)
+
+> **Partly done (see Module C's "Evaluated against 4 scripted runs" in §4):** artifacts are now
+> high-confidence + de-duplicated, three extractor gaps are closed and cookie names are an
+> input. Still open below: a named-rule registry with tiers, built-in exclusion rules
+> (TRANCE's own acquisition traces), cross-module corroboration, golden-file tests.
 
 The report's stated goal is "every interpretive note is a fixed, auditable rule". In
 practice Module C turns every regex hit into a finding. Measured on
