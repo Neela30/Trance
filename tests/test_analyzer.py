@@ -206,3 +206,57 @@ def test_adjacent_credentials_need_a_target_to_anchor_to(tmp_path):
         username=None,
     )
     assert not report["targeted"]["credentials"]
+
+
+FORM = (
+    b"subject=Thursday+delivery+access&email=t.maricourt%40harbourline.example"
+    b"&message=Please+send+the+gate+code+for+berth+14."
+)
+
+
+def test_form_body_near_target_is_extracted_and_decoded(tmp_path):
+    data = b"http://target.onion/contact\x00" + SEP + FORM + b"\x00" + SEP + FORM + b"\x00"
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    forms = report["targeted"]["form_submissions"]
+    assert len(forms) == 1 and forms[0]["occurrences"] == 2
+    assert forms[0]["anchored_by"] == "host"
+    fields = {f["name"]: f["value"] for f in forms[0]["fields"]}
+    assert fields["subject"] == "Thursday delivery access"
+    assert fields["email"] == "t.maricourt@harbourline.example"
+    description = next(
+        a["description"] for a in report["artifacts"] if a["artifact_type"] == "form_submission"
+    )
+    assert "message='Please send the gate code for berth 14.'" in description
+
+
+def test_form_body_far_from_target_is_dropped(tmp_path):
+    data = b"http://target.onion/contact\x00" + b"Z" * (PROXIMITY_WINDOW * 3) + FORM + b"\x00"
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    assert report["targeted"]["form_submissions"] == []
+
+
+def test_url_query_strings_and_flag_blobs_are_not_forms(tmp_path):
+    data = (
+        b"http://target.onion/search?q=ferry&page=2&sort=asc\x00"
+        b"telemetry=1&enabled=true&count=42&ratio=7\x00"
+    )
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    assert report["targeted"]["form_submissions"] == []

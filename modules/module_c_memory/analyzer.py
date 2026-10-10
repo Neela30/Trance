@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 from core.exceptions import IntegrityError, ParsingError
 from core.hashing import hash_file
@@ -87,6 +88,12 @@ CREDENTIAL_RE = re.compile(r"\b" + CREDENTIAL_FIELDS + r"=([^\s&\"'<>]+)")
 CREDENTIAL_JSON_RE = re.compile(r'"' + CREDENTIAL_FIELDS + r'"\s*:\s*"([^"\\]{1,200})"')
 NOISY_COOKIE_RE = re.compile(
     r"\b(\w*(?:session|token|auth|cookie|csrf)\w*)=([^\s;\"'<>]{1,80})", re.IGNORECASE
+)
+# A posted form body: two or more name=value pairs joined by '&'. The lookbehind keeps it from
+# starting inside a URL's query string ("...?a=1&b=2" is a link, not a submission).
+FORM_BODY_RE = re.compile(
+    r"(?<![\w?%./=&:-])(?:[A-Za-z][\w.\-\[\]]{0,39}=[^&\s\"'<>]{0,1000}&)+"
+    r"[A-Za-z][\w.\-\[\]]{0,39}=[^&\s\"'<>]{0,1000}"
 )
 # Local download evidence: Firefox's in-memory download manager / session
 # strings carry either a file:// URI or an absolute Windows path ending in a
@@ -282,6 +289,25 @@ def _is_plausible_credential_value(value: str) -> bool:
     )
 
 
+_FLAG_WORDS = frozenset(
+    {"true", "false", "null", "none", "undefined", "enabled", "disabled", "yes", "no", "default"}
+)
+
+
+def _parse_form_body(body: str) -> list[tuple[str, str]]:
+    """Decoded (name, value) pairs of a posted form body, or [] if it doesn't look like one."""
+    pairs = parse_qsl(body, keep_blank_values=True)
+    if len(pairs) < 2 or any(_TEMPLATE_NOISE_RE.search(k) for k, _ in pairs):
+        return []
+    # Telemetry and config blobs are '&'-joined too; a real form carries at least one value
+    # a person typed (some letters/digits) rather than only flags and numbers.
+    if not any(
+        sum(ch.isalpha() for ch in v) >= 3 and v.lower() not in _FLAG_WORDS for _, v in pairs
+    ):
+        return []
+    return pairs
+
+
 def _near_any(sorted_offsets: list[int], offset: int, window: int) -> bool:
     i = bisect.bisect_left(sorted_offsets, offset - window)
     return i < len(sorted_offsets) and sorted_offsets[i] <= offset + window
@@ -414,6 +440,7 @@ def analyze(
     target_offsets: list[int] = []
     pending_field: tuple[str, int] | None = None
     adjacent_pairs: list[dict] = []
+    form_candidates: list[dict] = []
 
     def record_unanchored(category: str, value: str) -> None:
         unanchored_counts[category] += 1
@@ -459,6 +486,12 @@ def analyze(
                     pending_field = None
                 elif gap > ADJACENT_GAP:
                     pending_field = None
+
+        if anchor_enabled and "&" in s:
+            for m in FORM_BODY_RE.finditer(s):
+                fields = _parse_form_body(m.group())
+                if fields:
+                    form_candidates.append({"offset": offset + m.start(), "fields": fields})
 
         url_spans: list[tuple[int, int]] = []
         url_hits: list[tuple[int, str, str, str]] = []
@@ -623,6 +656,33 @@ def analyze(
             )
             record_artifact("credential", p["offset"], f"{p['field']}={p['value']}")
 
+    # Posted forms: anchored by the target username among the values or by a nearby target
+    # mention. The same body is often in memory several times -- keep one, count the rest.
+    form_submissions: list[dict] = []
+    seen_forms: dict[tuple, dict] = {}
+    for cand in sorted(form_candidates, key=lambda c: c["offset"]):
+        anchored_by = None
+        if username and any(username.lower() in v.lower() for _, v in cand["fields"]):
+            anchored_by = "username"
+        elif _near_any(target_offsets, cand["offset"], PROXIMITY_WINDOW):
+            anchored_by = "host"
+        if anchored_by is None:
+            continue
+        key = tuple(cand["fields"])
+        if key in seen_forms:
+            seen_forms[key]["occurrences"] += 1
+            continue
+        record = {
+            "offset": hex(cand["offset"]),
+            "fields": [{"name": k, "value": v} for k, v in cand["fields"]],
+            "anchored_by": anchored_by,
+            "occurrences": 1,
+        }
+        seen_forms[key] = record
+        append_capped(form_submissions, record, "form_submissions")
+        shown = "; ".join(f"{k}='{v}'" for k, v in cand["fields"])
+        record_artifact("form_submission", cand["offset"], f"Form submission: {shown}")
+
     # Tor Browser itself talks to a handful of bundled default onion services
     # (search engine, connectivity checks) whether or not the user does
     # anything — those show up here too and are expected background noise,
@@ -679,6 +739,7 @@ def analyze(
             "search_queries": search_queries,
             "credentials": credentials,
             "downloads": downloads,
+            "form_submissions": form_submissions,
         },
         "timeline": {
             "disclaimer": "Ordered by memory offset ONLY — not a verified chronological timeline. Physical "
