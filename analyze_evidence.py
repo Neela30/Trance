@@ -231,6 +231,8 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
     ):
         if value:
             argv += [flag, value]
+    for name in getattr(args, "cookie_names", None) or []:
+        argv += ["--cookie-name", name]
     if args.vol3_extract_pid is not None:
         argv += ["--vol3-extract-pid", str(args.vol3_extract_pid)]
     return argv
@@ -277,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--onion")
     parser.add_argument("--host")
     parser.add_argument("--username")
+    parser.add_argument("--cookie-name", action="append", dest="cookie_names")
     parser.add_argument("--vol3-path")
     parser.add_argument("--vol3-extract-process")
     parser.add_argument("--vol3-extract-pid", type=int)

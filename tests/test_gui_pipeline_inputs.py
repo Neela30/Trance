@@ -51,3 +51,11 @@ def test_module_kwargs_from_resolved_passes_the_downloads_scan():
     assert kwargs["module_b_disk"]["downloads_scan"] == Path(
         "disk/downloads/zone_identifier_scan.json"
     )
+
+
+def test_cookie_names_field_is_split_trimmed_and_blank_means_default():
+    from gui.pipeline_inputs import module_kwargs_from_resolved
+
+    kwargs = module_kwargs_from_resolved({}, "", "", "", cookie_names=" sid , csrf_token,, ")
+    assert kwargs["module_c_memory"]["cookie_names"] == ["sid", "csrf_token"]
+    assert module_kwargs_from_resolved({}, "", "", "")["module_c_memory"]["cookie_names"] is None

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import functools
 import html
 import json
 import os
 import re
 import sys
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -99,7 +100,18 @@ ONION_RE = re.compile(
     re.IGNORECASE,
 )
 ONION_DOMAIN_RE = re.compile(r"[a-z2-7]{16,56}\.onion", re.IGNORECASE)
-COOKIE_RE = re.compile(r"\b(session|trance_user|trance_pref)=([^\s;\"'<>]+)")
+# Cookie names to look for. Defaults to the control site's names so existing runs behave the
+# same; a real target's names come in through analyze(cookie_names=...) / --cookie-name.
+DEFAULT_COOKIE_NAMES = ("session", "trance_user", "trance_pref")
+
+
+@functools.lru_cache(maxsize=8)
+def _cookie_regex(names: tuple[str, ...]) -> re.Pattern[str]:
+    alternatives = "|".join(re.escape(n) for n in names)
+    return re.compile(r"\b(" + alternatives + r")=([^\s;\"'<>]+)")
+
+
+COOKIE_RE = _cookie_regex(DEFAULT_COOKIE_NAMES)
 SEARCH_QUERY_RE = re.compile(r"\?q=([^\s&\"'<>]+)")
 # Lowercase-only and literal =/JSON-":" separators on purpose: keeps this from
 # matching uppercase Windows env-var dumps (USERNAME=<os user>) and C++/JS
@@ -450,6 +462,7 @@ def _scan_segment(
     record_cap: int,
     require_host_anchor: bool,
     anchor_enabled: bool,
+    cookie_names: tuple[str, ...],
 ) -> dict:
     """String-carve [start, end) of the dump and return the raw, unmerged partial results.
 
@@ -458,6 +471,7 @@ def _scan_segment(
     past `end` only so that a login pair or page title that begins inside the segment is
     still completed.
     """
+    cookie_re = _cookie_regex(cookie_names)
     urls: list[dict] = []
     cookies: list[dict] = []
     search_queries: list[dict] = []
@@ -613,7 +627,7 @@ def _scan_segment(
             if len(onion_domain_hits) > 10_000:
                 onion_domain_hits = Counter(dict(onion_domain_hits.most_common(1_000)))
 
-        for m in COOKIE_RE.finditer(s) if has_eq else ():
+        for m in cookie_re.finditer(s) if has_eq else ():
             # Not host-anchored, unlike credentials/search-queries below: a cookie lives
             # in Firefox's own cookie-jar structure, not co-located in memory with the
             # page/URL text that set it, so the same-string proximity check that works
@@ -846,6 +860,7 @@ def analyze(
     min_len: int = DEFAULT_MIN_LEN,
     source_type: str = DEFAULT_SOURCE_TYPE,
     workers: int | None = None,
+    cookie_names: Sequence[str] | None = None,
 ) -> dict:
     if not dump_path.exists():
         raise ParsingError(f"Dump file not found: {dump_path}")
@@ -879,6 +894,7 @@ def analyze(
             "record_cap": record_cap,
             "require_host_anchor": require_host_anchor,
             "anchor_enabled": anchor_enabled,
+            "cookie_names": tuple(cookie_names) if cookie_names else DEFAULT_COOKIE_NAMES,
         },
     )
     integrity_verified = _check_sidecar(dump_path, dump_sha256)
@@ -1087,7 +1103,12 @@ def analyze(
         },
         "record_cap": record_cap,
         "suggestion_min_hits": suggestion_min_hits,
-        "targeting": {"onion": onion, "host": host, "username": username},
+        "targeting": {
+            "onion": onion,
+            "host": host,
+            "username": username,
+            "cookie_names": list(cookie_names) if cookie_names else list(DEFAULT_COOKIE_NAMES),
+        },
         "targeting_suggestions": targeting_suggestions,
         "key_findings": {
             "note": "Deduplicated, high-confidence hits only — start here. Full detail incl. low-confidence "

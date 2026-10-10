@@ -260,6 +260,14 @@ def main(argv: list[str] | None = None) -> int:
         "--username", help="Known username to highlight in recovered search queries"
     )
     memory.add_argument(
+        "--cookie-name",
+        action="append",
+        dest="cookie_names",
+        metavar="NAME",
+        help="Name of a cookie to look for in memory (repeatable). Default: the control "
+        "site's session/trance_user/trance_pref -- give the target's own names for a real case",
+    )
+    memory.add_argument(
         "--source-type",
         choices=("process", "full-memory"),
         default="process",
@@ -343,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
             "onion": args.onion,
             "host": args.host,
             "username": args.username,
+            "cookie_names": args.cookie_names,
             "source_type": args.source_type,
             "vol3_path": args.vol3_path,
             "vol3_extract_process": args.vol3_extract_process,

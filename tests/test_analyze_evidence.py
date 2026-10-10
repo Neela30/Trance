@@ -349,3 +349,16 @@ def test_resolve_from_manifest_uses_a_partially_copied_tor_dir_from_the_same_fol
 def test_build_argv_passes_the_downloads_scan(tmp_path):
     argv = analyze_evidence.build_argv(_base_args(), {"downloads_scan": "disk/downloads/s.json"})
     assert argv[argv.index("--downloads-scan") + 1] == "disk/downloads/s.json"
+
+
+def test_build_argv_passes_each_cookie_name_through():
+    args = _base_args(cookie_names=["sid", "csrf_token"])
+    argv = analyze_evidence.build_argv(args, {})
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--cookie-name"] == [
+        "sid",
+        "csrf_token",
+    ]
+
+
+def test_build_argv_omits_cookie_name_when_none_given():
+    assert "--cookie-name" not in analyze_evidence.build_argv(_base_args(), {})

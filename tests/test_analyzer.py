@@ -460,3 +460,24 @@ def test_a_login_pair_repeated_in_memory_is_one_credential_artifact(tmp_path):
         "password=S3cret-Pass-9",
         "username=alice.test",
     ]
+
+
+def test_cookie_names_are_an_input_not_a_hard_coded_list(tmp_path):
+    data = b"Cookie: sid=abc123def; theme=dark; session=zzzzzz\x00http://target.onion/\x00"
+    dump = make_dump(tmp_path, data)
+    default = analyze(dump, onion="target.onion", host=None, username=None)
+    assert {c["name"] for c in default["targeted"]["cookies"]} == {"session"}
+    assert default["targeting"]["cookie_names"] == ["session", "trance_user", "trance_pref"]
+
+    custom = analyze(dump, onion="target.onion", host=None, username=None, cookie_names=["sid"])
+    assert [(c["name"], c["value"]) for c in custom["targeted"]["cookies"]] == [
+        ("sid", "abc123def")
+    ]
+    assert _artifacts(custom, "cookie") == ["sid=abc123def"]
+    assert custom["targeting"]["cookie_names"] == ["sid"]
+
+
+def test_cookie_name_is_matched_literally_not_as_a_pattern(tmp_path):
+    dump = make_dump(tmp_path, b"a.b=1 axb=2 http://target.onion/\x00")
+    report = analyze(dump, onion="target.onion", host=None, username=None, cookie_names=["a.b"])
+    assert [c["name"] for c in report["targeted"]["cookies"]] == ["a.b"]

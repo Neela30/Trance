@@ -49,6 +49,7 @@ class AnalysisRequest:
     onion: str = ""
     host: str = ""
     username: str = ""
+    cookie_names: str = ""  # comma-separated; blank = the analyzer's defaults
     report_timezone: str = ""  # IANA zone name; blank = auto-detect this machine's own
     disk_image: str | None = None
     mount_image: bool = False  # mount disk_image read-only and analyse the volume

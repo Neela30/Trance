@@ -68,7 +68,7 @@ def run(request_path: Path) -> int:
         request = AnalysisRequest.from_json(Path(request_path).read_text(encoding="utf-8"))
         inputs = effective_inputs(request)
         module_kwargs = module_kwargs_from_resolved(
-            inputs, request.onion, request.host, request.username
+            inputs, request.onion, request.host, request.username, request.cookie_names
         )
         request.case_dir.mkdir(parents=True, exist_ok=True)
         config = TranceConfig(
