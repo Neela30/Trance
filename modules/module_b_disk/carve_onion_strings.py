@@ -65,6 +65,24 @@ MARKER_PATTERNS = {
 }
 MARKER_RE = {k: re.compile(v) for k, v in MARKER_PATTERNS.items()}
 
+# Literal text each pattern needs in order to match at all. The patterns above start with a
+# repeated character class, so the regex engine tries every byte position, which made this
+# scan about 75 s per GB; almost every chunk of a pagefile holds none of these literals, so
+# checking for them first (a plain substring search, far faster) skips the regex there. A
+# gate is only false when its pattern cannot match, so results are unchanged. The ONION /
+# AUTH / UTF-16 patterns are case-insensitive, so those gates search a lowercased copy.
+ONION_GATE = b".onion"
+AUTH_GATE = b":descriptor:x25519:"
+UTF16_GATES = (b".\x00o\x00n\x00i\x00o\x00n\x00", b".\x00a\x00u\x00t\x00h\x00_\x00")
+MARKER_GATES = {
+    "tor_control": (b"NEWNYM",),
+    "tor_state": (b"EntryGuard",),
+    "tor_consensus": (b"network-status-version 3",),
+    "tor_browser_path": (b"rowser",),
+    "torrc": (b"HiddenServiceDir", b"ClientOnionAuthDir", b"SocksPort"),
+    "onion_auth": (b"descriptor:x25519:",),
+}
+
 
 def scan(image: Path, extra: list[re.Pattern]) -> dict:
     size = image.stat().st_size
@@ -97,7 +115,12 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
             def new_match(match: re.Match) -> bool:
                 return not tail or match.end() > len(tail)
 
-            for m in ONION_RE.finditer(buf):
+            low = buf.lower()
+            has_onion = ONION_GATE in low
+            has_auth = AUTH_GATE in low
+            has_utf16 = any(g in low for g in UTF16_GATES)
+
+            for m in ONION_RE.finditer(buf) if has_onion else ():
                 if not new_match(m):
                     continue
                 addr = m.group(0).lower()
@@ -106,7 +129,7 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
                 if len(onion_hits[addr]) < 20:  # cap: we want proof, not a dump
                     onion_hits[addr].append(buf_start + m.start())
 
-            for m in AUTH_CRED_RE.finditer(buf):
+            for m in AUTH_CRED_RE.finditer(buf) if has_auth else ():
                 if not new_match(m):
                     continue
                 key = (m.group(1).lower(), m.group(2).lower())
@@ -115,7 +138,7 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
                 if len(auth_creds[key]) < 20:
                     auth_creds[key].append(buf_start + m.start())
 
-            for m in UTF16_ONION_RE.finditer(buf):
+            for m in UTF16_ONION_RE.finditer(buf) if has_utf16 else ():
                 if not new_match(m):
                     continue
                 name = m.group(0).replace(b"\x00", b"").lower()
@@ -125,6 +148,8 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
                     utf16_hits[name].append(buf_start + m.start())
 
             for name, rx in MARKER_RE.items():
+                if not any(g in buf for g in MARKER_GATES[name]):
+                    continue
                 for m in rx.finditer(buf):
                     if not new_match(m):
                         continue

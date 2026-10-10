@@ -369,6 +369,41 @@ def test_raw_carve_hashes_image_and_deduplicates_overlap(tmp_path, monkeypatch):
     assert report["image_sha256"] == hashlib.sha256(image.read_bytes()).hexdigest()
 
 
+def test_carve_finds_every_pattern_the_literal_gates_guard(tmp_path):
+    # carve_onion_strings skips a regex when the literal text it needs is absent from the
+    # chunk; each gate must still let its own pattern through (uppercase and UTF-16 too).
+    addr = "b" * 56
+    pieces = [
+        b"junk" * 50,
+        addr.upper().encode() + b".ONION",  # case-insensitive pattern, upper-case text
+        (addr + ".auth_private").encode("utf-16-le"),  # UTF-16 filename, .auth_private ending
+        ("c" * 56 + ".onion").encode("utf-16-le"),  # UTF-16 filename, .onion ending
+        (addr + ":descriptor:x25519:" + "A" * 52).encode(),
+        b"SIGNAL NEWNYM",
+        b"EntryGuardFoo",
+        b"network-status-version 3",
+        b"Tor Browser\\Browser",
+        b"SocksPort 9150",
+    ]
+    image = tmp_path / "disk.raw"
+    image.write_bytes(b"\x00\x01".join(pieces))
+    report = carve_onion_strings.scan(image, [])
+    assert addr + ".onion" in report["onion_addresses"]
+    assert report["client_auth_credentials"][0]["onion_address"] == addr + ".onion"
+    assert set(report["utf16_filenames"]) == {addr + ".auth_private", "c" * 56 + ".onion"}
+    assert set(report["tor_markers"]) == set(carve_onion_strings.MARKER_PATTERNS)
+
+
+def test_carve_of_a_chunk_with_none_of_the_literals_reports_nothing(tmp_path):
+    image = tmp_path / "disk.raw"
+    image.write_bytes(b"nothing of interest here " * 1000)
+    report = carve_onion_strings.scan(image, [])
+    assert report["onion_addresses"] == {}
+    assert report["client_auth_credentials"] == []
+    assert report["utf16_filenames"] == {}
+    assert report["tor_markers"] == {}
+
+
 def _filetime(moment: dt.datetime) -> int:
     epoch = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc)
     return int((moment - epoch).total_seconds() * 10_000_000)
