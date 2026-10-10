@@ -57,7 +57,7 @@ core/                     shared: config, schema, custody_log, hashing, exceptio
 modules/module_a_registry/  Module A
 modules/module_b_disk/      Module B
 modules/module_c_memory/    Module C
-tests/                    pytest suite (~635 tests)
+tests/                    pytest suite (~660 tests)
 scripts/score_run.py      scores a run's findings.json against planted ground truth (see §10)
 output/                   local case outputs (gitignored) — some are STALE, see §8
 .github/workflows/ci.yml  pytest + ruff + black on push/PR to main/dev
@@ -299,6 +299,11 @@ What follows describes the current state.
   capture: that machine's `E:`/`C:`/`D:` are genuine Dynamic Disk volumes (confirmed via
   raw bytes) while its `F:`/`G:` decode cleanly to real USBSTOR paths — proving both the
   dynamic-disk branch and the decode path itself are sound, not just mocked.
+- **"Last opened" = the UserAssist launch** (headline, timeline, network instant). A BAM time
+  more than `BAM_SAME_USE_SECONDS` (60 s) later is its own sentence ("Windows last recorded Tor
+  Browser running …; most likely when that use ended"): on a real capture BAM was the exact
+  second the browser process exited (psscan), ten minutes after the launch. Before 2026-10-10
+  the later of the two was reported as "most recent use".
 - **Narrative** (`narrative.py`): deterministic, rule-based plain-English story
   (`key_finding`/`timeline`/`reliability`/`not_determined`/`device_story` for a
   non-technical reader, plus a `technical` sub-dict) — still doesn't reference Phase 0's
@@ -498,6 +503,17 @@ What follows describes the current state.
   one degrades the module to `partial` with a `details["warnings"]` entry, and the dedicated
   presenter still renders. `error` is reserved for a hash-verification (`IntegrityError`)
   failure.
+- **Journal/MFT path resolution** (`analyze_ntfs_journal._folder_path`): a parent reference is
+  record number + sequence; the parent must be a directory and its sequence must match (or be
+  one higher on a freed record = a deleted folder still holding its name), else
+  `<unresolved:N>`. Resolving by number alone filed entries under whatever reused the record
+  (`prefs.js\contrast-black`). Generic names (`state`, `lock`, Firefox profile files) count as
+  Tor activity only inside a Tor Browser path or a `\tor\` folder (`_is_tor_related`);
+  names only Tor writes count anywhere. c3: 3,880 -> 3,750 Tor journal events.
+- Report wording: per-file residue onion counts use the same valid-v3 rule as the summary
+  (other pattern matches shown, not counted); the live downloads scan is "found by the live
+  scan" with its skipped folders listed (it skips `AppData`, `Windows`, …), plus the `$MFT`'s
+  independent Zone.Identifier count; only a mounted volume says "the whole volume".
 - `$MFT` resident content is also scanned with `AUTH_CRED_RE`: an `.auth_private` file is
   small enough to live inside its MFT record, so a deleted credential's address + key are
   recovered (`mft.resident_auth_credentials`, artifact `ntfs_onion_client_auth`; the key
@@ -561,6 +577,24 @@ What follows describes the current state.
   - **Measured result** (same four runs re-analysed, §10): C4 22/37 -> **37/37**; C1 and C3
     unchanged (they were already at the strings-search ceiling: 6/7 and 7/8); the negative
     control still passes and its B/C artifacts fell 3,175 -> 28; ~16 min -> ~2.4 min per case.
+  - **No target on a full-memory image** (no `--onion`/`--host`): nothing can be tied to Tor
+    Browser, so credentials, searches, cookies and downloads all stay in
+    `host_anchoring.unanchored` with `"no_target": true`, no memory artifacts are emitted, and
+    the report opens the memory section with a callout naming the most-mentioned onion as a
+    re-run command; `main.py` and the GUI warn up front (`main.no_target_warning()`). A
+    full-memory image is now *always* host-anchored (username-only no longer turns it off).
+    **Still open:** with a target given, downloads and cookies are still not anchored, so
+    antivirus-signature paths (`c:\users\admin\downloads\…virus.exe`) and `session=`
+    PowerShell text remain findings even in the negative control (19 + 5 there). Letter case
+    does not separate them (checked: junk in proper case, the real installer path lowercase);
+    the fix is cross-module -- a memory download path counts only if the disk evidence has
+    the file.
+  - **Report: Tor Browser processes** (`report._process_activity`, needs Volatility3 psscan):
+    firefox.exe/tor.exe grouped by parent PID (parents have usually exited, so no tree is
+    claimed); processes created > 10 min after the capture time (from the image's
+    `fullmem_<UTC stamp>` name; no stamp = no check) are clock anomalies, kept out of the
+    timing. Root `report._relate_processes_to_registry()` adds notes when Module A's times
+    meet these (an earlier run; BAM within 5 s of a firefox.exe exit).
   - **Known limits**: the extractors were designed while looking at the same capture they
     are scored on, so 37/37 is *not* an independent result -- validate on a fresh run.
     "Seen" vs "visited" URLs is not separable from string shape (a decoy download link sits
@@ -627,7 +661,7 @@ from the extension-less `SYSTEM_*` glob, and prefers a full-memory image over a 
 ### Dev loop
 ```bash
 source .venv/bin/activate
-python -m pytest -q          # ~635 tests, ~15s
+python -m pytest -q          # ~660 tests, ~16s
 ruff check . && black --check .
 # Score a run against the planted ground truth (recall, decoy hits, strings baseline):
 python scripts/score_run.py score --ground-truth ground_truth.json --findings <case>/findings.json \
@@ -951,6 +985,13 @@ server log and not used); `c3-r01` gap 8 min 46 s (target 5); `c4-r01` acquire d
 (evidence ISO not attached after the snapshot restore); the "after" C4 number is not independent
 (see §4 "Known limits"); the two C4 "decoy false positives" are a search candidate in the
 rejected `unanchored` bucket and a URL artifact for a link on a page (seen, not visited).
+
+**Reviewer feedback round (2026-10-10)** on a c3 report run *without a target*: all eight
+points were checked against the data -- seven confirmed, one partly (the downloads count of 3
+held, the "whole volume" wording didn't) -- and fixed in `4fa390e` (no-target memory),
+`bf0b633` (journal paths), `d6db0b1` (last opened vs BAM), `3f72b6e` (psscan processes, clock
+anomalies), `95decfa` (residue counts, scan coverage). Re-scored afterwards: NC pass, C3 7/37,
+C4 37/37 -- unchanged.
 
 **Workspace** (the examiner host, outside the repo): `~/trance-eval/` -- `shared/evidence/<run>/`
 (acquire folders, also the VM's `Z:`), `ground_truth/`, `results/` + `output/` (original tool),
