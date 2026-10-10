@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import datetime as dt
 
+from modules.module_b_disk.acquire_downloads import SKIP_DIR_NAMES
+from modules.module_b_disk.onion import is_v3_onion
+
 PRTIME_UNITS_PER_SECOND = 1_000_000
 
 
@@ -218,6 +221,17 @@ def _downloads_context(scan: dict) -> dict:
     return {
         "volume_root": scan.get("volume_root"),
         "live_scan": scan.get("scan_method") == "live_windows",
+        # A mounted volume is walked in full; the live scan on the target skips Windows'
+        # own folders and AppData (acquire_downloads.SKIP_DIR_NAMES), so it is not "the
+        # whole volume" and the report must not say it is.
+        "scope": (
+            "by the live scan"
+            if scan.get("scan_method") == "live_windows"
+            else "on the whole volume"
+        ),
+        "skipped_folders": (
+            sorted(SKIP_DIR_NAMES) if scan.get("scan_method") == "live_windows" else []
+        ),
         "files_walked": scan.get("files_walked", 0),
         "scan_seconds": scan.get("scan_seconds"),
         "xattr_support": scan.get("xattr_support"),
@@ -257,6 +271,19 @@ def _carve_context(carve: dict) -> dict:
     }
 
 
+def _valid_onions(record: dict) -> set[str]:
+    """The v3 onion addresses one residue file holds, by the same rule
+    analyze_memory_residue.carve_residue() uses for the volume-wide list, so the per-file
+    count and the summary can't disagree (they did: a 16-character string shaped like a
+    dead v2 address counted as 1 in the table and 0 in the summary)."""
+    found = {a for a in record.get("onion_addresses", {}) if is_v3_onion(a)}
+    for name in record.get("utf16_filenames", {}):
+        host = name.split(".")[0]
+        if is_v3_onion(host):
+            found.add(host + ".onion")
+    return found
+
+
 def _residue_context(residue: dict) -> dict:
     files = [
         {
@@ -266,7 +293,13 @@ def _residue_context(residue: dict) -> dict:
             "modified": _iso(f.get("modified_utc")),
             "compressed": f.get("compressed", False),
             "error": f.get("error"),
-            "onion_count": len(f.get("onion_addresses", {})),
+            "onion_count": len(_valid_onions(f)),
+            # Strings the carve's pattern matched that aren't valid v3 addresses (the retired
+            # 16-character v2 form, or a 56-character string failing the v3 checksum) --
+            # in a pagefile almost always random text. Shown, not hidden, but not counted.
+            "invalid_onion_count": sum(
+                1 for a in f.get("onion_addresses", {}) if not is_v3_onion(a)
+            ),
             "credential_count": len(f.get("client_auth_credentials", [])),
             "markers": sorted(f.get("tor_markers", {})),
         }
@@ -399,6 +432,16 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
                 errors[name] = section["error"]
             continue
         sections[name] = builder(section)
+    downloads, ntfs_details = sections.get("downloads"), details.get("ntfs") or {}
+    mft = ntfs_details.get("mft") if isinstance(ntfs_details, dict) else None
+    if downloads is not None and mft and "zone_identifier_streams" in mft:
+        # Independent coverage check: the $MFT lists every file on its volume, deleted
+        # ones included, whatever folder they are in.
+        streams = mft["zone_identifier_streams"]
+        downloads["mft_zone_streams"] = {
+            "total": len(streams),
+            "deleted": sum(1 for s in streams if s.get("deleted")),
+        }
     return {
         "supplied": [name for name, _ in SECTIONS if name in details],
         "errors": errors,

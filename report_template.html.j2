@@ -529,7 +529,7 @@
       {% if disk.downloads %}
       <div class="tile{{ '' if disk.downloads.inside else ' gap' }}">
         <h3>Internet-origin files</h3>
-        <p>{{ disk.downloads.total }} file{{ "s" if disk.downloads.total != 1 }} on the whole volume carr{{ "ies" if disk.downloads.total == 1 else "y" }} a <span class="mono">Zone.Identifier</span> stream{% if disk.downloads.window %}; {{ disk.downloads.inside }} created while the Tor daemon was running, {{ disk.downloads.outside }} outside that window{% else %}; no daemon window to correlate against{% endif %}.</p>
+        <p>{{ disk.downloads.total }} file{{ "s" if disk.downloads.total != 1 }} carrying a <span class="mono">Zone.Identifier</span> stream found {{ disk.downloads.scope }}{% if disk.downloads.window %}; {{ disk.downloads.inside }} created while the Tor daemon was running, {{ disk.downloads.outside }} outside that window{% else %}; no daemon window to correlate against{% endif %}.</p>
       </div>
       {% endif %}
       {% if disk.residue %}
@@ -620,10 +620,16 @@
 
   {% if disk.downloads %}
   <section>
-    <div class="section-head"><h2>Internet-origin files</h2><span class="count">{{ disk.downloads.inside }} created in the Tor window, of {{ disk.downloads.total }} on the whole volume</span></div>
+    <div class="section-head"><h2>Internet-origin files</h2><span class="count">{{ disk.downloads.inside }} created in the Tor window, of {{ disk.downloads.total }} found {{ disk.downloads.scope }}</span></div>
     <div class="ribbon">
       <strong>Network origin and timing, not the source site.</strong> Windows tags every file a browser saves from the network with a <span class="mono">Zone.Identifier</span> stream; locally created or USB/ISO-copied files never carry one. Tor Browser deliberately omits the <span class="mono">HostUrl</span>/<span class="mono">ReferrerUrl</span> fields other browsers write there, so the originating address is not recoverable from the file. Only the last Tor session's window is reconstructable from daemon artifacts.
     </div>
+    {% if disk.downloads.skipped_folders or disk.downloads.mft_zone_streams %}
+    <p class="note">
+      {% if disk.downloads.skipped_folders %}<strong>Coverage:</strong> the live scan checked {{ "{:,}".format(disk.downloads.files_walked) }} files on {{ disk.downloads.volume_root }} and skips {% for f in disk.downloads.skipped_folders %}<span class="mono">{{ f }}</span>{{ ", " if not loop.last }}{% endfor %} folders, so a file in one of those is not counted here.{% endif %}
+      {% if disk.downloads.mft_zone_streams %} The exported <span class="mono">$MFT</span>, which lists every file on its volume including deleted ones, independently records {{ disk.downloads.mft_zone_streams.total }} file{{ "s" if disk.downloads.mft_zone_streams.total != 1 }} with a <span class="mono">Zone.Identifier</span> stream{% if disk.downloads.mft_zone_streams.deleted %}, {{ disk.downloads.mft_zone_streams.deleted }} of them deleted{% endif %}.{% endif %}
+    </p>
+    {% endif %}
     {% if disk.downloads.window %}
     <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>{% if disk.downloads.window.end_basis %} (end: {{ disk.downloads.window.end_basis }}){% endif %}.</p>
     {% elif 'tor_daemon' in disk.supplied %}
@@ -678,7 +684,7 @@
             <td class="mono">{{ f.kind.replace('_', ' ') }}</td>
             <td class="off">{{ "{:,}".format(f.size) }}</td>
             <td class="off">{{ f.modified or "—" }}</td>
-            <td class="mono">{{ f.onion_count }}</td>
+            <td class="mono">{{ f.onion_count }}{% if f.invalid_onion_count %}<br><span class="off">+{{ f.invalid_onion_count }} matched the pattern but {{ "is not a valid v3 address" if f.invalid_onion_count == 1 else "are not valid v3 addresses" }} (e.g. the retired 16-character v2 form, or a failed checksum) &mdash; most likely random text</span>{% endif %}</td>
             <td class="mono">{{ f.credential_count }}</td>
             <td class="off">{{ f.markers|join(", ") if f.markers else "—" }}</td>
           </tr>
