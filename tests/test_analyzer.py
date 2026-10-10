@@ -374,7 +374,12 @@ def test_parallel_scan_matches_sequential_across_segment_boundaries(tmp_path):
         66 * 1024 * 1024: b"http://target.onion/library/rate-card\x00" + SEP + FORM + b"\x00",
     }
     dump = _big_dump(tmp_path, pieces)
-    args = dict(onion="target.onion", host=None, username="alice.test", source_type="full-memory")
+    args = {
+        "onion": "target.onion",
+        "host": None,
+        "username": "alice.test",
+        "source_type": "full-memory",
+    }
 
     sequential = analyze(dump, workers=1, **args)
     parallel = analyze(dump, workers=4, **args)
