@@ -530,7 +530,13 @@ def _scan_segment(
         owned = offset < end
         if owned:
             total_strings += 1
-        s_low = s.lower() if targets else ""
+        s_low = s.lower()
+        # Every pattern below needs some literal text to match at all, so checking for it
+        # first skips running ~10 regexes over the millions of strings (per GB) that
+        # contain none of it. Exactly equivalent: a gate is only false when the regex can't match.
+        has_eq = "=" in s
+        has_scheme = "://" in s
+        has_onion = ".onion" in s_low
         mentions_target = bool(targets) and any(t in s_low for t in targets)
         s_matches_target = require_host_anchor and mentions_target
         if owned and mentions_target:
@@ -587,11 +593,11 @@ def _scan_segment(
 
         url_spans: list[tuple[int, int]] = []
         url_hits: list[tuple[int, str, str, str]] = []
-        for m in URL_RE.finditer(s):
+        for m in URL_RE.finditer(s) if has_scheme else ():
             url_spans.append((m.start(), m.end()))
             url_host, path = _split_url(m.group())
             url_hits.append((m.start(), m.group(), url_host, path))
-        for m in ONION_RE.finditer(s):
+        for m in ONION_RE.finditer(s) if has_onion else ():
             # Inside a full URL it's already covered by that URL (or is a search engine
             # merely mentioning it); without a path it's a mention, not a visit.
             if not m.group("path") or any(a <= m.start() < b for a, b in url_spans):
@@ -615,7 +621,7 @@ def _scan_segment(
                     "urls",
                 )
                 record_artifact("url", match_offset, url)
-        for m in ONION_DOMAIN_RE.finditer(s):
+        for m in ONION_DOMAIN_RE.finditer(s) if has_onion else ():
             onion_domain_hits[m.group().lower()] += 1
             # Only the top 10 ever get reported (targeting_suggestions below); on a
             # whole-system image with many distinct onion-like mentions this dict is
@@ -623,7 +629,7 @@ def _scan_segment(
             if len(onion_domain_hits) > 10_000:
                 onion_domain_hits = Counter(dict(onion_domain_hits.most_common(1_000)))
 
-        for m in COOKIE_RE.finditer(s):
+        for m in COOKIE_RE.finditer(s) if has_eq else ():
             # Not host-anchored, unlike credentials/search-queries below: a cookie lives
             # in Firefox's own cookie-jar structure, not co-located in memory with the
             # page/URL text that set it, so the same-string proximity check that works
@@ -645,12 +651,12 @@ def _scan_segment(
                 "cookies",
             )
             record_artifact("cookie", match_offset, f"{name}={value}")
-        for m in NOISY_COOKIE_RE.finditer(s):
+        for m in NOISY_COOKIE_RE.finditer(s) if has_eq else ():
             unfiltered_cookie_count += 1
             if len(unfiltered_cookie_sample) < SAMPLE_CAP:
                 unfiltered_cookie_sample.append(f"{m.group(1)}={m.group(2)}")
 
-        for m in SEARCH_QUERY_RE.finditer(s):
+        for m in SEARCH_QUERY_RE.finditer(s) if "?q=" in s else ():
             value = m.group(1)
             match_offset = offset + m.start()
             if require_host_anchor and not s_matches_target:
@@ -664,7 +670,7 @@ def _scan_segment(
             )
             record_artifact("search_query", match_offset, value)
 
-        for m in CREDENTIAL_RE.finditer(s):
+        for m in CREDENTIAL_RE.finditer(s) if has_eq else ():
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
             if require_host_anchor and not s_matches_target:
@@ -683,7 +689,7 @@ def _scan_segment(
                 "credentials",
             )
             record_artifact("credential", match_offset, f"{field}={value}")
-        for m in CREDENTIAL_JSON_RE.finditer(s):
+        for m in CREDENTIAL_JSON_RE.finditer(s) if '"' in s and ":" in s else ():
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
             if require_host_anchor and not s_matches_target:
@@ -703,7 +709,9 @@ def _scan_segment(
             )
             record_artifact("credential", match_offset, f'"{field}":"{value}"')
 
-        for m in list(FILE_URI_RE.finditer(s)) + list(DOWNLOAD_PATH_RE.finditer(s)):
+        for m in (list(FILE_URI_RE.finditer(s)) if "file:///" in s_low else []) + (
+            list(DOWNLOAD_PATH_RE.finditer(s)) if ":\\" in s else []
+        ):
             value = m.group()
             match_offset = offset + m.start()
             confidence = "high" if _is_confirmed_download(value) else "low"
