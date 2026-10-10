@@ -922,6 +922,19 @@
     </dl>
   </div>
 
+  {% if d.host_anchoring.no_target %}
+  {% set held = d.host_anchoring.unanchored.values()|map(attribute="count")|sum %}
+  <section>
+    <div class="callout">
+      <strong>No target was given, so nothing in this memory section is attributed to Tor Browser.</strong>
+      A full-memory image holds every process's memory &mdash; antivirus signatures, scripts and other programs' data &mdash; and without an <span class="mono">--onion</span> or <span class="mono">--host</span> there is nothing to tie a credential, cookie, search or download path to the browser. The {{ "{:,}".format(held) }} such match{{ "es" if held != 1 }} found are kept in <span class="mono">findings.json</span> as unattributed observations (<span class="mono">host_anchoring.unanchored</span>), not reported as findings.
+      {% if d.targeting_suggestions %}
+      The onion address mentioned most often in memory is <span class="mono">{{ d.targeting_suggestions[0].onion }}</span> ({{ d.targeting_suggestions[0].hit_count }}&times;). If it is the site under investigation, run the analysis again with <span class="mono">--onion {{ d.targeting_suggestions[0].onion }}</span> &mdash; Tor Browser's own built-in services can also appear in this list, so check it first.
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
   {% if d.targeting_suggestions %}
   <section>
     <div class="callout">

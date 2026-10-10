@@ -880,7 +880,14 @@ def analyze(
     # page state commonly carry both in one contiguous run; unrelated processes' strings
     # essentially never do. Hits that fail this check aren't discarded -- they're kept
     # under "unanchored" for transparency, just excluded from "targeted"/key_findings.
-    require_host_anchor = source_type == "full-memory" and bool(targets)
+    # A full-memory image holds every process's memory, so a hit that carries no host of its
+    # own always needs the anchor there -- also when no --onion/--host was given, which used
+    # to switch anchoring off and report every credential/search shape in RAM (antivirus
+    # signature text, PowerShell snippets, telemetry IDs) as a finding.
+    require_host_anchor = source_type == "full-memory"
+    # Without --onion/--host nothing on a whole-RAM image can be tied to Tor Browser at all:
+    # cookies and downloads (which are never host-anchored) are then observations too.
+    unattributed = source_type == "full-memory" and not targets
     # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
     anchor_enabled = bool(targets) or bool(username)
 
@@ -944,6 +951,16 @@ def analyze(
             ),
             "artifacts",
         )
+
+    if unattributed:
+        for category in ("cookies", "downloads"):
+            unanchored_counts.setdefault(category, 0)
+            unanchored_samples.setdefault(category, [])
+        for c in cookies:
+            record_unanchored("cookies", f"{c['name']}={c['value']}")
+        for d in downloads:
+            record_unanchored("downloads", d["value"])
+        cookies, downloads = [], []
 
     # Only findings become artifacts: every raw observation stays in details["targeted"], but
     # one the analyzer itself labels low confidence (a printf "session=%p", a bare "file:///C:")
@@ -1145,20 +1162,24 @@ def analyze(
         "truncated": truncated,
         "host_anchoring": {
             "applied": require_host_anchor,
-            "note": "credentials/search_queries only count as targeted evidence when the same extracted "
-            "string also mentions --onion/--host; a full-memory image scans every process's memory, not "
-            "just one browser's, and this is the closest proxy for 'this belongs to the target' without "
-            "true per-process attribution (see volatility_analyze.py process extraction for that). NOT "
-            "applied to cookies (COOKIE_RE's exact app-specific name is already precise, and a cookie "
-            "isn't co-located in memory with the page that set it -- this dropped a real session cookie "
-            "in testing) or to source_type='process' dumps (already scoped to one process). Hits that "
-            "fail this check are kept below, not discarded, just excluded from 'targeted'.",
+            "no_target": unattributed,
+            "note": "On a full-memory image (every process's memory, not just one browser's) a "
+            "credential or search query only counts as targeted evidence when the same extracted "
+            "string also mentions --onion/--host -- the closest proxy for 'this belongs to the "
+            "target' without true per-process attribution (see volatility_analyze.py process "
+            "extraction for that). Login pairs and form bodies are anchored by proximity or the "
+            "--username instead. Cookies are found by name and not anchored (a cookie isn't "
+            "co-located in memory with the page that set it). With no --onion/--host at all, "
+            "nothing on a full-memory image can be attributed, so cookies and downloads are kept "
+            "here too ('no_target'). Process dumps are already scoped to one process and are not "
+            "anchored. Hits that fail are kept below, not discarded, just excluded from 'targeted'.",
             "unanchored": {
                 category: {
                     "count": unanchored_counts[category],
                     "sample": unanchored_samples[category],
                 }
-                for category in ("credentials", "search_queries")
+                for category in ("credentials", "search_queries", "cookies", "downloads")
+                if category in unanchored_counts
             },
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),

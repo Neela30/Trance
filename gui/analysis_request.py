@@ -12,7 +12,7 @@ from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from analyze_evidence import resolve_evidence
-from main import CUSTODY_FILENAME
+from main import CUSTODY_FILENAME, no_target_warning
 
 SOURCE_TYPES = ("process", "full-memory")
 OUTPUT_FILES = ("findings.json", "report.html", CUSTODY_FILENAME)
@@ -218,9 +218,7 @@ def validate(request: AnalysisRequest, inputs: dict) -> Issues:
             errors.append(f"Unknown timezone: {request.report_timezone}")
 
     if inputs.get("dump") and not (request.onion or request.host):
-        warnings.append(
-            "No onion address or host set: the memory section's targeted URLs will be empty."
-        )
+        warnings.append(no_target_warning(source_type))
     return issues
 
 

@@ -89,3 +89,29 @@ def test_run_module_records_how_long_it_took(tmp_path):
         "module_a_registry", TranceConfig(case_name="c1", output_dir=tmp_path), {}
     )
     assert result.duration_seconds is not None and result.duration_seconds >= 0
+
+
+def test_cli_warns_that_a_full_memory_image_without_target_gives_observations_only(
+    tmp_path, capsys
+):
+    dump = tmp_path / "fullmem.raw"
+    dump.write_bytes(b"nothing here\x00")
+    main.main(
+        [
+            "--case",
+            "c1",
+            "--output-dir",
+            str(tmp_path / "out"),
+            "--dump",
+            str(dump),
+            "--source-type",
+            "full-memory",
+        ]
+    )
+    err = capsys.readouterr().err
+    assert "observations only" in err
+
+
+def test_no_target_warning_for_a_process_dump_is_about_urls_only():
+    assert "targeted URLs will be empty" in main.no_target_warning("process")
+    assert "observations only" not in main.no_target_warning("process")

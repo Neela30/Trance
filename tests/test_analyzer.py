@@ -74,10 +74,71 @@ def test_cookie_host_anchoring_never_applied_even_on_full_memory(tmp_path):
     assert "cookies" not in report["host_anchoring"]["unanchored"]
 
 
-def test_no_targets_leaves_host_anchoring_inactive_on_full_memory(tmp_path):
-    dump = make_dump(tmp_path, b"user=alice password=hunter2\x00")
-    report = analyze(dump, onion=None, host=None, username=None, source_type="full-memory")
-    assert not report["host_anchoring"]["applied"]
+def test_no_target_on_full_memory_reports_observations_not_findings(tmp_path):
+    # A whole-RAM image with no --onion/--host: nothing can be tied to Tor Browser, so the
+    # credential / search / cookie / download shapes every process leaves in RAM (antivirus
+    # signatures, PowerShell, telemetry) must not become findings. They used to.
+    data = (
+        b"user=alice password=hunter2\x00"
+        b"http://example.com/s?q=stepwell\x00"
+        b"session=new-objectmicrosoft.powershell.commands.webrequestsession\x00"
+        b"c:\\users\\admin\\downloads\\virus.exe\x00"
+        b"izzawro6enzkhyunavp5on7zozrq56unspben3vi2sbxtxqyfoh5obyd.onion/x\x00" * 7
+    )
+    report = analyze(
+        make_dump(tmp_path, data), onion=None, host=None, username=None, source_type="full-memory"
+    )
+    ha = report["host_anchoring"]
+    assert ha["applied"] and ha["no_target"]
+    for kind in ("credentials", "search_queries", "cookies", "downloads"):
+        assert report["targeted"][kind] == [], kind
+        assert ha["unanchored"][kind]["count"] >= 1, kind
+    assert not [a for a in report["artifacts"] if a["artifact_type"] != "url"]
+    assert report["key_findings"]["credentials"] == []
+    assert report["key_findings"]["downloads"] == []
+    # ...and the onion the examiner probably meant is still offered.
+    assert report["targeting_suggestions"][0]["onion"].startswith("izzawro6")
+
+
+def test_target_given_on_full_memory_is_not_flagged_no_target(tmp_path):
+    report = analyze(
+        make_dump(tmp_path, b"http://target.onion/x user=alice\x00"),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    assert report["host_anchoring"]["no_target"] is False
+    assert ("user", "alice") in {
+        (c["field"], c["value"]) for c in report["targeted"]["credentials"]
+    }
+    assert set(report["host_anchoring"]["unanchored"]) == {"credentials", "search_queries"}
+
+
+def test_username_only_on_full_memory_anchors_login_pairs_but_not_loose_shapes(tmp_path):
+    data = b"user=someone\x00" + _login_form("alice.test", "S3cret-Pass-9")
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion=None,
+        host=None,
+        username="alice.test",
+        source_type="full-memory",
+    )
+    found = {(c["field"], c["value"]) for c in report["targeted"]["credentials"]}
+    assert ("password", "S3cret-Pass-9") in found  # anchored by the username
+    assert ("user", "someone") not in found  # a loose field=value shape is not
+
+
+def test_no_target_on_a_process_dump_is_unchanged(tmp_path):
+    # A process dump is already one browser's memory: no anchoring, as before.
+    report = analyze(
+        make_dump(tmp_path, b"user=alice password=hunter2\x00"),
+        onion=None,
+        host=None,
+        username=None,
+        source_type="process",
+    )
+    assert report["host_anchoring"]["no_target"] is False
     assert len(report["targeted"]["credentials"]) == 2
 
 

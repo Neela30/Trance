@@ -72,6 +72,18 @@ class PipelineResult:
         return any(r.status == "error" for r in self.results)
 
 
+def no_target_warning(source_type: str | None) -> str:
+    """What a memory image analysed without --onion/--host actually yields (shared with the
+    GUI's form check, so the two never disagree)."""
+    if source_type == "full-memory":
+        return (
+            "No --onion/--host: on a full-memory image nothing in memory can be attributed to "
+            "Tor Browser, so the memory section reports observations only, not findings. The "
+            "report names the onion address mentioned most often; re-run with --onion set to it."
+        )
+    return "No --onion/--host: the memory section's targeted URLs will be empty."
+
+
 def _run_modules(
     config: TranceConfig,
     module_kwargs: dict[str, dict],
@@ -339,10 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--case must be a single directory name without path separators")
 
     if args.dump and not (args.onion or args.host):
-        print(
-            "[!] --dump given without --onion/--host: memory targeted-URL section will be empty",
-            file=sys.stderr,
-        )
+        print(f"[!] {no_target_warning(args.source_type)}", file=sys.stderr)
 
     output_dir = args.output_dir / args.case
     for evidence_root in (args.disk_profile, args.tor_dir, args.disk_root, args.ntfs_dir):
