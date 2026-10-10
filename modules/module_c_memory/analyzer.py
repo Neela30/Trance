@@ -463,7 +463,6 @@ def _scan_segment(
     search_queries: list[dict] = []
     credentials: list[dict] = []
     downloads: list[dict] = []
-    artifacts: list[dict] = []
 
     total_strings = 0
     unfiltered_url_count = 0
@@ -507,20 +506,6 @@ def _scan_segment(
             truncated[type_name] = True
             return
         items.append(item)
-
-    def record_artifact(artifact_type: str, offset: int, description: str) -> None:
-        append_capped(
-            artifacts,
-            asdict(
-                Artifact(
-                    module="module_c_memory",
-                    artifact_type=artifact_type,
-                    source=f"offset {hex(offset)}",
-                    description=description,
-                )
-            ),
-            "artifacts",
-        )
 
     for offset, s, nbytes in iter_strings_ex(
         dump_path, min_len=min_len, start=start, end=end + SEGMENT_LOOKAHEAD
@@ -620,7 +605,6 @@ def _scan_segment(
                     },
                     "urls",
                 )
-                record_artifact("url", match_offset, url)
         for m in ONION_DOMAIN_RE.finditer(s) if has_onion else ():
             onion_domain_hits[m.group().lower()] += 1
             # Only the top 10 ever get reported (targeting_suggestions below); on a
@@ -650,7 +634,6 @@ def _scan_segment(
                 },
                 "cookies",
             )
-            record_artifact("cookie", match_offset, f"{name}={value}")
         for m in NOISY_COOKIE_RE.finditer(s) if has_eq else ():
             unfiltered_cookie_count += 1
             if len(unfiltered_cookie_sample) < SAMPLE_CAP:
@@ -668,7 +651,6 @@ def _scan_segment(
                 {"offset": hex(match_offset), "value": value, "matches_username": matches_username},
                 "search_queries",
             )
-            record_artifact("search_query", match_offset, value)
 
         for m in CREDENTIAL_RE.finditer(s) if has_eq else ():
             field, value = m.group(1), m.group(2)
@@ -688,7 +670,6 @@ def _scan_segment(
                 },
                 "credentials",
             )
-            record_artifact("credential", match_offset, f"{field}={value}")
         for m in CREDENTIAL_JSON_RE.finditer(s) if '"' in s and ":" in s else ():
             field, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
@@ -707,7 +688,6 @@ def _scan_segment(
                 },
                 "credentials",
             )
-            record_artifact("credential", match_offset, f'"{field}":"{value}"')
 
         for m in (list(FILE_URI_RE.finditer(s)) if "file:///" in s_low else []) + (
             list(DOWNLOAD_PATH_RE.finditer(s)) if ":\\" in s else []
@@ -720,7 +700,6 @@ def _scan_segment(
                 {"offset": hex(match_offset), "value": value, "confidence": confidence},
                 "downloads",
             )
-            record_artifact("download", match_offset, value)
 
     title_candidates.extend(t for t in open_titles if t["links"])
     return {
@@ -729,7 +708,6 @@ def _scan_segment(
         "search_queries": search_queries,
         "credentials": credentials,
         "downloads": downloads,
-        "artifacts": artifacts,
         "total_strings": total_strings,
         "unfiltered_url_count": unfiltered_url_count,
         "unfiltered_url_sample": unfiltered_url_sample,
@@ -809,7 +787,6 @@ def _merge_partials(parts: list[dict], record_cap: int) -> dict:
             "search_queries",
             "credentials",
             "downloads",
-            "artifacts",
             "unfiltered_url_sample",
             "unfiltered_cookie_sample",
             "target_offsets",
@@ -834,7 +811,6 @@ def _merge_partials(parts: list[dict], record_cap: int) -> dict:
             "search_queries",
             "credentials",
             "downloads",
-            "artifacts",
             "target_offsets",
             "adjacent_pairs",
             "form_candidates",
@@ -851,7 +827,7 @@ def _merge_partials(parts: list[dict], record_cap: int) -> dict:
         for cat in ("credentials", "search_queries"):
             merged["unanchored_counts"][cat] += part["unanchored_counts"][cat]
             merged["unanchored_samples"][cat].extend(part["unanchored_samples"][cat])
-    for key in ("urls", "cookies", "search_queries", "credentials", "downloads", "artifacts"):
+    for key in ("urls", "cookies", "search_queries", "credentials", "downloads"):
         if len(merged[key]) > record_cap:
             merged[key] = merged[key][:record_cap]
             merged["truncated"][key] = True
@@ -912,7 +888,7 @@ def analyze(
     search_queries = merged["search_queries"]
     credentials = merged["credentials"]
     downloads = merged["downloads"]
-    artifacts = merged["artifacts"]
+    artifacts: list[dict] = []
     total_strings = merged["total_strings"]
     unfiltered_url_count = merged["unfiltered_url_count"]
     unfiltered_url_sample = merged["unfiltered_url_sample"]
@@ -953,6 +929,38 @@ def analyze(
             "artifacts",
         )
 
+    # Only findings become artifacts: every raw observation stays in details["targeted"], but
+    # one the analyzer itself labels low confidence (a printf "session=%p", a bare "file:///C:")
+    # or that repeats a finding already reported is not a finding. On a negative-control
+    # capture this took the memory module from 3,171 artifacts to the handful that are real.
+    reported: set[tuple[str, str]] = set()
+
+    def report_once(artifact_type: str, offset_hex: str, description: str) -> None:
+        if (artifact_type, description) not in reported:
+            reported.add((artifact_type, description))
+            record_artifact(artifact_type, int(offset_hex, 16), description)
+
+    for u in urls:
+        report_once("url", u["offset"], u["value"])
+    for c in cookies:
+        if c["confidence"] == "high":
+            report_once("cookie", c["offset"], f"{c['name']}={c['value']}")
+    for q in search_queries:
+        if not is_timeline_noise(q["value"]):
+            report_once("search_query", q["offset"], q["value"])
+    for c in credentials:
+        if c["confidence"] != "high":
+            continue
+        shown = (
+            f'"{c["field"]}":"{c["value"]}"'
+            if c["shape"] == "json"
+            else f"{c['field']}={c['value']}"
+        )
+        report_once("credential", c["offset"], shown)
+    for d in downloads:
+        if d["confidence"] == "high":
+            report_once("download", d["offset"], d["value"])
+
     # A login form's name/value pairs are anchored as a group: by the target username
     # appearing as one of the values, or by a target mention within PROXIMITY_WINDOW.
     target_offsets.sort()
@@ -985,7 +993,7 @@ def analyze(
                 },
                 "credentials",
             )
-            record_artifact("credential", p["offset"], f"{p['field']}={p['value']}")
+            report_once("credential", hex(p["offset"]), f"{p['field']}={p['value']}")
 
     # Posted forms: anchored by the target username among the values or by a nearby target
     # mention. The same body is often in memory several times -- keep one, count the rest.

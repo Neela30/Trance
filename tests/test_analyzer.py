@@ -405,3 +405,53 @@ def test_integrity_sidecar_match_is_reported_in_parallel_mode(tmp_path):
     report = analyze(dump, onion="target.onion", host=None, username=None, workers=4)
     assert report["dump"]["integrity_verified"] is True
     assert report["dump"]["sha256"] == hash_file(dump)
+
+
+def _artifacts(report, kind):
+    return [a["description"] for a in report["artifacts"] if a["artifact_type"] == kind]
+
+
+def test_low_confidence_and_noise_hits_stay_out_of_artifacts_but_in_details(tmp_path):
+    data = (
+        b"http://target.onion/home\x00"
+        b"session=%p]\x00"  # a printf format string, not a cookie
+        b"file:///C:\x00"  # bare scheme, not a download
+        b"C:\\Windows\\Temp\\other\\thing.txt\x00"  # a path, but not under Downloads
+        b"C:\\Users\\bob\\Downloads\\report.pdf\x00"  # a real download
+        b"http://target.onion/search?q=%s\x00"  # template placeholder, not a search
+    )
+    report = analyze(make_dump(tmp_path, data), onion="target.onion", host=None, username=None)
+    assert _artifacts(report, "cookie") == []
+    assert _artifacts(report, "download") == ["C:\\Users\\bob\\Downloads\\report.pdf"]
+    assert _artifacts(report, "search_query") == []
+    # nothing is thrown away: the raw observations are all still in details
+    assert report["targeted"]["cookies"]
+    assert {d["confidence"] for d in report["targeted"]["downloads"]} == {"low", "high"}
+    assert report["targeted"]["search_queries"]
+
+
+def test_a_finding_repeated_in_memory_is_one_artifact_with_every_offset_in_details(tmp_path):
+    repeat = b"http://target.onion/library/rate-card\x00"
+    report = analyze(
+        make_dump(tmp_path, repeat * 5),
+        onion="target.onion",
+        host=None,
+        username=None,
+    )
+    assert _artifacts(report, "url") == ["http://target.onion/library/rate-card"]
+    assert len(report["targeted"]["urls"]) == 5
+
+
+def test_a_login_pair_repeated_in_memory_is_one_credential_artifact(tmp_path):
+    form = _login_form("alice.test", "S3cret-Pass-9")
+    report = analyze(
+        make_dump(tmp_path, (form + b"Z" * 300) * 3),
+        onion="target.onion",
+        host=None,
+        username="alice.test",
+        source_type="full-memory",
+    )
+    assert sorted(_artifacts(report, "credential")) == [
+        "password=S3cret-Pass-9",
+        "username=alice.test",
+    ]
