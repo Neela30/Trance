@@ -481,3 +481,34 @@ def test_cookie_name_is_matched_literally_not_as_a_pattern(tmp_path):
     dump = make_dump(tmp_path, b"a.b=1 axb=2 http://target.onion/\x00")
     report = analyze(dump, onion="target.onion", host=None, username=None, cookie_names=["a.b"])
     assert [c["name"] for c in report["targeted"]["cookies"]] == ["a.b"]
+
+
+def test_standalone_cli_passes_cookie_names_and_workers_through(tmp_path, monkeypatch, capsys):
+    import json
+    import sys
+
+    from modules.module_c_memory import analyzer
+
+    dump = make_dump(tmp_path, b"Cookie: sid=abc123def; http://target.onion/\x00")
+    out = tmp_path / "report.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "analyzer",
+            str(dump),
+            "--onion",
+            "target.onion",
+            "--cookie-name",
+            "sid",
+            "--workers",
+            "1",
+            "--output",
+            str(out),
+        ],
+    )
+    analyzer.main()
+    report = json.loads(out.read_text())
+    assert [c["name"] for c in report["targeted"]["cookies"]] == ["sid"]
+    assert report["targeting"]["cookie_names"] == ["sid"]
+    assert "JSON report written" in capsys.readouterr().out

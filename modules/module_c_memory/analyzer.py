@@ -1281,6 +1281,20 @@ def main() -> None:
         "--username", help="Known username to highlight in recovered search queries"
     )
     parser.add_argument(
+        "--cookie-name",
+        action="append",
+        dest="cookie_names",
+        metavar="NAME",
+        help="Name of a cookie to look for (repeatable). Default: "
+        + ", ".join(DEFAULT_COOKIE_NAMES)
+        + " -- give the target's own names for a real case",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="Worker processes for the scan (default: up to 8, or TRANCE_WORKERS; 1 = sequential)",
+    )
+    parser.add_argument(
         "--min-length",
         type=int,
         default=DEFAULT_MIN_LEN,
@@ -1313,6 +1327,8 @@ def main() -> None:
             args.username,
             min_len=args.min_length,
             source_type=args.source_type,
+            workers=args.workers,
+            cookie_names=args.cookie_names,
         )
     except (ParsingError, IntegrityError) as exc:
         print(f"[!] {exc}", file=sys.stderr)
