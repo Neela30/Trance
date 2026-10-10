@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import html
 import json
 import re
 import sys
@@ -60,6 +61,17 @@ PROXIMITY_WINDOW = 2048
 # pairs less than ADJACENT_GROUP_GAP apart are one login form.
 ADJACENT_GAP = 64
 ADJACENT_GROUP_GAP = 256
+# Page titles. A <title> in RAM could belong to any page of any process, and unlike a login
+# form it sits far from the host string (measured: 0 of 10 real titles within 4 KiB of a
+# target mention, while 135 unrelated titles turned up within 256 KiB), so proximity can't
+# anchor it. What does: the page's own HTML links to paths -- "/search", "/static/style.css",
+# "/library/..." -- and a page whose links include several paths this same analysis already
+# saw requested from the target host is a page of the target site. Measured on the same
+# capture: all 10 visited pages' titles, none of the 5 unvisited ones, and no foreign title.
+TITLE_LINK_WINDOW = 16384
+MIN_TITLE_LINKS = 3
+TITLE_RE = re.compile(r"<title[^>]*>([^<]{1,200})</title>", re.IGNORECASE)
+HREF_RE = re.compile(r"""\b(?:href|src)=["'](/[^"'#?\s]*)""", re.IGNORECASE)
 CREDENTIAL_FIELD_NAMES = frozenset(
     {"username", "user", "uname", "login", "email", "password", "passwd", "pwd"}
 )
@@ -294,8 +306,15 @@ _FLAG_WORDS = frozenset(
 )
 
 
+# Firefox's origin attributes ("privateBrowsingId=1&firstPartyDomain=<site>&partitionKey=...")
+# are '&'-joined and mention the site by construction, but are cache/principal keys, not forms.
+_ORIGIN_ATTR_BODY_RE = re.compile(r"firstPartyDomain=|partitionKey=|userContextId=|BrowsingId=")
+
+
 def _parse_form_body(body: str) -> list[tuple[str, str]]:
     """Decoded (name, value) pairs of a posted form body, or [] if it doesn't look like one."""
+    if _ORIGIN_ATTR_BODY_RE.search(body):
+        return []
     pairs = parse_qsl(body, keep_blank_values=True)
     if len(pairs) < 2 or any(_TEMPLATE_NOISE_RE.search(k) for k, _ in pairs):
         return []
@@ -441,6 +460,8 @@ def analyze(
     pending_field: tuple[str, int] | None = None
     adjacent_pairs: list[dict] = []
     form_candidates: list[dict] = []
+    open_titles: list[dict] = []
+    title_candidates: list[dict] = []
 
     def record_unanchored(category: str, value: str) -> None:
         unanchored_counts[category] += 1
@@ -492,6 +513,27 @@ def analyze(
                 fields = _parse_form_body(m.group())
                 if fields:
                     form_candidates.append({"offset": offset + m.start(), "fields": fields})
+
+        if anchor_enabled:
+            while open_titles and offset > open_titles[0]["end"]:
+                done = open_titles.pop(0)
+                if done["links"]:
+                    title_candidates.append(done)
+            if "<title" in s:
+                for m in TITLE_RE.finditer(s):
+                    open_titles.append(
+                        {
+                            "offset": offset + m.start(),
+                            "end": offset + m.start() + TITLE_LINK_WINDOW,
+                            "title": html.unescape(m.group(1)).strip(),
+                            "links": set(),
+                        }
+                    )
+            if open_titles and ("href=" in s or "src=" in s):
+                page_links = set(HREF_RE.findall(s))
+                if page_links:
+                    for pending in open_titles:
+                        pending["links"] |= page_links
 
         url_spans: list[tuple[int, int]] = []
         url_hits: list[tuple[int, str, str, str]] = []
@@ -683,6 +725,32 @@ def analyze(
         shown = "; ".join(f"{k}='{v}'" for k, v in cand["fields"])
         record_artifact("form_submission", cand["offset"], f"Form submission: {shown}")
 
+    # Page titles: keep those whose page links to enough paths seen under the target host.
+    title_candidates.extend(t for t in open_titles if t["links"])
+    known_paths = {u["path"].split("?", 1)[0] for u in urls} - {"/"}
+    page_titles: list[dict] = []
+    seen_titles: dict[str, dict] = {}
+    for cand in sorted(title_candidates, key=lambda c: c["offset"]):
+        shared = sorted(cand["links"] & known_paths)
+        if len(shared) < MIN_TITLE_LINKS or not cand["title"]:
+            continue
+        if cand["title"] in seen_titles:
+            seen_titles[cand["title"]]["occurrences"] += 1
+            continue
+        record = {
+            "offset": hex(cand["offset"]),
+            "title": cand["title"],
+            "linked_target_paths": shared,
+            "occurrences": 1,
+        }
+        seen_titles[cand["title"]] = record
+        append_capped(page_titles, record, "page_titles")
+        record_artifact(
+            "page_title",
+            cand["offset"],
+            f"Page title '{cand['title']}' (HTML page linking to {len(shared)} paths seen on the target)",
+        )
+
     # Tor Browser itself talks to a handful of bundled default onion services
     # (search engine, connectivity checks) whether or not the user does
     # anything — those show up here too and are expected background noise,
@@ -740,6 +808,7 @@ def analyze(
             "credentials": credentials,
             "downloads": downloads,
             "form_submissions": form_submissions,
+            "page_titles": page_titles,
         },
         "timeline": {
             "disclaimer": "Ordered by memory offset ONLY — not a verified chronological timeline. Physical "

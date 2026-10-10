@@ -260,3 +260,76 @@ def test_url_query_strings_and_flag_blobs_are_not_forms(tmp_path):
         source_type="full-memory",
     )
     assert report["targeted"]["form_submissions"] == []
+
+
+def _page(title: str, links: list[str]) -> bytes:
+    body = "".join(f'<a href="{link}">x</a>\n' for link in links)
+    return (
+        f'<html>\n<head>\n  <title>{title}</title>\n  <link rel="stylesheet" '
+        f'href="/static/style.css">\n</head>\n<body>\n{body}</body>\n</html>\n'
+    ).encode()
+
+
+TARGET_REQUESTS = b"".join(
+    b"http://target.onion" + p + b"\x00"
+    for p in (b"/about", b"/search", b"/login", b"/static/style.css")
+)
+
+
+def test_page_title_kept_when_page_links_to_paths_seen_on_target(tmp_path):
+    data = TARGET_REQUESTS + _page("How to Reset Your Passphrase", ["/", "/search", "/login"])
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    titles = report["targeted"]["page_titles"]
+    assert [t["title"] for t in titles] == ["How to Reset Your Passphrase"]
+    assert "/static/style.css" in titles[0]["linked_target_paths"]
+    assert any(a["artifact_type"] == "page_title" for a in report["artifacts"])
+
+
+def test_page_title_of_a_foreign_page_is_not_kept(tmp_path):
+    foreign = _page("Some Other Site", ["/blog", "/pricing", "/login"]).replace(
+        b'  <link rel="stylesheet" href="/static/style.css">\n', b""
+    )
+    data = TARGET_REQUESTS + foreign
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    assert report["targeted"]["page_titles"] == []
+
+
+def test_repeated_page_title_is_merged_with_a_count(tmp_path):
+    page = _page("Search", ["/search", "/login"])
+    report = analyze(
+        make_dump(tmp_path, TARGET_REQUESTS + page + b"\x00" + page),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    titles = report["targeted"]["page_titles"]
+    assert len(titles) == 1 and titles[0]["occurrences"] == 2
+
+
+def test_firefox_origin_attributes_are_not_forms(tmp_path):
+    data = (
+        b"http://target.onion/\x00"
+        b"privateBrowsingId=1&firstPartyDomain=target.onion&partitionKey=(http,target.onion)\x00"
+        b"ngId=1&firstPartyDomain=target.onion\x00"
+    )
+    report = analyze(
+        make_dump(tmp_path, data),
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+    )
+    assert report["targeted"]["form_submissions"] == []
