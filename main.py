@@ -16,9 +16,11 @@ from __future__ import annotations
 import argparse
 import importlib
 import multiprocessing
+import os
 import sys
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
@@ -70,6 +72,43 @@ class PipelineResult:
         return any(r.status == "error" for r in self.results)
 
 
+def _run_modules(
+    config: TranceConfig,
+    module_kwargs: dict[str, dict],
+    progress_cb: Callable[[str, int, int], None] | None,
+    total_steps: int,
+) -> list[ModuleResult]:
+    """Run every module and return the results in MODULES order.
+
+    The modules are independent, so they run at the same time: Module C's heavy work is in
+    worker processes (see its analyzer), which leaves the main process free for A and B.
+    Results are still assembled in MODULES order, so findings.json doesn't depend on which
+    finished first. TRANCE_WORKERS=1 runs them one after another instead. progress_cb is
+    called from this thread only, once per module as it finishes.
+    """
+    by_name: dict[str, ModuleResult] = {}
+
+    def finished(name: str, result: ModuleResult, step: int) -> None:
+        by_name[name] = result
+        suffix = f" — {result.message}" if result.message else ""
+        print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
+        if progress_cb:
+            progress_cb(name, step, total_steps)
+
+    if os.environ.get("TRANCE_WORKERS", "").strip() == "1":
+        for step, name in enumerate(MODULES, start=1):
+            finished(name, run_module(name, config, module_kwargs.get(name, {})), step)
+    else:
+        with ThreadPoolExecutor(max_workers=len(MODULES)) as pool:
+            futures = {
+                pool.submit(run_module, name, config, module_kwargs.get(name, {})): name
+                for name in MODULES
+            }
+            for step, future in enumerate(as_completed(futures), start=1):
+                finished(futures[future], future.result(), step)
+    return [by_name[name] for name in MODULES]
+
+
 def run_pipeline(
     config: TranceConfig,
     module_kwargs: dict[str, dict],
@@ -82,14 +121,7 @@ def run_pipeline(
     each module and once more after writing outputs -- total_steps is len(MODULES) + 1.
     """
     total_steps = len(MODULES) + 1
-    results: list[ModuleResult] = []
-    for step, name in enumerate(MODULES, start=1):
-        result = run_module(name, config, module_kwargs.get(name, {}))
-        results.append(result)
-        suffix = f" — {result.message}" if result.message else ""
-        print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
-        if progress_cb:
-            progress_cb(name, step, total_steps)
+    results = _run_modules(config, module_kwargs, progress_cb, total_steps)
 
     findings = build_findings(config, results)
     findings_path = write_findings(findings, config.output_dir)
