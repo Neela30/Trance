@@ -6,10 +6,12 @@ import argparse
 import bisect
 import html
 import json
+import os
 import re
 import sys
 from collections import Counter
 from collections.abc import Iterator
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +49,15 @@ SOURCE_TYPE_RECORD_CAPS = {
     "full-memory": 200_000,
 }
 DEFAULT_SOURCE_TYPE = "process"
+
+# The scan is split into independent segments that run in separate processes. A segment
+# reads SEGMENT_LOOKAHEAD bytes past its end so a login pair or page title that starts
+# inside it is completed (TITLE_LINK_WINDOW is the longest look-ahead anything needs).
+SEGMENT_LOOKAHEAD = 65536
+SEGMENT_MIN_SIZE = 4 * CHUNK_SIZE  # 32 MiB: below this a segment isn't worth a process
+SEGMENT_MAX_SIZE = 32 * CHUNK_SIZE  # 256 MiB: bounds one segment's partial results
+PARALLEL_MIN_BYTES = 8 * CHUNK_SIZE  # 64 MiB: smaller dumps are scanned in-process
+MAX_WORKERS = 8
 
 # Proximity anchoring. A hit that carries no host of its own (a login pair, a form body)
 # is attributed to the target when a string that does mention the target host/onion sits
@@ -226,9 +237,16 @@ def _utf16le_pattern(min_len: int) -> re.Pattern[bytes]:
     return re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)
 
 
-def iter_strings_ex(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[int, str, int]]:
+def iter_strings_ex(
+    path: Path, min_len: int = DEFAULT_MIN_LEN, start: int = 0, end: int | None = None
+) -> Iterator[tuple[int, str, int]]:
     """Yield (offset, string, length_in_bytes) for printable ASCII and UTF-16LE runs, in
-    offset order, chunked to bound memory use."""
+    offset order, chunked to bound memory use.
+
+    With start/end, scan only that byte range. Reading begins OVERLAP bytes before `start`
+    so a run that began just before it is seen from its true start (callers own strings by
+    their first byte), and a run that crosses `end` is read to its end by the caller
+    passing an `end` that includes some look-ahead."""
     ascii_re = _ascii_pattern(min_len)
     utf16_re = _utf16le_pattern(min_len)
     # finditer() yields strictly increasing start offsets within a window, and the only
@@ -238,11 +256,16 @@ def iter_strings_ex(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tupl
     # is a multi-GB physical-RAM image or pagefile instead of a single process's memory).
     ascii_floor = -1
     utf16_floor = -1
+    read_start = max(0, start - OVERLAP)
     with open(path, "rb") as f:
-        offset = 0
+        f.seek(read_start)
+        offset = read_start
         carry = b""
         while True:
-            chunk = f.read(CHUNK_SIZE)
+            want = CHUNK_SIZE if end is None else min(CHUNK_SIZE, end - offset)
+            if want <= 0:
+                break
+            chunk = f.read(want)
             if not chunk:
                 break
             window = carry + chunk
@@ -278,18 +301,26 @@ def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[i
         yield offset, string
 
 
+def _check_sidecar(dump_path: Path, actual_sha256: str) -> bool | None:
+    """True if a <dump>.sha256 sidecar matches the computed hash, None if there is no sidecar,
+    else raise."""
+    sidecar = dump_path.with_name(dump_path.name + ".sha256")
+    if not sidecar.exists():
+        return None
+    expected = sidecar.read_text().split()[0].strip().lower()
+    if expected != actual_sha256:
+        raise IntegrityError(
+            f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual_sha256}"
+        )
+    return True
+
+
 def verify_integrity(dump_path: Path) -> bool | None:
     """Return True if a <dump>.sha256 sidecar matches, None if no sidecar exists, else raise."""
     sidecar = dump_path.with_name(dump_path.name + ".sha256")
     if not sidecar.exists():
         return None
-    expected = sidecar.read_text().split()[0].strip().lower()
-    actual = hash_file(dump_path)
-    if expected != actual:
-        raise IntegrityError(
-            f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual}"
-        )
-    return True
+    return _check_sidecar(dump_path, hash_file(dump_path))
 
 
 def _is_plausible_credential_value(value: str) -> bool:
@@ -408,21 +439,25 @@ def _build_timeline(
     return sorted(events.values(), key=lambda e: int(e["offset"], 16))
 
 
-def analyze(
+def _scan_segment(
     dump_path: Path,
-    onion: str | None,
-    host: str | None,
+    start: int,
+    end: int,
+    *,
+    min_len: int,
+    targets: list[str],
     username: str | None,
-    min_len: int = DEFAULT_MIN_LEN,
-    source_type: str = DEFAULT_SOURCE_TYPE,
+    record_cap: int,
+    require_host_anchor: bool,
+    anchor_enabled: bool,
 ) -> dict:
-    if not dump_path.exists():
-        raise ParsingError(f"Dump file not found: {dump_path}")
+    """String-carve [start, end) of the dump and return the raw, unmerged partial results.
 
-    integrity_verified = verify_integrity(dump_path)
-    targets = [t.lower() for t in (onion, host) if t]
-    record_cap = SOURCE_TYPE_RECORD_CAPS.get(source_type, MAX_RECORDS_PER_TYPE)
-
+    Pure function of its arguments, so segments can run in separate processes. A string is
+    owned by the segment its first byte falls in; the read continues SEGMENT_LOOKAHEAD bytes
+    past `end` only so that a login pair or page title that begins inside the segment is
+    still completed.
+    """
     urls: list[dict] = []
     cookies: list[dict] = []
     search_queries: list[dict] = []
@@ -450,12 +485,10 @@ def analyze(
     # page state commonly carry both in one contiguous run; unrelated processes' strings
     # essentially never do. Hits that fail this check aren't discarded -- they're kept
     # under "unanchored" for transparency, just excluded from "targeted"/key_findings.
-    require_host_anchor = source_type == "full-memory" and bool(targets)
     unanchored_counts = {"credentials": 0, "search_queries": 0}
     unanchored_samples: dict[str, list[str]] = {"credentials": [], "search_queries": []}
 
     # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
-    anchor_enabled = bool(targets) or bool(username)
     target_offsets: list[int] = []
     pending_field: tuple[str, int] | None = None
     adjacent_pairs: list[dict] = []
@@ -489,17 +522,24 @@ def analyze(
             "artifacts",
         )
 
-    for offset, s, nbytes in iter_strings_ex(dump_path, min_len=min_len):
-        total_strings += 1
+    for offset, s, nbytes in iter_strings_ex(
+        dump_path, min_len=min_len, start=start, end=end + SEGMENT_LOOKAHEAD
+    ):
+        if offset < start:
+            continue  # owned by the previous segment
+        owned = offset < end
+        if owned:
+            total_strings += 1
         s_low = s.lower() if targets else ""
         mentions_target = bool(targets) and any(t in s_low for t in targets)
         s_matches_target = require_host_anchor and mentions_target
-        if mentions_target:
+        if owned and mentions_target:
             target_offsets.append(offset)
 
         if anchor_enabled:
             if s in CREDENTIAL_FIELD_NAMES:
-                pending_field = (s, offset + nbytes)
+                # Past this segment's end a field name starts a pair the next segment owns.
+                pending_field = (s, offset + nbytes) if owned else None
             elif pending_field is not None:
                 gap = offset - pending_field[1]
                 if 0 <= gap <= ADJACENT_GAP and _is_plausible_credential_value(s):
@@ -507,6 +547,16 @@ def analyze(
                     pending_field = None
                 elif gap > ADJACENT_GAP:
                     pending_field = None
+
+        if not owned:
+            # Past this segment's end: only finish what began inside it (a field name's
+            # value, a title's links); anything new here belongs to the next segment.
+            if anchor_enabled and open_titles and ("href=" in s or "src=" in s):
+                page_links = set(HREF_RE.findall(s))
+                for pending in open_titles:
+                    if offset <= pending["end"]:
+                        pending["links"] |= page_links
+            continue
 
         if anchor_enabled and "&" in s:
             for m in FORM_BODY_RE.finditer(s):
@@ -547,8 +597,8 @@ def analyze(
             if not m.group("path") or any(a <= m.start() < b for a, b in url_spans):
                 continue
             url_hits.append((m.start(), m.group(), m.group("host").lower(), m.group("path")))
-        for start, url, url_host, path in url_hits:
-            match_offset = offset + start
+        for hit_start, url, url_host, path in url_hits:
+            match_offset = offset + hit_start
             unfiltered_url_count += 1
             if len(unfiltered_url_sample) < SAMPLE_CAP:
                 unfiltered_url_sample.append(url)
@@ -664,6 +714,237 @@ def analyze(
             )
             record_artifact("download", match_offset, value)
 
+    title_candidates.extend(t for t in open_titles if t["links"])
+    return {
+        "urls": urls,
+        "cookies": cookies,
+        "search_queries": search_queries,
+        "credentials": credentials,
+        "downloads": downloads,
+        "artifacts": artifacts,
+        "total_strings": total_strings,
+        "unfiltered_url_count": unfiltered_url_count,
+        "unfiltered_url_sample": unfiltered_url_sample,
+        "unfiltered_cookie_count": unfiltered_cookie_count,
+        "unfiltered_cookie_sample": unfiltered_cookie_sample,
+        "onion_domain_hits": onion_domain_hits,
+        "truncated": truncated,
+        "unanchored_counts": unanchored_counts,
+        "unanchored_samples": unanchored_samples,
+        "target_offsets": target_offsets,
+        "adjacent_pairs": adjacent_pairs,
+        "form_candidates": form_candidates,
+        "title_candidates": title_candidates,
+    }
+
+
+def _resolve_workers(workers: int | None) -> int:
+    if workers is None:
+        env = os.environ.get("TRANCE_WORKERS", "").strip()
+        workers = int(env) if env.isdigit() else min(os.cpu_count() or 1, MAX_WORKERS)
+    return max(1, workers)
+
+
+def _plan_segments(size: int, workers: int) -> list[tuple[int, int]]:
+    """Split [0, size) into CHUNK_SIZE-aligned segments, about four per worker."""
+    if workers <= 1 or size < PARALLEL_MIN_BYTES:
+        return [(0, size)]
+    per = -(-size // (workers * 4))
+    per = -(-per // CHUNK_SIZE) * CHUNK_SIZE
+    per = max(SEGMENT_MIN_SIZE, min(SEGMENT_MAX_SIZE, per))
+    return [(start, min(start + per, size)) for start in range(0, size, per)]
+
+
+def _run_segments(
+    dump_path: Path, *, workers: int | None, scan_args: dict
+) -> tuple[list[dict], str]:
+    """Scan every segment (in a process pool when worthwhile) and hash the file once.
+
+    Returns the partial results in offset order and the file's SHA-256. The hash runs as one
+    more task beside the scans instead of being a separate pass over the file, and a sidecar
+    mismatch stops the run as soon as the hash lands.
+    """
+    workers = _resolve_workers(workers)
+    size = dump_path.stat().st_size
+    segments = _plan_segments(size, workers)
+    if workers <= 1 or len(segments) == 1:
+        sha = hash_file(dump_path)
+        _check_sidecar(dump_path, sha)  # fail before spending time on a tampered file
+        return [_scan_segment(dump_path, a, b, **scan_args) for a, b in segments], sha
+    pool = ProcessPoolExecutor(max_workers=min(workers, len(segments) + 1))
+    try:
+        hash_future = pool.submit(hash_file, dump_path)
+        futures = [pool.submit(_scan_segment, dump_path, a, b, **scan_args) for a, b in segments]
+        sha: str | None = None
+        parts: list[dict] = []
+        for future in futures:
+            parts.append(future.result())
+            if sha is None and hash_future.done():
+                sha = hash_future.result()
+                _check_sidecar(dump_path, sha)
+        if sha is None:
+            sha = hash_future.result()
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
+    return parts, sha
+
+
+def _merge_partials(parts: list[dict], record_cap: int) -> dict:
+    """Combine segment partials exactly as one sequential pass would have produced them."""
+    merged: dict = {
+        k: []
+        for k in (
+            "urls",
+            "cookies",
+            "search_queries",
+            "credentials",
+            "downloads",
+            "artifacts",
+            "unfiltered_url_sample",
+            "unfiltered_cookie_sample",
+            "target_offsets",
+            "adjacent_pairs",
+            "form_candidates",
+            "title_candidates",
+        )
+    }
+    merged.update(
+        total_strings=0,
+        unfiltered_url_count=0,
+        unfiltered_cookie_count=0,
+        onion_domain_hits=Counter(),
+        truncated={},
+        unanchored_counts={"credentials": 0, "search_queries": 0},
+        unanchored_samples={"credentials": [], "search_queries": []},
+    )
+    for part in parts:
+        for key in (
+            "urls",
+            "cookies",
+            "search_queries",
+            "credentials",
+            "downloads",
+            "artifacts",
+            "target_offsets",
+            "adjacent_pairs",
+            "form_candidates",
+            "title_candidates",
+        ):
+            merged[key].extend(part[key])
+        for key in ("total_strings", "unfiltered_url_count", "unfiltered_cookie_count"):
+            merged[key] += part[key]
+        merged["unfiltered_url_sample"].extend(part["unfiltered_url_sample"])
+        merged["unfiltered_cookie_sample"].extend(part["unfiltered_cookie_sample"])
+        merged["onion_domain_hits"].update(part["onion_domain_hits"])
+        for key, flag in part["truncated"].items():
+            merged["truncated"][key] = merged["truncated"].get(key, False) or flag
+        for cat in ("credentials", "search_queries"):
+            merged["unanchored_counts"][cat] += part["unanchored_counts"][cat]
+            merged["unanchored_samples"][cat].extend(part["unanchored_samples"][cat])
+    for key in ("urls", "cookies", "search_queries", "credentials", "downloads", "artifacts"):
+        if len(merged[key]) > record_cap:
+            merged[key] = merged[key][:record_cap]
+            merged["truncated"][key] = True
+    merged["unfiltered_url_sample"] = merged["unfiltered_url_sample"][:SAMPLE_CAP]
+    merged["unfiltered_cookie_sample"] = merged["unfiltered_cookie_sample"][:SAMPLE_CAP]
+    for cat in ("credentials", "search_queries"):
+        merged["unanchored_samples"][cat] = merged["unanchored_samples"][cat][:SAMPLE_CAP]
+    return merged
+
+
+def analyze(
+    dump_path: Path,
+    onion: str | None,
+    host: str | None,
+    username: str | None,
+    min_len: int = DEFAULT_MIN_LEN,
+    source_type: str = DEFAULT_SOURCE_TYPE,
+    workers: int | None = None,
+) -> dict:
+    if not dump_path.exists():
+        raise ParsingError(f"Dump file not found: {dump_path}")
+
+    integrity_verified: bool | None
+    targets = [t.lower() for t in (onion, host) if t]
+    record_cap = SOURCE_TYPE_RECORD_CAPS.get(source_type, MAX_RECORDS_PER_TYPE)
+    # Unlike URLs, a cookie/credential/search-query match carries no host of its own to
+    # check against _matches_target() -- so on a single-process dump (already scoped to
+    # one browser's memory) they're kept exactly as before. On a full-memory image,
+    # every process's memory is in scope, and an exact-shape regex match (e.g. "user=...")
+    # from an unrelated process is otherwise indistinguishable from a real one -- see
+    # context.md's "why the 78 credentials are garbage" incident. The best proxy for
+    # "this hit belongs to the target" without real per-process attribution (that's what
+    # volatility_analyze.py's process extraction is for) is: does the *same extracted
+    # string* also mention the target onion/host? Real form submissions and JS-rendered
+    # page state commonly carry both in one contiguous run; unrelated processes' strings
+    # essentially never do. Hits that fail this check aren't discarded -- they're kept
+    # under "unanchored" for transparency, just excluded from "targeted"/key_findings.
+    require_host_anchor = source_type == "full-memory" and bool(targets)
+    # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
+    anchor_enabled = bool(targets) or bool(username)
+
+    parts, dump_sha256 = _run_segments(
+        dump_path,
+        workers=workers,
+        scan_args={
+            "min_len": min_len,
+            "targets": targets,
+            "username": username,
+            "record_cap": record_cap,
+            "require_host_anchor": require_host_anchor,
+            "anchor_enabled": anchor_enabled,
+        },
+    )
+    integrity_verified = _check_sidecar(dump_path, dump_sha256)
+    merged = _merge_partials(parts, record_cap)
+    urls = merged["urls"]
+    cookies = merged["cookies"]
+    search_queries = merged["search_queries"]
+    credentials = merged["credentials"]
+    downloads = merged["downloads"]
+    artifacts = merged["artifacts"]
+    total_strings = merged["total_strings"]
+    unfiltered_url_count = merged["unfiltered_url_count"]
+    unfiltered_url_sample = merged["unfiltered_url_sample"]
+    unfiltered_cookie_count = merged["unfiltered_cookie_count"]
+    unfiltered_cookie_sample = merged["unfiltered_cookie_sample"]
+    onion_domain_hits = merged["onion_domain_hits"]
+    truncated = merged["truncated"]
+    unanchored_counts = merged["unanchored_counts"]
+    unanchored_samples = merged["unanchored_samples"]
+    target_offsets = merged["target_offsets"]
+    adjacent_pairs = merged["adjacent_pairs"]
+    form_candidates = merged["form_candidates"]
+    title_candidates = merged["title_candidates"]
+
+    def record_unanchored(category: str, value: str) -> None:
+        unanchored_counts[category] += 1
+        sample = unanchored_samples[category]
+        if len(sample) < SAMPLE_CAP:
+            sample.append(value)
+
+    def append_capped(items: list[dict], item: dict, type_name: str) -> None:
+        if len(items) >= record_cap:
+            truncated[type_name] = True
+            return
+        items.append(item)
+
+    def record_artifact(artifact_type: str, offset: int, description: str) -> None:
+        append_capped(
+            artifacts,
+            asdict(
+                Artifact(
+                    module="module_c_memory",
+                    artifact_type=artifact_type,
+                    source=f"offset {hex(offset)}",
+                    description=description,
+                )
+            ),
+            "artifacts",
+        )
+
     # A login form's name/value pairs are anchored as a group: by the target username
     # appearing as one of the values, or by a target mention within PROXIMITY_WINDOW.
     target_offsets.sort()
@@ -726,7 +1007,6 @@ def analyze(
         record_artifact("form_submission", cand["offset"], f"Form submission: {shown}")
 
     # Page titles: keep those whose page links to enough paths seen under the target host.
-    title_candidates.extend(t for t in open_titles if t["links"])
     known_paths = {u["path"].split("?", 1)[0] for u in urls} - {"/"}
     page_titles: list[dict] = []
     seen_titles: dict[str, dict] = {}
@@ -785,7 +1065,7 @@ def analyze(
         "dump": {
             "path": str(dump_path),
             "size_bytes": dump_path.stat().st_size,
-            "sha256": hash_file(dump_path),
+            "sha256": dump_sha256,
             "integrity_verified": integrity_verified,
             "source_type": source_type,
         },

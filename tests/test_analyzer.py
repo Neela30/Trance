@@ -333,3 +333,75 @@ def test_firefox_origin_attributes_are_not_forms(tmp_path):
         source_type="full-memory",
     )
     assert report["targeted"]["form_submissions"] == []
+
+
+def _big_dump(tmp_path: Path, pieces: dict[int, bytes], size: int = 70 * 1024 * 1024) -> Path:
+    dump = tmp_path / "big.bin"
+    with open(dump, "wb") as f:
+        f.truncate(size)
+        for offset, data in pieces.items():
+            f.seek(offset)
+            f.write(data)
+    return dump
+
+
+def _comparable(report: dict) -> str:
+    import json
+
+    report = dict(report)
+    report.pop("generated_at")
+    # One long run that straddles a sequential read window can be split differently from
+    # the segment boundary; the string count is the only thing that can move.
+    report["unfiltered"] = {
+        k: v for k, v in report["unfiltered"].items() if k != "total_strings_extracted"
+    }
+    return json.dumps(report, sort_keys=True, default=str)
+
+
+def test_parallel_scan_matches_sequential_across_segment_boundaries(tmp_path):
+    boundary = 32 * 1024 * 1024  # SEGMENT_MIN_SIZE: where the second segment begins
+    pieces = {
+        0: b"http://target.onion/about\x00http://target.onion/search\x00"
+        b"http://target.onion/static/style.css\x00",
+        # A login pair whose field name is in segment 1 and whose value is in segment 2.
+        boundary - 12: b"username" + SEP + _u16("alice.test") + SEP + b"password" + SEP,
+        boundary + 60: _u16("S3cret-Pass-9"),
+        # A page title just before the boundary whose links fall after it.
+        boundary - 3000: b"\n<title>Boundary Page</title>\n",
+        boundary
+        + 100: b'\n<link href="/static/style.css">\n<a href="/search">s</a>\n<a href="/about">a</a>\n',
+        # And an ordinary hit in the last segment.
+        66 * 1024 * 1024: b"http://target.onion/library/rate-card\x00" + SEP + FORM + b"\x00",
+    }
+    dump = _big_dump(tmp_path, pieces)
+    args = dict(onion="target.onion", host=None, username="alice.test", source_type="full-memory")
+
+    sequential = analyze(dump, workers=1, **args)
+    parallel = analyze(dump, workers=4, **args)
+
+    assert _comparable(parallel) == _comparable(sequential)
+    found = {(c["field"], c["value"]) for c in parallel["targeted"]["credentials"]}
+    assert ("password", "S3cret-Pass-9") in found
+    assert [t["title"] for t in parallel["targeted"]["page_titles"]] == ["Boundary Page"]
+    assert len(parallel["targeted"]["form_submissions"]) == 1
+
+
+def test_integrity_sidecar_mismatch_is_caught_in_parallel_mode(tmp_path):
+    import pytest
+
+    from core.exceptions import IntegrityError
+
+    dump = _big_dump(tmp_path, {0: b"http://target.onion/x\x00"})
+    (tmp_path / "big.bin.sha256").write_text("0" * 64 + "  big.bin\n")
+    with pytest.raises(IntegrityError):
+        analyze(dump, onion="target.onion", host=None, username=None, workers=4)
+
+
+def test_integrity_sidecar_match_is_reported_in_parallel_mode(tmp_path):
+    from core.hashing import hash_file
+
+    dump = _big_dump(tmp_path, {0: b"http://target.onion/x\x00"})
+    (tmp_path / "big.bin.sha256").write_text(hash_file(dump) + "  big.bin\n")
+    report = analyze(dump, onion="target.onion", host=None, username=None, workers=4)
+    assert report["dump"]["integrity_verified"] is True
+    assert report["dump"]["sha256"] == hash_file(dump)
