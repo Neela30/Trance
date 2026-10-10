@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from analyze_evidence import resolve_evidence
+from analyze_evidence import resolve_evidence, with_volume_inputs
 from main import CUSTODY_FILENAME, no_target_warning
 
 SOURCE_TYPES = ("process", "full-memory")
@@ -97,6 +97,9 @@ def effective_inputs(request: AnalysisRequest, discovered: dict | None = None) -
     inputs that are never auto-discovered -- the dict module_kwargs_from_resolved()
     reads. An override always wins, exactly as an explicit CLI flag does."""
     inputs = dict(discovered if discovered is not None else discovered_inputs(request.evidence_dir))
+    # A mounted disk (the app's own mount or an already-mounted folder) holds the registry
+    # hives, browser profile and tor folder too; fill in whatever the evidence folder didn't.
+    inputs = with_volume_inputs(inputs, request.disk_root)
     for key, value in request.overrides.items():
         if key in INPUT_KEYS and value:
             inputs[key] = value

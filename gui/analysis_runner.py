@@ -67,6 +67,8 @@ def run(request_path: Path) -> int:
     try:
         request = AnalysisRequest.from_json(Path(request_path).read_text(encoding="utf-8"))
         inputs = effective_inputs(request)
+        for note in inputs.get("volume_notes", []):
+            print(f"[*] {note}")
         module_kwargs = module_kwargs_from_resolved(
             inputs, request.onion, request.host, request.username, request.cookie_names
         )
