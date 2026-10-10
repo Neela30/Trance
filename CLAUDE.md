@@ -693,6 +693,13 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
   --run-analysis <request.json>`; frozen: the same exe re-launches itself) so Cancel can stop
   it; stdout carries log lines plus `@@TRANCE {json}` progress/result/error lines. Cancel
   removes the case folder only if this run created it.
+- **A mounted volume is a full input source** (`analyze_evidence.resolve_volume()`, used by
+  `effective_inputs()`): the hives (case-insensitive paths), the Tor Browser install (the
+  acquisition side's own torrc search; most recently active if several), its profile and tor
+  folder, and the NTUSER.DAT/UsrClass.dat of the user it lives under are found inside the
+  mount. An evidence folder's copy is never replaced; overrides still win; choices go to the
+  live log. Before 2026-10-10 a mounted disk only fed Module B's whole-volume passes, so a
+  disk-image run skipped Module A. **The project is GUI-first: no CLI-only features.**
 - `mount_helper.py` (stdlib only, **runs as root via pkexec**, `gui_main.py --mount-helper` when
   frozen) — validates the image (regular file; refuses VirtualBox *differencing* VDIs by
   header type 4 at 0x4C), `qemu-nbd --read-only`, mounts the largest NTFS partition with
