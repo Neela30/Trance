@@ -95,6 +95,7 @@ def run(
     vol3_path: str | None = None,
     vol3_extract_process: str | None = None,
     vol3_extract_pid: int | None = None,
+    cookie_names: list[str] | None = None,
     **_: object,
 ) -> ModuleResult:
     if dump is None:
@@ -121,7 +122,12 @@ def run(
 
     try:
         details = analyze(
-            analyzer_dump_path, onion, host, username, source_type=analyzer_source_type
+            analyzer_dump_path,
+            onion,
+            host,
+            username,
+            source_type=analyzer_source_type,
+            cookie_names=cookie_names,
         )
     except TranceError as exc:
         return ModuleResult(module=MODULE_NAME, status="error", message=str(exc))

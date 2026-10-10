@@ -17,7 +17,10 @@ from __future__ import annotations
 import base64
 import difflib
 import json
+import re
 from collections import Counter
+from datetime import datetime, timedelta, timezone
+from pathlib import PurePath, PureWindowsPath
 
 from modules.module_c_memory.analyzer import is_timeline_noise
 
@@ -46,6 +49,13 @@ VOL3_PLUGIN_LABELS = {
     "windows.registry.hivelist.HiveList": "Registry hives (hivelist)",
 }
 VOL3_TABLE_CAP = 100
+_UTC = timezone.utc
+BROWSER_PROCESS_NAMES = frozenset({"firefox.exe", "tor.exe"})
+# trance-acquire names an image after the moment it was taken ("fullmem_20261009T182529Z.raw");
+# nothing on the machine can have been created after that.
+CAPTURE_STAMP_RE = re.compile(r"(\d{8}T\d{6}Z)")
+# Slack for a process started while the image was being written.
+CAPTURE_CLOCK_TOLERANCE = timedelta(minutes=10)
 
 
 def _site_map(urls: list[dict]) -> tuple[list[str], list[str]]:
@@ -235,6 +245,94 @@ def _vol3_file_corroboration(
     return notes
 
 
+def _parse_time(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else None
+
+
+def _capture_time(dump_path: str) -> datetime | None:
+    """When the image was taken, from trance-acquire's file name; None if it doesn't carry
+    one (then no clock check is made rather than one against a guess)."""
+    name = PureWindowsPath(dump_path).name if "\\" in dump_path else PurePath(dump_path).name
+    match = CAPTURE_STAMP_RE.search(name)
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=_UTC)
+
+
+def _process_activity(psscan_rows: list[dict], dump_path: str) -> dict | None:
+    """Tor Browser's processes as psscan saw them, for the report's timing.
+
+    Grouped by parent process ID: Tor Browser starts several firefox.exe processes per run,
+    and their parents have often exited and left psscan's view, so a real process tree can't
+    be rebuilt; a group is "the processes one parent started", not necessarily one launch.
+    A process whose creation time is after the image was taken is impossible -- its clock was
+    wrong when it started (e.g. before the machine synchronised its clock) -- so it is listed
+    as a clock anomaly and kept out of the timing."""
+    capture = _capture_time(dump_path)
+    limit = capture + CAPTURE_CLOCK_TOLERANCE if capture else None
+    anomalies = []
+    browser = []
+    for row in psscan_rows:
+        created = _parse_time(row.get("CreateTime"))
+        if limit and created and created > limit:
+            anomalies.append(
+                {
+                    "name": row.get("ImageFileName"),
+                    "pid": row.get("PID"),
+                    "created": row.get("CreateTime"),
+                }
+            )
+            continue
+        if (row.get("ImageFileName") or "").lower() in BROWSER_PROCESS_NAMES and created:
+            browser.append((created, _parse_time(row.get("ExitTime")), row))
+    if not browser and not anomalies:
+        return None
+    groups: dict[object, dict] = {}
+    for created, exited, row in browser:
+        group = groups.setdefault(
+            row.get("PPID"),
+            {
+                "parent_pid": row.get("PPID"),
+                "names": set(),
+                "count": 0,
+                "first_start": created,
+                "last_exit": exited,
+                "still_running": False,
+                "pids": [],
+            },
+        )
+        group["names"].add((row.get("ImageFileName") or "").lower())
+        group["count"] += 1
+        group["pids"].append(row.get("PID"))
+        group["first_start"] = min(group["first_start"], created)
+        if exited is None:
+            group["still_running"] = True
+        elif group["last_exit"] is None or exited > group["last_exit"]:
+            group["last_exit"] = exited
+    ordered = sorted(groups.values(), key=lambda g: g["first_start"])
+    for group in ordered:
+        group["names"] = sorted(group["names"])
+    exits = [e for _, e, _ in browser if e]
+    return {
+        "capture_time": capture,
+        "groups": ordered,
+        "first_start": min((c for c, _, _ in browser), default=None),
+        "last_exit": max(exits) if exits and all(e for _, e, _ in browser) else None,
+        "still_running": any(e is None for _, e, _ in browser),
+        "process_count": len(browser),
+        "exits": [
+            (e, r.get("PID"), (r.get("ImageFileName") or "").lower()) for _, e, r in browser if e
+        ],
+        "clock_anomalies": anomalies,
+    }
+
+
 def _vol3_context(details: dict) -> dict:
     """Presentation context for the Volatility3 structural-analysis section. Kept fully
     separate from the string-carver sections above it -- every plugin result already
@@ -281,6 +379,9 @@ def _vol3_context(details: dict) -> dict:
         "vol_bin": vol3.get("vol_bin"),
         "plugins": plugin_views,
         "corroboration": corroboration,
+        "process_activity": _process_activity(
+            _vol3_rows(plugins, "PsScan"), details["dump"]["path"]
+        ),
     }
 
 

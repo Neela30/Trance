@@ -244,3 +244,85 @@ def test_no_corroboration_notes_when_nothing_lines_up(tmp_path):
     }
     ctx = build_context(details)
     assert ctx["volatility3"]["corroboration"] == []
+
+
+# --- Tor Browser processes from psscan (real c3 shapes: every parent had already exited) ---
+
+
+def _ps(name, pid, ppid, created, exited=None):
+    return {
+        "ImageFileName": name,
+        "PID": pid,
+        "PPID": ppid,
+        "CreateTime": created,
+        "ExitTime": exited,
+    }
+
+
+C3_PSSCAN = [
+    _ps("firefox.exe", 5944, 632, "2026-10-09T18:02:13+00:00", "2026-10-09T18:05:49+00:00"),
+    _ps("firefox.exe", 6884, 5976, "2026-10-09T18:03:28+00:00", "2026-10-09T18:05:22+00:00"),
+    _ps("firefox.exe", 4952, 5976, "2026-10-09T18:03:30+00:00", "2026-10-09T18:05:22+00:00"),
+    _ps("firefox.exe", 7160, 4828, "2026-10-09T18:06:12+00:00", "2026-10-09T18:15:59+00:00"),
+    _ps("svchost.exe", 1612, 600, "2026-10-09T17:56:52+00:00"),
+    # Boot-time processes stamped by a clock that was 12 hours off.
+    _ps("System", 4, 0, "2026-10-10T06:25:34+00:00"),
+    _ps("smss.exe", 336, 4, "2026-10-10T06:25:34+00:00"),
+]
+IMAGE = "/evidence/c3-r01/memory/fullmem_20261009T182529Z.raw"
+
+
+def test_browser_processes_are_grouped_by_parent_with_their_times():
+    from modules.module_c_memory.report import _process_activity
+
+    activity = _process_activity(C3_PSSCAN, IMAGE)
+    groups = [(g["parent_pid"], g["count"]) for g in activity["groups"]]
+    assert groups == [(632, 1), (5976, 2), (4828, 1)]
+    assert activity["first_start"].isoformat() == "2026-10-09T18:02:13+00:00"
+    assert activity["last_exit"].isoformat() == "2026-10-09T18:15:59+00:00"
+    assert activity["still_running"] is False
+    assert activity["process_count"] == 4  # svchost is not a browser process
+
+
+def test_processes_created_after_the_capture_are_clock_anomalies_not_activity():
+    from modules.module_c_memory.report import _process_activity
+
+    activity = _process_activity(C3_PSSCAN, IMAGE)
+    assert [a["pid"] for a in activity["clock_anomalies"]] == [4, 336]
+    assert activity["capture_time"].isoformat() == "2026-10-09T18:25:29+00:00"
+    # A process started while the image was being written is not an anomaly.
+    during = [
+        _ps("firefox.exe", 7160, 4828, "2026-10-09T18:06:12+00:00"),
+        _ps("winpmem.exe", 900, 1, "2026-10-09T18:26:00+00:00"),
+    ]
+    assert _process_activity(during, IMAGE)["clock_anomalies"] == []
+    # Nothing browser-related and nothing anomalous: nothing to report.
+    assert _process_activity([_ps("svchost.exe", 1, 0, "2026-10-09T17:00:00+00:00")], IMAGE) is None
+
+
+def test_without_a_capture_timestamp_no_clock_check_is_made():
+    from modules.module_c_memory.report import _process_activity
+
+    activity = _process_activity(C3_PSSCAN, "/evidence/memory.raw")
+    assert activity["capture_time"] is None
+    assert activity["clock_anomalies"] == []
+
+
+def test_a_browser_still_running_at_capture_has_no_end_time():
+    from modules.module_c_memory.report import _process_activity
+
+    rows = [_ps("firefox.exe", 7160, 4828, "2026-10-09T15:26:30+00:00")]
+    activity = _process_activity(rows, "fullmem_20261009T154539Z.raw")
+    assert activity["still_running"] is True
+    assert activity["last_exit"] is None
+    assert activity["groups"][0]["still_running"] is True
+
+
+def test_capture_time_reads_windows_and_posix_paths():
+    from modules.module_c_memory.report import _capture_time
+
+    for path in (
+        r"C:\evidence\memory\fullmem_20261009T182529Z.raw",
+        "/home/x/memory/fullmem_20261009T182529Z.raw",
+    ):
+        assert _capture_time(path).isoformat() == "2026-10-09T18:25:29+00:00"

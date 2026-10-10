@@ -47,6 +47,14 @@ Modules are isolated: one that is not implemented yet, given no evidence
 this run, or that raises is recorded with that status and does not stop
 the others. Exit code is `2` if any module errored, else `0`.
 
+The three modules run at the same time and their results are assembled in a
+fixed order, so `findings.json` doesn't depend on which finished first. Each
+module's wall-clock time is recorded in `findings.json` under
+`modules.<name>.duration_seconds`. Set `TRANCE_WORKERS=1` to run everything
+sequentially (it also turns off the memory scan's worker processes);
+`TRANCE_WORKERS=<n>` caps those workers (default: up to 8). On a full
+8.6 GB RAM capture the whole pipeline takes about two and a half minutes.
+
 ### Module contract
 
 Each `modules/<name>/__init__.py` exposes
@@ -56,15 +64,18 @@ def run(config: core.config.TranceConfig, **kwargs) -> core.schema.ModuleResult
 ```
 
 returning `ModuleResult(module, status, artifacts, details, message)` where
-`status` is one of `ok` / `skipped` / `not_implemented` / `error`,
+`status` is one of `ok` / `partial` / `skipped` / `not_implemented` / `error`
+(`partial`: some sub-steps failed but real findings were produced, see
+`details["warnings"]`),
 `artifacts` is a list of `core.schema.Artifact`, and `details` is any
 module-specific dict worth keeping verbatim in `findings.json`. Module-specific
 CLI flags are declared in `main.py` and passed through as `kwargs`. To
 contribute a custom section to the HTML report, register a presenter in
 `report.py`'s `PRESENTERS`; without one a module gets a generic artifact table.
 
-Module A (registry) currently returns `not_implemented`. Module B runs when at
-least one disk evidence path is supplied and otherwise returns `skipped`.
+Module A (registry) runs when at least one registry hive is supplied, Module B
+when at least one disk evidence path is supplied, and Module C when a memory
+image is supplied; each otherwise returns `skipped`.
 
 ### Run disk analysis through the pipeline
 
@@ -142,19 +153,42 @@ SHA-256 of the dump.
 python -m modules.module_c_memory.analyzer captures/firefox_<pid>_<ts>.bin \
     --onion <address>.onion \
     --host 127.0.0.1:5000 \
-    --username alice
+    --username alice \
+    --cookie-name sid --cookie-name csrf_token
 ```
 
 - `--onion` / `--host` anchor URL matching to the target hidden service —
   without at least one of these the targeted-URL section is empty.
 - `--username` highlights recovered search queries (`?q=<value>`) that
-  match a known test user.
-- Reports, host-anchored: target URLs only; the exact application cookies
-  (`session=`, `trance_user=`, `trance_pref=`); search queries; and
-  form-submission credential shapes (`username=<value>`,
-  `password=<value>` — requires an `=` and a value, so it does not match
-  bare code identifiers such as `Pass::draw_indexed` or
-  `LoginManager.sys.mjs`).
+  match a known test user, and anchors recovered login credentials and form
+  bodies to that account.
+- `--cookie-name` (repeatable) names the cookies to look for. Default:
+  `session`, `trance_user`, `trance_pref` (the control test site's) -- give the
+  target's own names for a real case.
+- `--workers N` sets the worker processes for the scan (default up to 8, or
+  `TRANCE_WORKERS`; `1` = sequential). The image is split into segments scanned
+  in parallel and hashed once alongside; results are identical to a sequential
+  scan.
+- Reports, anchored to the target: target URLs; cookies **by name** (see
+  `--cookie-name` above); search queries; login credentials; posted form
+  bodies (e.g. a contact-form message); and the titles of the target site's
+  pages. Anchoring differs by kind, because each sits differently in memory:
+  - **Credentials** are found as a field name followed a few bytes later by its
+    typed value (Firefox stores them as separate strings), and kept when the
+    `--username` is one of the values or a target mention is within 2 KiB.
+    `field=value` and JSON shapes are still matched; neither matches bare code
+    identifiers such as `Pass::draw_indexed` or `LoginManager.sys.mjs`.
+  - **Form bodies** (`name=value&name=value`) use the same anchor.
+  - **Page titles** can't be anchored by distance, so a `<title>` is kept when
+    the page's own HTML links to at least three paths this analysis already saw
+    under the target host.
+  - **Cookies** sit far from any host string and are found by name only.
+  The anchoring needs `--onion`, `--host` or `--username`; without one, the new
+  credential/form/title extractors emit nothing.
+- Only findings become `artifacts` in `findings.json`: one per distinct
+  high-confidence cookie/credential/download, search query and target URL.
+  Every raw observation (low-confidence ones included, with all offsets) stays in
+  `details.targeted`, so nothing is hidden, just not presented as a finding.
 - A separate **unfiltered** section reports counts and a capped sample of
   all URL-like and session/token/auth-like strings, clearly labelled as
   noisy context — not evidence on its own.
@@ -257,6 +291,8 @@ presentation logic to maintain), History (lists past cases by scanning
 truth" convention `analyze_evidence.py` already uses, not a second
 store to keep in sync). It's an additional way to drive `main.py`'s
 pipeline, not a replacement for `trance-analyze` — both stay available.
+The Analyse tab's target options take the host, a username, the target's
+cookie names and the report time zone.
 
 Kept out of `requirements.txt` on purpose — `requirements-gui.txt`
 (`PySide6`) is separate so `trance-acquire`/`trance-analyze` builds stay
@@ -323,10 +359,41 @@ examiner-supplied, same as a manually built `trance-acquire.exe`: pass
 Live acquisition must happen while `firefox.exe` is still running —
 once it exits, its process memory is gone and there is nothing left for
 `dumper.py` to read. Recovering browser traces from an already-exited
-process requires a full physical-RAM capture taken before shutdown (e.g.
-WinPMEM) and analysis with a memory-forensics framework such as
-Volatility 3 (already declared in `requirements.txt` for this reason).
-That path is future work and is not implemented here.
+process uses a full physical-RAM capture instead (`trance-acquire` runs
+WinPMEM, examiner-supplied, whether or not Tor Browser is open), analysed
+with `--source-type full-memory`; Volatility 3 (`--vol3-path`) can narrow
+that image to one process. A full image taken *after* the browser closed still
+held part of the session, but far less than one taken while it was open --
+see *Evaluating the tool*.
+
+## Evaluating the tool
+
+`scripts/score_run.py` measures a run against a session whose contents are
+known. A scripted Tor Browser session (a control onion site that logs every
+request, so the ground truth is exact) is captured four ways -- powered off,
+running with the browser closed, running with it open, and a negative control
+with no browsing -- and each capture is scored:
+
+```
+python scripts/score_run.py score --ground-truth ground_truth.json \
+    --server-gt <run>.json --findings output/<case>/findings.json \
+    --run-id c4-r01 --condition C4 --baseline <evidence folder>
+python scripts/score_run.py aggregate results/
+```
+
+It reports recall (items recovered / items performed), planted decoys that
+appear in the findings, and -- with `--baseline` -- a plain case-insensitive
+byte search of the same evidence, so a miss by the tool can be told apart from
+something that was never captured. The negative control must report none of the
+planted strings.
+
+Results from one run per condition (37 scored items): with the browser open
+every item was present in RAM and the improved tool recovered all 37 (the
+original tool: 22); after the browser closed, 8 items remained in RAM and 7
+were recovered; on a powered-off disk only 7 were present and 6 recovered.
+These are single runs, and the extractors that closed the gap were developed on
+the same capture, so confirm on a fresh run before quoting the 37/37. The full
+method, deviations and limits are in `CLAUDE.md` (section 10).
 
 ## Module B — preserve evidence during profile analysis
 

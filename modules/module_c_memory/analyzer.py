@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import bisect
+import functools
+import html
 import json
+import os
 import re
 import sys
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 from core.exceptions import IntegrityError, ParsingError
 from core.hashing import hash_file
@@ -45,6 +51,43 @@ SOURCE_TYPE_RECORD_CAPS = {
 }
 DEFAULT_SOURCE_TYPE = "process"
 
+# The scan is split into independent segments that run in separate processes. A segment
+# reads SEGMENT_LOOKAHEAD bytes past its end so a login pair or page title that starts
+# inside it is completed (TITLE_LINK_WINDOW is the longest look-ahead anything needs).
+SEGMENT_LOOKAHEAD = 65536
+SEGMENT_MIN_SIZE = 4 * CHUNK_SIZE  # 32 MiB: below this a segment isn't worth a process
+SEGMENT_MAX_SIZE = 32 * CHUNK_SIZE  # 256 MiB: bounds one segment's partial results
+PARALLEL_MIN_BYTES = 8 * CHUNK_SIZE  # 64 MiB: smaller dumps are scanned in-process
+MAX_WORKERS = 8
+
+# Proximity anchoring. A hit that carries no host of its own (a login pair, a form body)
+# is attributed to the target when a string that does mention the target host/onion sits
+# this close to it in the dump. Measured on a real full-RAM capture of a scripted session:
+# the password sat 352 bytes, the username 432 and a posted form 768 bytes from the nearest
+# target mention, so a couple of KB covers them without admitting page-sized neighbourhoods.
+PROXIMITY_WINDOW = 2048
+# Firefox keeps a form's field names as one-byte strings and the typed values as UTF-16, a
+# few bytes apart ("username" <binary> "alice" ... "password" <binary> "hunter2"), so a
+# field name and its value are never one extracted string. A value counts as belonging to
+# the field name just before it when it starts within ADJACENT_GAP bytes of that name, and
+# pairs less than ADJACENT_GROUP_GAP apart are one login form.
+ADJACENT_GAP = 64
+ADJACENT_GROUP_GAP = 256
+# Page titles. A <title> in RAM could belong to any page of any process, and unlike a login
+# form it sits far from the host string (measured: 0 of 10 real titles within 4 KiB of a
+# target mention, while 135 unrelated titles turned up within 256 KiB), so proximity can't
+# anchor it. What does: the page's own HTML links to paths -- "/search", "/static/style.css",
+# "/library/..." -- and a page whose links include several paths this same analysis already
+# saw requested from the target host is a page of the target site. Measured on the same
+# capture: all 10 visited pages' titles, none of the 5 unvisited ones, and no foreign title.
+TITLE_LINK_WINDOW = 16384
+MIN_TITLE_LINKS = 3
+TITLE_RE = re.compile(r"<title[^>]*>([^<]{1,200})</title>", re.IGNORECASE)
+HREF_RE = re.compile(r"""\b(?:href|src)=["'](/[^"'#?\s]*)""", re.IGNORECASE)
+CREDENTIAL_FIELD_NAMES = frozenset(
+    {"username", "user", "uname", "login", "email", "password", "passwd", "pwd"}
+)
+
 # Trailing charset stops at , ^ | ] ) } as well as whitespace/quotes: Firefox's in-memory
 # cache and principal keys wrap URLs in exactly those ("<host>,p,:http://…",
 # "<url>^privateBrowsingId=1", "<host>:0|<hash>"), and letting them through turned one
@@ -57,7 +100,18 @@ ONION_RE = re.compile(
     re.IGNORECASE,
 )
 ONION_DOMAIN_RE = re.compile(r"[a-z2-7]{16,56}\.onion", re.IGNORECASE)
-COOKIE_RE = re.compile(r"\b(session|trance_user|trance_pref)=([^\s;\"'<>]+)")
+# Cookie names to look for. Defaults to the control site's names so existing runs behave the
+# same; a real target's names come in through analyze(cookie_names=...) / --cookie-name.
+DEFAULT_COOKIE_NAMES = ("session", "trance_user", "trance_pref")
+
+
+@functools.lru_cache(maxsize=8)
+def _cookie_regex(names: tuple[str, ...]) -> re.Pattern[str]:
+    alternatives = "|".join(re.escape(n) for n in names)
+    return re.compile(r"\b(" + alternatives + r")=([^\s;\"'<>]+)")
+
+
+COOKIE_RE = _cookie_regex(DEFAULT_COOKIE_NAMES)
 SEARCH_QUERY_RE = re.compile(r"\?q=([^\s&\"'<>]+)")
 # Lowercase-only and literal =/JSON-":" separators on purpose: keeps this from
 # matching uppercase Windows env-var dumps (USERNAME=<os user>) and C++/JS
@@ -69,6 +123,12 @@ CREDENTIAL_RE = re.compile(r"\b" + CREDENTIAL_FIELDS + r"=([^\s&\"'<>]+)")
 CREDENTIAL_JSON_RE = re.compile(r'"' + CREDENTIAL_FIELDS + r'"\s*:\s*"([^"\\]{1,200})"')
 NOISY_COOKIE_RE = re.compile(
     r"\b(\w*(?:session|token|auth|cookie|csrf)\w*)=([^\s;\"'<>]{1,80})", re.IGNORECASE
+)
+# A posted form body: two or more name=value pairs joined by '&'. The lookbehind keeps it from
+# starting inside a URL's query string ("...?a=1&b=2" is a link, not a submission).
+FORM_BODY_RE = re.compile(
+    r"(?<![\w?%./=&:-])(?:[A-Za-z][\w.\-\[\]]{0,39}=[^&\s\"'<>]{0,1000}&)+"
+    r"[A-Za-z][\w.\-\[\]]{0,39}=[^&\s\"'<>]{0,1000}"
 )
 # Local download evidence: Firefox's in-memory download manager / session
 # strings carry either a file:// URI or an absolute Windows path ending in a
@@ -189,8 +249,16 @@ def _utf16le_pattern(min_len: int) -> re.Pattern[bytes]:
     return re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)
 
 
-def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[int, str]]:
-    """Yield (offset, string) for printable ASCII and UTF-16LE runs, chunked to bound memory use."""
+def iter_strings_ex(
+    path: Path, min_len: int = DEFAULT_MIN_LEN, start: int = 0, end: int | None = None
+) -> Iterator[tuple[int, str, int]]:
+    """Yield (offset, string, length_in_bytes) for printable ASCII and UTF-16LE runs, in
+    offset order, chunked to bound memory use.
+
+    With start/end, scan only that byte range. Reading begins OVERLAP bytes before `start`
+    so a run that began just before it is seen from its true start (callers own strings by
+    their first byte), and a run that crosses `end` is read to its end by the caller
+    passing an `end` that includes some look-ahead."""
     ascii_re = _ascii_pattern(min_len)
     utf16_re = _utf16le_pattern(min_len)
     # finditer() yields strictly increasing start offsets within a window, and the only
@@ -200,27 +268,63 @@ def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[i
     # is a multi-GB physical-RAM image or pagefile instead of a single process's memory).
     ascii_floor = -1
     utf16_floor = -1
+    read_start = max(0, start - OVERLAP)
     with open(path, "rb") as f:
-        offset = 0
+        f.seek(read_start)
+        offset = read_start
         carry = b""
         while True:
-            chunk = f.read(CHUNK_SIZE)
+            want = CHUNK_SIZE if end is None else min(CHUNK_SIZE, end - offset)
+            if want <= 0:
+                break
+            chunk = f.read(want)
             if not chunk:
                 break
             window = carry + chunk
             window_start = offset - len(carry)
+            found: list[tuple[int, str, int]] = []
             for m in ascii_re.finditer(window):
                 abs_off = window_start + m.start()
                 if abs_off > ascii_floor:
                     ascii_floor = abs_off
-                    yield abs_off, m.group().decode("ascii")
+                    found.append((abs_off, m.group().decode("ascii"), m.end() - m.start()))
             for m in utf16_re.finditer(window):
                 abs_off = window_start + m.start()
                 if abs_off > utf16_floor:
                     utf16_floor = abs_off
-                    yield abs_off, m.group().decode("utf-16-le", errors="ignore")
+                    found.append(
+                        (
+                            abs_off,
+                            m.group().decode("utf-16-le", errors="ignore"),
+                            m.end() - m.start(),
+                        )
+                    )
+            # Offset order across both encodings, so neighbouring strings (a field name
+            # and its value are different encodings) are seen next to each other.
+            found.sort(key=lambda t: t[0])
+            yield from found
             offset += len(chunk)
             carry = window[-OVERLAP:] if len(window) > OVERLAP else window
+
+
+def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[int, str]]:
+    """Yield (offset, string) for printable ASCII and UTF-16LE runs, in offset order."""
+    for offset, string, _ in iter_strings_ex(path, min_len):
+        yield offset, string
+
+
+def _check_sidecar(dump_path: Path, actual_sha256: str) -> bool | None:
+    """True if a <dump>.sha256 sidecar matches the computed hash, None if there is no sidecar,
+    else raise."""
+    sidecar = dump_path.with_name(dump_path.name + ".sha256")
+    if not sidecar.exists():
+        return None
+    expected = sidecar.read_text().split()[0].strip().lower()
+    if expected != actual_sha256:
+        raise IntegrityError(
+            f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual_sha256}"
+        )
+    return True
 
 
 def verify_integrity(dump_path: Path) -> bool | None:
@@ -228,13 +332,47 @@ def verify_integrity(dump_path: Path) -> bool | None:
     sidecar = dump_path.with_name(dump_path.name + ".sha256")
     if not sidecar.exists():
         return None
-    expected = sidecar.read_text().split()[0].strip().lower()
-    actual = hash_file(dump_path)
-    if expected != actual:
-        raise IntegrityError(
-            f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual}"
-        )
-    return True
+    return _check_sidecar(dump_path, hash_file(dump_path))
+
+
+def _is_plausible_credential_value(value: str) -> bool:
+    return (
+        3 <= len(value) <= 120
+        and value not in CREDENTIAL_FIELD_NAMES
+        and not _is_noise_value(value)
+        and sum(ch.isalnum() for ch in value) >= 3
+    )
+
+
+_FLAG_WORDS = frozenset(
+    {"true", "false", "null", "none", "undefined", "enabled", "disabled", "yes", "no", "default"}
+)
+
+
+# Firefox's origin attributes ("privateBrowsingId=1&firstPartyDomain=<site>&partitionKey=...")
+# are '&'-joined and mention the site by construction, but are cache/principal keys, not forms.
+_ORIGIN_ATTR_BODY_RE = re.compile(r"firstPartyDomain=|partitionKey=|userContextId=|BrowsingId=")
+
+
+def _parse_form_body(body: str) -> list[tuple[str, str]]:
+    """Decoded (name, value) pairs of a posted form body, or [] if it doesn't look like one."""
+    if _ORIGIN_ATTR_BODY_RE.search(body):
+        return []
+    pairs = parse_qsl(body, keep_blank_values=True)
+    if len(pairs) < 2 or any(_TEMPLATE_NOISE_RE.search(k) for k, _ in pairs):
+        return []
+    # Telemetry and config blobs are '&'-joined too; a real form carries at least one value
+    # a person typed (some letters/digits) rather than only flags and numbers.
+    if not any(
+        sum(ch.isalpha() for ch in v) >= 3 and v.lower() not in _FLAG_WORDS for _, v in pairs
+    ):
+        return []
+    return pairs
+
+
+def _near_any(sorted_offsets: list[int], offset: int, window: int) -> bool:
+    i = bisect.bisect_left(sorted_offsets, offset - window)
+    return i < len(sorted_offsets) and sorted_offsets[i] <= offset + window
 
 
 def _build_timeline(
@@ -313,27 +451,32 @@ def _build_timeline(
     return sorted(events.values(), key=lambda e: int(e["offset"], 16))
 
 
-def analyze(
+def _scan_segment(
     dump_path: Path,
-    onion: str | None,
-    host: str | None,
+    start: int,
+    end: int,
+    *,
+    min_len: int,
+    targets: list[str],
     username: str | None,
-    min_len: int = DEFAULT_MIN_LEN,
-    source_type: str = DEFAULT_SOURCE_TYPE,
+    record_cap: int,
+    require_host_anchor: bool,
+    anchor_enabled: bool,
+    cookie_names: tuple[str, ...],
 ) -> dict:
-    if not dump_path.exists():
-        raise ParsingError(f"Dump file not found: {dump_path}")
+    """String-carve [start, end) of the dump and return the raw, unmerged partial results.
 
-    integrity_verified = verify_integrity(dump_path)
-    targets = [t.lower() for t in (onion, host) if t]
-    record_cap = SOURCE_TYPE_RECORD_CAPS.get(source_type, MAX_RECORDS_PER_TYPE)
-
+    Pure function of its arguments, so segments can run in separate processes. A string is
+    owned by the segment its first byte falls in; the read continues SEGMENT_LOOKAHEAD bytes
+    past `end` only so that a login pair or page title that begins inside the segment is
+    still completed.
+    """
+    cookie_re = _cookie_regex(cookie_names)
     urls: list[dict] = []
     cookies: list[dict] = []
     search_queries: list[dict] = []
     credentials: list[dict] = []
     downloads: list[dict] = []
-    artifacts: list[dict] = []
 
     total_strings = 0
     unfiltered_url_count = 0
@@ -355,9 +498,433 @@ def analyze(
     # page state commonly carry both in one contiguous run; unrelated processes' strings
     # essentially never do. Hits that fail this check aren't discarded -- they're kept
     # under "unanchored" for transparency, just excluded from "targeted"/key_findings.
-    require_host_anchor = source_type == "full-memory" and bool(targets)
     unanchored_counts = {"credentials": 0, "search_queries": 0}
     unanchored_samples: dict[str, list[str]] = {"credentials": [], "search_queries": []}
+
+    # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
+    target_offsets: list[int] = []
+    pending_field: tuple[str, int] | None = None
+    adjacent_pairs: list[dict] = []
+    form_candidates: list[dict] = []
+    open_titles: list[dict] = []
+    title_candidates: list[dict] = []
+
+    def record_unanchored(category: str, value: str) -> None:
+        unanchored_counts[category] += 1
+        sample = unanchored_samples[category]
+        if len(sample) < SAMPLE_CAP:
+            sample.append(value)
+
+    def append_capped(items: list[dict], item: dict, type_name: str) -> None:
+        if len(items) >= record_cap:
+            truncated[type_name] = True
+            return
+        items.append(item)
+
+    for offset, s, nbytes in iter_strings_ex(
+        dump_path, min_len=min_len, start=start, end=end + SEGMENT_LOOKAHEAD
+    ):
+        if offset < start:
+            continue  # owned by the previous segment
+        owned = offset < end
+        if owned:
+            total_strings += 1
+        s_low = s.lower()
+        # Every pattern below needs some literal text to match at all, so checking for it
+        # first skips running ~10 regexes over the millions of strings (per GB) that
+        # contain none of it. Exactly equivalent: a gate is only false when the regex can't match.
+        has_eq = "=" in s
+        has_scheme = "://" in s
+        has_onion = ".onion" in s_low
+        mentions_target = bool(targets) and any(t in s_low for t in targets)
+        s_matches_target = require_host_anchor and mentions_target
+        if owned and mentions_target:
+            target_offsets.append(offset)
+
+        if anchor_enabled:
+            if s in CREDENTIAL_FIELD_NAMES:
+                # Past this segment's end a field name starts a pair the next segment owns.
+                pending_field = (s, offset + nbytes) if owned else None
+            elif pending_field is not None:
+                gap = offset - pending_field[1]
+                if 0 <= gap <= ADJACENT_GAP and _is_plausible_credential_value(s):
+                    adjacent_pairs.append({"offset": offset, "field": pending_field[0], "value": s})
+                    pending_field = None
+                elif gap > ADJACENT_GAP:
+                    pending_field = None
+
+        if not owned:
+            # Past this segment's end: only finish what began inside it (a field name's
+            # value, a title's links); anything new here belongs to the next segment.
+            if anchor_enabled and open_titles and ("href=" in s or "src=" in s):
+                page_links = set(HREF_RE.findall(s))
+                for pending in open_titles:
+                    if offset <= pending["end"]:
+                        pending["links"] |= page_links
+            continue
+
+        if anchor_enabled and "&" in s:
+            for m in FORM_BODY_RE.finditer(s):
+                fields = _parse_form_body(m.group())
+                if fields:
+                    form_candidates.append({"offset": offset + m.start(), "fields": fields})
+
+        if anchor_enabled:
+            while open_titles and offset > open_titles[0]["end"]:
+                done = open_titles.pop(0)
+                if done["links"]:
+                    title_candidates.append(done)
+            if "<title" in s:
+                for m in TITLE_RE.finditer(s):
+                    open_titles.append(
+                        {
+                            "offset": offset + m.start(),
+                            "end": offset + m.start() + TITLE_LINK_WINDOW,
+                            "title": html.unescape(m.group(1)).strip(),
+                            "links": set(),
+                        }
+                    )
+            if open_titles and ("href=" in s or "src=" in s):
+                page_links = set(HREF_RE.findall(s))
+                if page_links:
+                    for pending in open_titles:
+                        pending["links"] |= page_links
+
+        url_spans: list[tuple[int, int]] = []
+        url_hits: list[tuple[int, str, str, str]] = []
+        for m in URL_RE.finditer(s) if has_scheme else ():
+            url_spans.append((m.start(), m.end()))
+            url_host, path = _split_url(m.group())
+            url_hits.append((m.start(), m.group(), url_host, path))
+        for m in ONION_RE.finditer(s) if has_onion else ():
+            # Inside a full URL it's already covered by that URL (or is a search engine
+            # merely mentioning it); without a path it's a mention, not a visit.
+            if not m.group("path") or any(a <= m.start() < b for a, b in url_spans):
+                continue
+            url_hits.append((m.start(), m.group(), m.group("host").lower(), m.group("path")))
+        for hit_start, url, url_host, path in url_hits:
+            match_offset = offset + hit_start
+            unfiltered_url_count += 1
+            if len(unfiltered_url_sample) < SAMPLE_CAP:
+                unfiltered_url_sample.append(url)
+            if targets and _matches_target(url_host, targets):
+                append_capped(
+                    urls,
+                    {
+                        "offset": hex(match_offset),
+                        "value": url,
+                        "host": url_host,
+                        "path": path,
+                        "asset": _is_asset_path(path),
+                    },
+                    "urls",
+                )
+        for m in ONION_DOMAIN_RE.finditer(s) if has_onion else ():
+            onion_domain_hits[m.group().lower()] += 1
+            # Only the top 10 ever get reported (targeting_suggestions below); on a
+            # whole-system image with many distinct onion-like mentions this dict is
+            # the growth risk, so periodically drop everything but the leaders.
+            if len(onion_domain_hits) > 10_000:
+                onion_domain_hits = Counter(dict(onion_domain_hits.most_common(1_000)))
+
+        for m in cookie_re.finditer(s) if has_eq else ():
+            # Not host-anchored, unlike credentials/search-queries below: a cookie lives
+            # in Firefox's own cookie-jar structure, not co-located in memory with the
+            # page/URL text that set it, so the same-string proximity check that works
+            # for form submissions just drops real cookies here (verified: it silently
+            # ate a real, high-confidence JWT session cookie in testing). COOKIE_RE's own
+            # exact app-specific name match (session/trance_user/trance_pref, not a
+            # generic field name) is already the precision this needs.
+            name, value = m.group(1), m.group(2)
+            match_offset = offset + m.start()
+            confidence = "low" if _is_noise_value(value) else "high"
+            append_capped(
+                cookies,
+                {
+                    "offset": hex(match_offset),
+                    "name": name,
+                    "value": value,
+                    "confidence": confidence,
+                },
+                "cookies",
+            )
+        for m in NOISY_COOKIE_RE.finditer(s) if has_eq else ():
+            unfiltered_cookie_count += 1
+            if len(unfiltered_cookie_sample) < SAMPLE_CAP:
+                unfiltered_cookie_sample.append(f"{m.group(1)}={m.group(2)}")
+
+        for m in SEARCH_QUERY_RE.finditer(s) if "?q=" in s else ():
+            value = m.group(1)
+            match_offset = offset + m.start()
+            if require_host_anchor and not s_matches_target:
+                record_unanchored("search_queries", value)
+                continue
+            matches_username = bool(username) and username.lower() in value.lower()
+            append_capped(
+                search_queries,
+                {"offset": hex(match_offset), "value": value, "matches_username": matches_username},
+                "search_queries",
+            )
+
+        for m in CREDENTIAL_RE.finditer(s) if has_eq else ():
+            field, value = m.group(1), m.group(2)
+            match_offset = offset + m.start()
+            if require_host_anchor and not s_matches_target:
+                record_unanchored("credentials", f"{field}={value}")
+                continue
+            confidence = "low" if _is_noise_value(value) else "high"
+            append_capped(
+                credentials,
+                {
+                    "offset": hex(match_offset),
+                    "field": field,
+                    "value": value,
+                    "shape": "form",
+                    "confidence": confidence,
+                },
+                "credentials",
+            )
+        for m in CREDENTIAL_JSON_RE.finditer(s) if '"' in s and ":" in s else ():
+            field, value = m.group(1), m.group(2)
+            match_offset = offset + m.start()
+            if require_host_anchor and not s_matches_target:
+                record_unanchored("credentials", f'"{field}":"{value}"')
+                continue
+            confidence = "low" if _is_noise_value(value) else "high"
+            append_capped(
+                credentials,
+                {
+                    "offset": hex(match_offset),
+                    "field": field,
+                    "value": value,
+                    "shape": "json",
+                    "confidence": confidence,
+                },
+                "credentials",
+            )
+
+        for m in (list(FILE_URI_RE.finditer(s)) if "file:///" in s_low else []) + (
+            list(DOWNLOAD_PATH_RE.finditer(s)) if ":\\" in s else []
+        ):
+            value = m.group()
+            match_offset = offset + m.start()
+            confidence = "high" if _is_confirmed_download(value) else "low"
+            append_capped(
+                downloads,
+                {"offset": hex(match_offset), "value": value, "confidence": confidence},
+                "downloads",
+            )
+
+    title_candidates.extend(t for t in open_titles if t["links"])
+    return {
+        "urls": urls,
+        "cookies": cookies,
+        "search_queries": search_queries,
+        "credentials": credentials,
+        "downloads": downloads,
+        "total_strings": total_strings,
+        "unfiltered_url_count": unfiltered_url_count,
+        "unfiltered_url_sample": unfiltered_url_sample,
+        "unfiltered_cookie_count": unfiltered_cookie_count,
+        "unfiltered_cookie_sample": unfiltered_cookie_sample,
+        "onion_domain_hits": onion_domain_hits,
+        "truncated": truncated,
+        "unanchored_counts": unanchored_counts,
+        "unanchored_samples": unanchored_samples,
+        "target_offsets": target_offsets,
+        "adjacent_pairs": adjacent_pairs,
+        "form_candidates": form_candidates,
+        "title_candidates": title_candidates,
+    }
+
+
+def _resolve_workers(workers: int | None) -> int:
+    if workers is None:
+        env = os.environ.get("TRANCE_WORKERS", "").strip()
+        workers = int(env) if env.isdigit() else min(os.cpu_count() or 1, MAX_WORKERS)
+    return max(1, workers)
+
+
+def _plan_segments(size: int, workers: int) -> list[tuple[int, int]]:
+    """Split [0, size) into CHUNK_SIZE-aligned segments, about four per worker."""
+    if workers <= 1 or size < PARALLEL_MIN_BYTES:
+        return [(0, size)]
+    per = -(-size // (workers * 4))
+    per = -(-per // CHUNK_SIZE) * CHUNK_SIZE
+    per = max(SEGMENT_MIN_SIZE, min(SEGMENT_MAX_SIZE, per))
+    return [(start, min(start + per, size)) for start in range(0, size, per)]
+
+
+def _run_segments(
+    dump_path: Path, *, workers: int | None, scan_args: dict
+) -> tuple[list[dict], str]:
+    """Scan every segment (in a process pool when worthwhile) and hash the file once.
+
+    Returns the partial results in offset order and the file's SHA-256. The hash runs as one
+    more task beside the scans instead of being a separate pass over the file, and a sidecar
+    mismatch stops the run as soon as the hash lands.
+    """
+    workers = _resolve_workers(workers)
+    size = dump_path.stat().st_size
+    segments = _plan_segments(size, workers)
+    if workers <= 1 or len(segments) == 1:
+        sha = hash_file(dump_path)
+        _check_sidecar(dump_path, sha)  # fail before spending time on a tampered file
+        return [_scan_segment(dump_path, a, b, **scan_args) for a, b in segments], sha
+    pool = ProcessPoolExecutor(max_workers=min(workers, len(segments) + 1))
+    try:
+        hash_future = pool.submit(hash_file, dump_path)
+        futures = [pool.submit(_scan_segment, dump_path, a, b, **scan_args) for a, b in segments]
+        sha: str | None = None
+        parts: list[dict] = []
+        for future in futures:
+            parts.append(future.result())
+            if sha is None and hash_future.done():
+                sha = hash_future.result()
+                _check_sidecar(dump_path, sha)
+        if sha is None:
+            sha = hash_future.result()
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown()
+    return parts, sha
+
+
+def _merge_partials(parts: list[dict], record_cap: int) -> dict:
+    """Combine segment partials exactly as one sequential pass would have produced them."""
+    merged: dict = {
+        k: []
+        for k in (
+            "urls",
+            "cookies",
+            "search_queries",
+            "credentials",
+            "downloads",
+            "unfiltered_url_sample",
+            "unfiltered_cookie_sample",
+            "target_offsets",
+            "adjacent_pairs",
+            "form_candidates",
+            "title_candidates",
+        )
+    }
+    merged.update(
+        total_strings=0,
+        unfiltered_url_count=0,
+        unfiltered_cookie_count=0,
+        onion_domain_hits=Counter(),
+        truncated={},
+        unanchored_counts={"credentials": 0, "search_queries": 0},
+        unanchored_samples={"credentials": [], "search_queries": []},
+    )
+    for part in parts:
+        for key in (
+            "urls",
+            "cookies",
+            "search_queries",
+            "credentials",
+            "downloads",
+            "target_offsets",
+            "adjacent_pairs",
+            "form_candidates",
+            "title_candidates",
+        ):
+            merged[key].extend(part[key])
+        for key in ("total_strings", "unfiltered_url_count", "unfiltered_cookie_count"):
+            merged[key] += part[key]
+        merged["unfiltered_url_sample"].extend(part["unfiltered_url_sample"])
+        merged["unfiltered_cookie_sample"].extend(part["unfiltered_cookie_sample"])
+        merged["onion_domain_hits"].update(part["onion_domain_hits"])
+        for key, flag in part["truncated"].items():
+            merged["truncated"][key] = merged["truncated"].get(key, False) or flag
+        for cat in ("credentials", "search_queries"):
+            merged["unanchored_counts"][cat] += part["unanchored_counts"][cat]
+            merged["unanchored_samples"][cat].extend(part["unanchored_samples"][cat])
+    for key in ("urls", "cookies", "search_queries", "credentials", "downloads"):
+        if len(merged[key]) > record_cap:
+            merged[key] = merged[key][:record_cap]
+            merged["truncated"][key] = True
+    merged["unfiltered_url_sample"] = merged["unfiltered_url_sample"][:SAMPLE_CAP]
+    merged["unfiltered_cookie_sample"] = merged["unfiltered_cookie_sample"][:SAMPLE_CAP]
+    for cat in ("credentials", "search_queries"):
+        merged["unanchored_samples"][cat] = merged["unanchored_samples"][cat][:SAMPLE_CAP]
+    return merged
+
+
+def analyze(
+    dump_path: Path,
+    onion: str | None,
+    host: str | None,
+    username: str | None,
+    min_len: int = DEFAULT_MIN_LEN,
+    source_type: str = DEFAULT_SOURCE_TYPE,
+    workers: int | None = None,
+    cookie_names: Sequence[str] | None = None,
+) -> dict:
+    if not dump_path.exists():
+        raise ParsingError(f"Dump file not found: {dump_path}")
+
+    integrity_verified: bool | None
+    targets = [t.lower() for t in (onion, host) if t]
+    record_cap = SOURCE_TYPE_RECORD_CAPS.get(source_type, MAX_RECORDS_PER_TYPE)
+    # Unlike URLs, a cookie/credential/search-query match carries no host of its own to
+    # check against _matches_target() -- so on a single-process dump (already scoped to
+    # one browser's memory) they're kept exactly as before. On a full-memory image,
+    # every process's memory is in scope, and an exact-shape regex match (e.g. "user=...")
+    # from an unrelated process is otherwise indistinguishable from a real one -- see
+    # context.md's "why the 78 credentials are garbage" incident. The best proxy for
+    # "this hit belongs to the target" without real per-process attribution (that's what
+    # volatility_analyze.py's process extraction is for) is: does the *same extracted
+    # string* also mention the target onion/host? Real form submissions and JS-rendered
+    # page state commonly carry both in one contiguous run; unrelated processes' strings
+    # essentially never do. Hits that fail this check aren't discarded -- they're kept
+    # under "unanchored" for transparency, just excluded from "targeted"/key_findings.
+    # A full-memory image holds every process's memory, so a hit that carries no host of its
+    # own always needs the anchor there -- also when no --onion/--host was given, which used
+    # to switch anchoring off and report every credential/search shape in RAM (antivirus
+    # signature text, PowerShell snippets, telemetry IDs) as a finding.
+    require_host_anchor = source_type == "full-memory"
+    # Without --onion/--host nothing on a whole-RAM image can be tied to Tor Browser at all:
+    # cookies and downloads (which are never host-anchored) are then observations too.
+    unattributed = source_type == "full-memory" and not targets
+    # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
+    anchor_enabled = bool(targets) or bool(username)
+
+    parts, dump_sha256 = _run_segments(
+        dump_path,
+        workers=workers,
+        scan_args={
+            "min_len": min_len,
+            "targets": targets,
+            "username": username,
+            "record_cap": record_cap,
+            "require_host_anchor": require_host_anchor,
+            "anchor_enabled": anchor_enabled,
+            "cookie_names": tuple(cookie_names) if cookie_names else DEFAULT_COOKIE_NAMES,
+        },
+    )
+    integrity_verified = _check_sidecar(dump_path, dump_sha256)
+    merged = _merge_partials(parts, record_cap)
+    urls = merged["urls"]
+    cookies = merged["cookies"]
+    search_queries = merged["search_queries"]
+    credentials = merged["credentials"]
+    downloads = merged["downloads"]
+    artifacts: list[dict] = []
+    total_strings = merged["total_strings"]
+    unfiltered_url_count = merged["unfiltered_url_count"]
+    unfiltered_url_sample = merged["unfiltered_url_sample"]
+    unfiltered_cookie_count = merged["unfiltered_cookie_count"]
+    unfiltered_cookie_sample = merged["unfiltered_cookie_sample"]
+    onion_domain_hits = merged["onion_domain_hits"]
+    truncated = merged["truncated"]
+    unanchored_counts = merged["unanchored_counts"]
+    unanchored_samples = merged["unanchored_samples"]
+    target_offsets = merged["target_offsets"]
+    adjacent_pairs = merged["adjacent_pairs"]
+    form_candidates = merged["form_candidates"]
+    title_candidates = merged["title_candidates"]
 
     def record_unanchored(category: str, value: str) -> None:
         unanchored_counts[category] += 1
@@ -385,138 +952,133 @@ def analyze(
             "artifacts",
         )
 
-    for offset, s in iter_strings(dump_path, min_len=min_len):
-        total_strings += 1
-        s_matches_target = require_host_anchor and any(t in s.lower() for t in targets)
+    if unattributed:
+        for category in ("cookies", "downloads"):
+            unanchored_counts.setdefault(category, 0)
+            unanchored_samples.setdefault(category, [])
+        for c in cookies:
+            record_unanchored("cookies", f"{c['name']}={c['value']}")
+        for d in downloads:
+            record_unanchored("downloads", d["value"])
+        cookies, downloads = [], []
 
-        url_spans: list[tuple[int, int]] = []
-        url_hits: list[tuple[int, str, str, str]] = []
-        for m in URL_RE.finditer(s):
-            url_spans.append((m.start(), m.end()))
-            url_host, path = _split_url(m.group())
-            url_hits.append((m.start(), m.group(), url_host, path))
-        for m in ONION_RE.finditer(s):
-            # Inside a full URL it's already covered by that URL (or is a search engine
-            # merely mentioning it); without a path it's a mention, not a visit.
-            if not m.group("path") or any(a <= m.start() < b for a, b in url_spans):
+    # Only findings become artifacts: every raw observation stays in details["targeted"], but
+    # one the analyzer itself labels low confidence (a printf "session=%p", a bare "file:///C:")
+    # or that repeats a finding already reported is not a finding. On a negative-control
+    # capture this took the memory module from 3,171 artifacts to the handful that are real.
+    reported: set[tuple[str, str]] = set()
+
+    def report_once(artifact_type: str, offset_hex: str, description: str) -> None:
+        if (artifact_type, description) not in reported:
+            reported.add((artifact_type, description))
+            record_artifact(artifact_type, int(offset_hex, 16), description)
+
+    for u in urls:
+        report_once("url", u["offset"], u["value"])
+    for c in cookies:
+        if c["confidence"] == "high":
+            report_once("cookie", c["offset"], f"{c['name']}={c['value']}")
+    for q in search_queries:
+        if not is_timeline_noise(q["value"]):
+            report_once("search_query", q["offset"], q["value"])
+    for c in credentials:
+        if c["confidence"] != "high":
+            continue
+        shown = (
+            f'"{c["field"]}":"{c["value"]}"'
+            if c["shape"] == "json"
+            else f"{c['field']}={c['value']}"
+        )
+        report_once("credential", c["offset"], shown)
+    for d in downloads:
+        if d["confidence"] == "high":
+            report_once("download", d["offset"], d["value"])
+
+    # A login form's name/value pairs are anchored as a group: by the target username
+    # appearing as one of the values, or by a target mention within PROXIMITY_WINDOW.
+    target_offsets.sort()
+    adjacent_pairs.sort(key=lambda p: p["offset"])
+    groups: list[list[dict]] = []
+    for pair in adjacent_pairs:
+        if groups and pair["offset"] - groups[-1][-1]["offset"] <= ADJACENT_GROUP_GAP:
+            groups[-1].append(pair)
+        else:
+            groups.append([pair])
+    for group in groups:
+        anchored_by = None
+        if username and any(username.lower() in p["value"].lower() for p in group):
+            anchored_by = "username"
+        elif any(_near_any(target_offsets, p["offset"], PROXIMITY_WINDOW) for p in group):
+            anchored_by = "host"
+        for p in group:
+            if anchored_by is None:
+                record_unanchored("credentials", f"{p['field']}={p['value']}")
                 continue
-            url_hits.append((m.start(), m.group(), m.group("host").lower(), m.group("path")))
-        for start, url, url_host, path in url_hits:
-            match_offset = offset + start
-            unfiltered_url_count += 1
-            if len(unfiltered_url_sample) < SAMPLE_CAP:
-                unfiltered_url_sample.append(url)
-            if targets and _matches_target(url_host, targets):
-                append_capped(
-                    urls,
-                    {
-                        "offset": hex(match_offset),
-                        "value": url,
-                        "host": url_host,
-                        "path": path,
-                        "asset": _is_asset_path(path),
-                    },
-                    "urls",
-                )
-                record_artifact("url", match_offset, url)
-        for m in ONION_DOMAIN_RE.finditer(s):
-            onion_domain_hits[m.group().lower()] += 1
-            # Only the top 10 ever get reported (targeting_suggestions below); on a
-            # whole-system image with many distinct onion-like mentions this dict is
-            # the growth risk, so periodically drop everything but the leaders.
-            if len(onion_domain_hits) > 10_000:
-                onion_domain_hits = Counter(dict(onion_domain_hits.most_common(1_000)))
-
-        for m in COOKIE_RE.finditer(s):
-            # Not host-anchored, unlike credentials/search-queries below: a cookie lives
-            # in Firefox's own cookie-jar structure, not co-located in memory with the
-            # page/URL text that set it, so the same-string proximity check that works
-            # for form submissions just drops real cookies here (verified: it silently
-            # ate a real, high-confidence JWT session cookie in testing). COOKIE_RE's own
-            # exact app-specific name match (session/trance_user/trance_pref, not a
-            # generic field name) is already the precision this needs.
-            name, value = m.group(1), m.group(2)
-            match_offset = offset + m.start()
-            confidence = "low" if _is_noise_value(value) else "high"
-            append_capped(
-                cookies,
-                {
-                    "offset": hex(match_offset),
-                    "name": name,
-                    "value": value,
-                    "confidence": confidence,
-                },
-                "cookies",
-            )
-            record_artifact("cookie", match_offset, f"{name}={value}")
-        for m in NOISY_COOKIE_RE.finditer(s):
-            unfiltered_cookie_count += 1
-            if len(unfiltered_cookie_sample) < SAMPLE_CAP:
-                unfiltered_cookie_sample.append(f"{m.group(1)}={m.group(2)}")
-
-        for m in SEARCH_QUERY_RE.finditer(s):
-            value = m.group(1)
-            match_offset = offset + m.start()
-            if require_host_anchor and not s_matches_target:
-                record_unanchored("search_queries", value)
-                continue
-            matches_username = bool(username) and username.lower() in value.lower()
-            append_capped(
-                search_queries,
-                {"offset": hex(match_offset), "value": value, "matches_username": matches_username},
-                "search_queries",
-            )
-            record_artifact("search_query", match_offset, value)
-
-        for m in CREDENTIAL_RE.finditer(s):
-            field, value = m.group(1), m.group(2)
-            match_offset = offset + m.start()
-            if require_host_anchor and not s_matches_target:
-                record_unanchored("credentials", f"{field}={value}")
-                continue
-            confidence = "low" if _is_noise_value(value) else "high"
             append_capped(
                 credentials,
                 {
-                    "offset": hex(match_offset),
-                    "field": field,
-                    "value": value,
-                    "shape": "form",
-                    "confidence": confidence,
+                    "offset": hex(p["offset"]),
+                    "field": p["field"],
+                    "value": p["value"],
+                    "shape": "adjacent",
+                    "confidence": "high",
+                    "anchored_by": anchored_by,
                 },
                 "credentials",
             )
-            record_artifact("credential", match_offset, f"{field}={value}")
-        for m in CREDENTIAL_JSON_RE.finditer(s):
-            field, value = m.group(1), m.group(2)
-            match_offset = offset + m.start()
-            if require_host_anchor and not s_matches_target:
-                record_unanchored("credentials", f'"{field}":"{value}"')
-                continue
-            confidence = "low" if _is_noise_value(value) else "high"
-            append_capped(
-                credentials,
-                {
-                    "offset": hex(match_offset),
-                    "field": field,
-                    "value": value,
-                    "shape": "json",
-                    "confidence": confidence,
-                },
-                "credentials",
-            )
-            record_artifact("credential", match_offset, f'"{field}":"{value}"')
+            report_once("credential", hex(p["offset"]), f"{p['field']}={p['value']}")
 
-        for m in list(FILE_URI_RE.finditer(s)) + list(DOWNLOAD_PATH_RE.finditer(s)):
-            value = m.group()
-            match_offset = offset + m.start()
-            confidence = "high" if _is_confirmed_download(value) else "low"
-            append_capped(
-                downloads,
-                {"offset": hex(match_offset), "value": value, "confidence": confidence},
-                "downloads",
-            )
-            record_artifact("download", match_offset, value)
+    # Posted forms: anchored by the target username among the values or by a nearby target
+    # mention. The same body is often in memory several times -- keep one, count the rest.
+    form_submissions: list[dict] = []
+    seen_forms: dict[tuple, dict] = {}
+    for cand in sorted(form_candidates, key=lambda c: c["offset"]):
+        anchored_by = None
+        if username and any(username.lower() in v.lower() for _, v in cand["fields"]):
+            anchored_by = "username"
+        elif _near_any(target_offsets, cand["offset"], PROXIMITY_WINDOW):
+            anchored_by = "host"
+        if anchored_by is None:
+            continue
+        key = tuple(cand["fields"])
+        if key in seen_forms:
+            seen_forms[key]["occurrences"] += 1
+            continue
+        record = {
+            "offset": hex(cand["offset"]),
+            "fields": [{"name": k, "value": v} for k, v in cand["fields"]],
+            "anchored_by": anchored_by,
+            "occurrences": 1,
+        }
+        seen_forms[key] = record
+        append_capped(form_submissions, record, "form_submissions")
+        shown = "; ".join(f"{k}='{v}'" for k, v in cand["fields"])
+        record_artifact("form_submission", cand["offset"], f"Form submission: {shown}")
+
+    # Page titles: keep those whose page links to enough paths seen under the target host.
+    known_paths = {u["path"].split("?", 1)[0] for u in urls} - {"/"}
+    page_titles: list[dict] = []
+    seen_titles: dict[str, dict] = {}
+    for cand in sorted(title_candidates, key=lambda c: c["offset"]):
+        shared = sorted(cand["links"] & known_paths)
+        if len(shared) < MIN_TITLE_LINKS or not cand["title"]:
+            continue
+        if cand["title"] in seen_titles:
+            seen_titles[cand["title"]]["occurrences"] += 1
+            continue
+        record = {
+            "offset": hex(cand["offset"]),
+            "title": cand["title"],
+            "linked_target_paths": shared,
+            "occurrences": 1,
+        }
+        seen_titles[cand["title"]] = record
+        append_capped(page_titles, record, "page_titles")
+        record_artifact(
+            "page_title",
+            cand["offset"],
+            f"Page title '{cand['title']}' (HTML page linking to {len(shared)} paths seen on the target)",
+        )
 
     # Tor Browser itself talks to a handful of bundled default onion services
     # (search engine, connectivity checks) whether or not the user does
@@ -552,13 +1114,18 @@ def analyze(
         "dump": {
             "path": str(dump_path),
             "size_bytes": dump_path.stat().st_size,
-            "sha256": hash_file(dump_path),
+            "sha256": dump_sha256,
             "integrity_verified": integrity_verified,
             "source_type": source_type,
         },
         "record_cap": record_cap,
         "suggestion_min_hits": suggestion_min_hits,
-        "targeting": {"onion": onion, "host": host, "username": username},
+        "targeting": {
+            "onion": onion,
+            "host": host,
+            "username": username,
+            "cookie_names": list(cookie_names) if cookie_names else list(DEFAULT_COOKIE_NAMES),
+        },
         "targeting_suggestions": targeting_suggestions,
         "key_findings": {
             "note": "Deduplicated, high-confidence hits only — start here. Full detail incl. low-confidence "
@@ -574,6 +1141,8 @@ def analyze(
             "search_queries": search_queries,
             "credentials": credentials,
             "downloads": downloads,
+            "form_submissions": form_submissions,
+            "page_titles": page_titles,
         },
         "timeline": {
             "disclaimer": "Ordered by memory offset ONLY — not a verified chronological timeline. Physical "
@@ -593,20 +1162,24 @@ def analyze(
         "truncated": truncated,
         "host_anchoring": {
             "applied": require_host_anchor,
-            "note": "credentials/search_queries only count as targeted evidence when the same extracted "
-            "string also mentions --onion/--host; a full-memory image scans every process's memory, not "
-            "just one browser's, and this is the closest proxy for 'this belongs to the target' without "
-            "true per-process attribution (see volatility_analyze.py process extraction for that). NOT "
-            "applied to cookies (COOKIE_RE's exact app-specific name is already precise, and a cookie "
-            "isn't co-located in memory with the page that set it -- this dropped a real session cookie "
-            "in testing) or to source_type='process' dumps (already scoped to one process). Hits that "
-            "fail this check are kept below, not discarded, just excluded from 'targeted'.",
+            "no_target": unattributed,
+            "note": "On a full-memory image (every process's memory, not just one browser's) a "
+            "credential or search query only counts as targeted evidence when the same extracted "
+            "string also mentions --onion/--host -- the closest proxy for 'this belongs to the "
+            "target' without true per-process attribution (see volatility_analyze.py process "
+            "extraction for that). Login pairs and form bodies are anchored by proximity or the "
+            "--username instead. Cookies are found by name and not anchored (a cookie isn't "
+            "co-located in memory with the page that set it). With no --onion/--host at all, "
+            "nothing on a full-memory image can be attributed, so cookies and downloads are kept "
+            "here too ('no_target'). Process dumps are already scoped to one process and are not "
+            "anchored. Hits that fail are kept below, not discarded, just excluded from 'targeted'.",
             "unanchored": {
                 category: {
                     "count": unanchored_counts[category],
                     "sample": unanchored_samples[category],
                 }
-                for category in ("credentials", "search_queries")
+                for category in ("credentials", "search_queries", "cookies", "downloads")
+                if category in unanchored_counts
             },
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -729,6 +1302,20 @@ def main() -> None:
         "--username", help="Known username to highlight in recovered search queries"
     )
     parser.add_argument(
+        "--cookie-name",
+        action="append",
+        dest="cookie_names",
+        metavar="NAME",
+        help="Name of a cookie to look for (repeatable). Default: "
+        + ", ".join(DEFAULT_COOKIE_NAMES)
+        + " -- give the target's own names for a real case",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="Worker processes for the scan (default: up to 8, or TRANCE_WORKERS; 1 = sequential)",
+    )
+    parser.add_argument(
         "--min-length",
         type=int,
         default=DEFAULT_MIN_LEN,
@@ -761,6 +1348,8 @@ def main() -> None:
             args.username,
             min_len=args.min_length,
             source_type=args.source_type,
+            workers=args.workers,
+            cookie_names=args.cookie_names,
         )
     except (ParsingError, IntegrityError) as exc:
         print(f"[!] {exc}", file=sys.stderr)

@@ -185,13 +185,13 @@ def test_find_tor_browser_installations_with_explicit_roots(tmp_path):
     assert sorted(found) == sorted([install_a, install_b])
 
 
-def test_most_recently_active_picks_the_newest_torrc(tmp_path):
+def testmost_recently_active_picks_the_newest_torrc(tmp_path):
     older = tmp_path / "older"
     newer = tmp_path / "newer"
     _make_installation(older, marker_mtime=1000)
     _make_installation(newer, marker_mtime=2000)
 
-    assert acquire._most_recently_active([older, newer]) == newer
+    assert acquire.most_recently_active([older, newer]) == newer
 
 
 def test_acquire_all_auto_discovers_when_nothing_given(tmp_path, monkeypatch):

@@ -44,6 +44,7 @@ def build_findings(config: TranceConfig, results: list[ModuleResult]) -> dict:
                 "status": r.status,
                 "message": r.message,
                 "artifact_count": len(r.artifacts),
+                "duration_seconds": r.duration_seconds,
                 "details": r.details,
                 # Surfaced at the top level (not just nested in `details`) so the
                 # root report template's Module-status card can render it for any

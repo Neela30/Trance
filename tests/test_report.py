@@ -198,3 +198,68 @@ def test_write_report_handles_non_ascii_template_content(tmp_path):
 
     html = path.read_text(encoding="utf-8")
     assert "→" in html
+
+
+def _registry_and_memory(groups_rows, opened, last_running):
+    from datetime import datetime
+
+    from modules.module_c_memory.report import _process_activity
+
+    registry = {
+        "component_timeline": [
+            {
+                "basename": "firefox.exe",
+                "userassist_last_run": datetime.fromisoformat(opened) if opened else None,
+                "bam_last_run": datetime.fromisoformat(last_running) if last_running else None,
+            }
+        ]
+    }
+    memory = {
+        "volatility3": {
+            "process_activity": _process_activity(groups_rows, "fullmem_20261009T182529Z.raw")
+        }
+    }
+    return registry, memory
+
+
+def _ff(pid, ppid, created, exited=None):
+    return {
+        "ImageFileName": "firefox.exe",
+        "PID": pid,
+        "PPID": ppid,
+        "CreateTime": created,
+        "ExitTime": exited,
+    }
+
+
+def test_memory_shows_an_earlier_run_and_matches_bam_to_the_exit():
+    from report import _relate_processes_to_registry
+
+    rows = [
+        _ff(5944, 632, "2026-10-09T18:02:13+00:00", "2026-10-09T18:05:49+00:00"),
+        _ff(7160, 4828, "2026-10-09T18:06:12+00:00", "2026-10-09T18:15:59+00:00"),
+    ]
+    notes = _relate_processes_to_registry(
+        *_registry_and_memory(rows, "2026-10-09T18:05:31+00:00", "2026-10-09T18:15:59.960830+00:00")
+    )
+    assert len(notes) == 2
+    assert "18:02:13" in notes[0] and "18:05:31" in notes[0] and "18:05:49" in notes[0]
+    assert "PID 7160" in notes[1] and "ended" in notes[1]
+
+
+def test_no_notes_when_memory_agrees_with_the_registry():
+    from report import _relate_processes_to_registry
+
+    rows = [_ff(7160, 4828, "2026-10-09T18:05:40+00:00", "2026-10-09T18:15:59+00:00")]
+    # Opened 18:05:31 (process 9 s later: same run); BAM far from any exit.
+    notes = _relate_processes_to_registry(
+        *_registry_and_memory(rows, "2026-10-09T18:05:31+00:00", "2026-10-09T17:00:00+00:00")
+    )
+    assert notes == []
+
+
+def test_no_notes_without_both_modules():
+    from report import _relate_processes_to_registry
+
+    assert _relate_processes_to_registry(None, {"volatility3": {}}) == []
+    assert _relate_processes_to_registry({"component_timeline": []}, None) == []

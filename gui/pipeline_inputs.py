@@ -8,7 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username: str) -> dict:
+def module_kwargs_from_resolved(
+    resolved: dict, onion: str, host: str, username: str, cookie_names: str = ""
+) -> dict:
     """Same shape main.py's argparse builds -- see main.py's module_kwargs dict -- just
     sourced from analyze_evidence.resolve_evidence()'s output plus the GUI's targeting
     fields, instead of parsed CLI flags. `resolved` may also carry the inputs that are
@@ -39,6 +41,7 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
             "onion": onion or None,
             "host": host or None,
             "username": username or None,
+            "cookie_names": [n.strip() for n in cookie_names.split(",") if n.strip()] or None,
             "source_type": resolved.get("source_type", "process"),
             "vol3_path": resolved.get("vol3_path") or None,
             "vol3_extract_process": resolved.get("vol3_extract_process") or None,

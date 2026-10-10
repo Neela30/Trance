@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import multiprocessing
+import os
 import sys
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
@@ -33,6 +37,13 @@ CUSTODY_FILENAME = "custody.json"
 
 def run_module(name: str, config: TranceConfig, kwargs: dict) -> ModuleResult:
     """Import and run one module, converting every failure mode into a ModuleResult."""
+    started = time.monotonic()
+    result = _run_module(name, config, kwargs)
+    result.duration_seconds = round(time.monotonic() - started, 2)
+    return result
+
+
+def _run_module(name: str, config: TranceConfig, kwargs: dict) -> ModuleResult:
     try:
         module = importlib.import_module(f"modules.{name}")
     except Exception as exc:  # a module may not even import on this platform (Windows-only APIs)
@@ -61,6 +72,55 @@ class PipelineResult:
         return any(r.status == "error" for r in self.results)
 
 
+def no_target_warning(source_type: str | None) -> str:
+    """What a memory image analysed without --onion/--host actually yields (shared with the
+    GUI's form check, so the two never disagree)."""
+    if source_type == "full-memory":
+        return (
+            "No --onion/--host: on a full-memory image nothing in memory can be attributed to "
+            "Tor Browser, so the memory section reports observations only, not findings. The "
+            "report names the onion address mentioned most often; re-run with --onion set to it."
+        )
+    return "No --onion/--host: the memory section's targeted URLs will be empty."
+
+
+def _run_modules(
+    config: TranceConfig,
+    module_kwargs: dict[str, dict],
+    progress_cb: Callable[[str, int, int], None] | None,
+    total_steps: int,
+) -> list[ModuleResult]:
+    """Run every module and return the results in MODULES order.
+
+    The modules are independent, so they run at the same time: Module C's heavy work is in
+    worker processes (see its analyzer), which leaves the main process free for A and B.
+    Results are still assembled in MODULES order, so findings.json doesn't depend on which
+    finished first. TRANCE_WORKERS=1 runs them one after another instead. progress_cb is
+    called from this thread only, once per module as it finishes.
+    """
+    by_name: dict[str, ModuleResult] = {}
+
+    def finished(name: str, result: ModuleResult, step: int) -> None:
+        by_name[name] = result
+        suffix = f" — {result.message}" if result.message else ""
+        print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
+        if progress_cb:
+            progress_cb(name, step, total_steps)
+
+    if os.environ.get("TRANCE_WORKERS", "").strip() == "1":
+        for step, name in enumerate(MODULES, start=1):
+            finished(name, run_module(name, config, module_kwargs.get(name, {})), step)
+    else:
+        with ThreadPoolExecutor(max_workers=len(MODULES)) as pool:
+            futures = {
+                pool.submit(run_module, name, config, module_kwargs.get(name, {})): name
+                for name in MODULES
+            }
+            for step, future in enumerate(as_completed(futures), start=1):
+                finished(futures[future], future.result(), step)
+    return [by_name[name] for name in MODULES]
+
+
 def run_pipeline(
     config: TranceConfig,
     module_kwargs: dict[str, dict],
@@ -73,14 +133,7 @@ def run_pipeline(
     each module and once more after writing outputs -- total_steps is len(MODULES) + 1.
     """
     total_steps = len(MODULES) + 1
-    results: list[ModuleResult] = []
-    for step, name in enumerate(MODULES, start=1):
-        result = run_module(name, config, module_kwargs.get(name, {}))
-        results.append(result)
-        suffix = f" — {result.message}" if result.message else ""
-        print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
-        if progress_cb:
-            progress_cb(name, step, total_steps)
+    results = _run_modules(config, module_kwargs, progress_cb, total_steps)
 
     findings = build_findings(config, results)
     findings_path = write_findings(findings, config.output_dir)
@@ -251,6 +304,14 @@ def main(argv: list[str] | None = None) -> int:
         "--username", help="Known username to highlight in recovered search queries"
     )
     memory.add_argument(
+        "--cookie-name",
+        action="append",
+        dest="cookie_names",
+        metavar="NAME",
+        help="Name of a cookie to look for in memory (repeatable). Default: the control "
+        "site's session/trance_user/trance_pref -- give the target's own names for a real case",
+    )
+    memory.add_argument(
         "--source-type",
         choices=("process", "full-memory"),
         default="process",
@@ -290,10 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--case must be a single directory name without path separators")
 
     if args.dump and not (args.onion or args.host):
-        print(
-            "[!] --dump given without --onion/--host: memory targeted-URL section will be empty",
-            file=sys.stderr,
-        )
+        print(f"[!] {no_target_warning(args.source_type)}", file=sys.stderr)
 
     output_dir = args.output_dir / args.case
     for evidence_root in (args.disk_profile, args.tor_dir, args.disk_root, args.ntfs_dir):
@@ -334,6 +392,7 @@ def main(argv: list[str] | None = None) -> int:
             "onion": args.onion,
             "host": args.host,
             "username": args.username,
+            "cookie_names": args.cookie_names,
             "source_type": args.source_type,
             "vol3_path": args.vol3_path,
             "vol3_extract_process": args.vol3_extract_process,
@@ -359,4 +418,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A frozen Windows exe re-launches itself for every worker process of the memory
+    # scan's pool; without this each worker would start the whole app again.
+    multiprocessing.freeze_support()
     sys.exit(main())

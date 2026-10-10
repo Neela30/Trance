@@ -150,6 +150,13 @@ def test_validate_warns_when_memory_has_no_target(tmp_path):
     assert any("targeted URLs will be empty" in w for w in issues.warnings)
 
 
+def test_validate_warns_that_a_full_memory_image_without_target_gives_observations_only(tmp_path):
+    dump = _file(tmp_path / "d.raw")
+    issues = validate(_request(tmp_path), {"dump": dump, "source_type": "full-memory"})
+    assert issues.errors == []
+    assert any("observations only" in w for w in issues.warnings)
+
+
 def test_validate_accepts_a_blank_or_valid_report_timezone(tmp_path):
     dump = _file(tmp_path / "d.bin")
     inputs = {"dump": dump}

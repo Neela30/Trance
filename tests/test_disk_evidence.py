@@ -369,6 +369,41 @@ def test_raw_carve_hashes_image_and_deduplicates_overlap(tmp_path, monkeypatch):
     assert report["image_sha256"] == hashlib.sha256(image.read_bytes()).hexdigest()
 
 
+def test_carve_finds_every_pattern_the_literal_gates_guard(tmp_path):
+    # carve_onion_strings skips a regex when the literal text it needs is absent from the
+    # chunk; each gate must still let its own pattern through (uppercase and UTF-16 too).
+    addr = "b" * 56
+    pieces = [
+        b"junk" * 50,
+        addr.upper().encode() + b".ONION",  # case-insensitive pattern, upper-case text
+        (addr + ".auth_private").encode("utf-16-le"),  # UTF-16 filename, .auth_private ending
+        ("c" * 56 + ".onion").encode("utf-16-le"),  # UTF-16 filename, .onion ending
+        (addr + ":descriptor:x25519:" + "A" * 52).encode(),
+        b"SIGNAL NEWNYM",
+        b"EntryGuardFoo",
+        b"network-status-version 3",
+        b"Tor Browser\\Browser",
+        b"SocksPort 9150",
+    ]
+    image = tmp_path / "disk.raw"
+    image.write_bytes(b"\x00\x01".join(pieces))
+    report = carve_onion_strings.scan(image, [])
+    assert addr + ".onion" in report["onion_addresses"]
+    assert report["client_auth_credentials"][0]["onion_address"] == addr + ".onion"
+    assert set(report["utf16_filenames"]) == {addr + ".auth_private", "c" * 56 + ".onion"}
+    assert set(report["tor_markers"]) == set(carve_onion_strings.MARKER_PATTERNS)
+
+
+def test_carve_of_a_chunk_with_none_of_the_literals_reports_nothing(tmp_path):
+    image = tmp_path / "disk.raw"
+    image.write_bytes(b"nothing of interest here " * 1000)
+    report = carve_onion_strings.scan(image, [])
+    assert report["onion_addresses"] == {}
+    assert report["client_auth_credentials"] == []
+    assert report["utf16_filenames"] == {}
+    assert report["tor_markers"] == {}
+
+
 def _filetime(moment: dt.datetime) -> int:
     epoch = dt.datetime(1601, 1, 1, tzinfo=dt.timezone.utc)
     return int((moment - epoch).total_seconds() * 10_000_000)
@@ -646,3 +681,127 @@ def test_tampered_live_scan_is_rejected(tmp_path):
     )
     assert result.status == "error"
     assert "IntegrityError" in result.details["downloads"]["error"]
+
+
+def _valid_v3() -> str:
+    import base64
+
+    pubkey = bytes(range(32))
+    version = b"\x03"
+    checksum = hashlib.sha3_256(b".onion checksum" + pubkey + version).digest()[:2]
+    return base64.b32encode(pubkey + checksum + version).decode().lower() + ".onion"
+
+
+def test_residue_file_count_uses_the_same_v3_rule_as_the_summary():
+    from modules.module_b_disk.report import _residue_context
+
+    v3 = _valid_v3()
+    residue = {
+        "files": [
+            {  # the reviewer's case: one 16-character v2-shaped match only
+                "kind": "pagefile",
+                "path": "C:\\pagefile.sys",
+                "size": 1,
+                "onion_addresses": {"32kl2rwsjvqjeui7.onion": {"occurrences": 1}},
+            },
+            {
+                "kind": "swapfile",
+                "path": "C:\\swapfile.sys",
+                "size": 1,
+                "onion_addresses": {
+                    v3: {"occurrences": 2},
+                    "a" * 56 + ".onion": {"occurrences": 1},
+                },
+                "utf16_filenames": {
+                    v3.removesuffix(".onion") + ".auth_private": {"occurrences": 1}
+                },
+            },
+        ],
+        "onion_addresses": {v3: {"occurrences": 3, "files": ["C:\\swapfile.sys"]}},
+    }
+    ctx = _residue_context(residue)
+    pagefile, swapfile = ctx["files"]
+    assert (pagefile["onion_count"], pagefile["invalid_onion_count"]) == (0, 1)
+    assert (swapfile["onion_count"], swapfile["invalid_onion_count"]) == (1, 1)
+    assert sum(f["onion_count"] for f in ctx["files"]) == len(ctx["addresses"])
+
+    only_v2 = {"files": [residue["files"][0]], "onion_addresses": {}}
+    assert _residue_context(only_v2)["any_hits"] is False
+
+
+def _downloads_scan(method):
+    return {
+        "scan_method": method,
+        "volume_root": "C:\\",
+        "files_walked": 6559,
+        "internet_origin_files": [],
+        "tor_daemon_window": None,
+    }
+
+
+def test_live_scan_is_not_called_the_whole_volume():
+    from modules.module_b_disk.report import _downloads_context
+
+    live = _downloads_context(_downloads_scan("live_windows"))
+    assert live["scope"] == "by the live scan"
+    assert "AppData" in live["skipped_folders"] and "Windows" in live["skipped_folders"]
+    assert "$Recycle.Bin" not in live["skipped_folders"]  # the live scan does search it
+
+    mounted = _downloads_context(_downloads_scan("mounted_volume"))
+    assert mounted["scope"] == "on the whole volume"
+    assert mounted["skipped_folders"] == []
+
+
+def test_mft_zone_streams_are_offered_as_a_coverage_check():
+    from modules.module_b_disk.report import build_context
+
+    details = {
+        "downloads": _downloads_scan("live_windows"),
+        "ntfs": {
+            "mft": {
+                "records": 10,
+                "zone_identifier_streams": [
+                    {
+                        "path": f"Users\\u\\Downloads\\{name}",
+                        "record": n,
+                        "deleted": deleted,
+                        "created_utc": "2026-10-09T18:10:00+00:00",
+                        "zone_identifier": {"zone_id": 3},
+                    }
+                    for n, (name, deleted) in enumerate([("a.csv", False), ("b.zip", True)])
+                ],
+            }
+        },
+    }
+    ctx = build_context(details)
+    assert ctx["downloads"]["mft_zone_streams"] == {"total": 2, "deleted": 1}
+    assert (
+        "mft_zone_streams"
+        not in build_context({"downloads": _downloads_scan("live_windows")})["downloads"]
+    )
+
+
+def test_report_states_live_scan_coverage_instead_of_the_whole_volume():
+    import re
+
+    from report import render_report
+
+    findings = {
+        "schema_version": 1,
+        "case": {"name": "c", "output_dir": "o", "evidence_dir": None},
+        "generated_at": "2026-10-10T00:00:00+00:00",
+        "modules": {
+            "module_b_disk": {
+                "status": "ok",
+                "message": None,
+                "artifact_count": 0,
+                "details": {"downloads": _downloads_scan("live_windows")},
+                "warnings": [],
+            }
+        },
+        "artifacts": [],
+    }
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", render_report(findings)))
+    assert "whole volume" not in text
+    assert "found by the live scan" in text
+    assert "checked 6,559 files" in text

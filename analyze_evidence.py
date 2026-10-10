@@ -16,7 +16,9 @@ truth for the pipeline itself.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
+import multiprocessing
 import sys
 from pathlib import Path, PureWindowsPath
 
@@ -169,6 +171,144 @@ def _resolve_by_globbing(evidence_dir: Path) -> dict:
     return resolved
 
 
+# Profiles every Windows install has that are not a person's account.
+_NON_USER_PROFILES = frozenset({"default", "default user", "public", "all users"})
+
+
+def _ci_child(folder: Path, name: str) -> Path | None:
+    """`folder/name` matched case-insensitively. Windows paths are case-insensitive but a
+    volume mounted with ntfs-3g is not ("Windows/appcompat/Programs" on a real disk)."""
+    exact = folder / name
+    if exact.exists():
+        return exact
+    try:
+        for entry in folder.iterdir():
+            if entry.name.casefold() == name.casefold():
+                return entry
+    except OSError:
+        pass
+    return None
+
+
+def _ci_path(root: Path, *parts: str) -> Path | None:
+    current: Path | None = root
+    for part in parts:
+        current = _ci_child(current, part) if current is not None else None
+        if current is None:
+            return None
+    return current
+
+
+def _ci_file(root: Path, *parts: str) -> str | None:
+    found = _ci_path(root, *parts)
+    return str(found) if found is not None and found.is_file() else None
+
+
+@functools.lru_cache(maxsize=8)
+def resolve_volume(root: str) -> dict:
+    """Inputs found inside a mounted Windows volume, in resolve_evidence()'s shape (plus a
+    "volume_notes" list saying what was chosen and why).
+
+    A disk image (the powered-off case) holds the same evidence an acquisition folder does --
+    registry hives, the Tor Browser profile and the tor data folder -- at their usual Windows
+    locations; without this only Module B's whole-volume passes ever saw it. Tor Browser is
+    found with the acquisition side's own search (the torrc signature; the most recently
+    active install when there are several), and the user whose NTUSER.DAT / UsrClass.dat are
+    used is the one that install lives under. Cached per path: the GUI asks on every form
+    change, and a read-only mount does not change."""
+    from core.exceptions import AcquisitionError
+    from modules.module_b_disk.acquire import (
+        discover_tor_browser_paths,
+        find_tor_browser_installations,
+        most_recently_active,
+    )
+
+    volume = Path(root)
+    if not volume.is_dir():
+        return {}
+    found: dict = {"volume_notes": []}
+    notes = found["volume_notes"]
+
+    for key, parts in (
+        ("system", ("Windows", "System32", "config", "SYSTEM")),
+        ("software", ("Windows", "System32", "config", "SOFTWARE")),
+        ("amcache", ("Windows", "AppCompat", "Programs", "Amcache.hve")),
+    ):
+        path = _ci_file(volume, *parts)
+        if path:
+            found[key] = path
+
+    users_dir = _ci_path(volume, "Users")
+    installs = find_tor_browser_installations([users_dir]) if users_dir else []
+    if not installs:
+        installs = find_tor_browser_installations([volume])
+    install = None
+    if installs:
+        install = most_recently_active(installs)
+        notes.append(f"Tor Browser found inside the volume at {install}")
+        others = [str(p) for p in installs if p != install]
+        if others:
+            notes.append(
+                "More Tor Browser installs on this volume, not analysed (the most recently "
+                f"active one was used): {', '.join(others)}"
+            )
+        try:
+            profile, tor_dir = discover_tor_browser_paths(install)
+            found["disk_profile"] = str(profile)
+            found["tor_dir"] = str(tor_dir)
+        except AcquisitionError as exc:
+            notes.append(f"Tor Browser profile / data folder not used: {exc}")
+
+    user_dir = None
+    if users_dir is not None:
+        if install is not None:
+            try:
+                relative = install.resolve().relative_to(users_dir.resolve())
+                user_dir = users_dir / relative.parts[0]
+            except ValueError:
+                pass
+        if user_dir is None:
+            people = sorted(
+                d
+                for d in users_dir.iterdir()
+                if d.is_dir()
+                and d.name.casefold() not in _NON_USER_PROFILES
+                and _ci_file(d, "NTUSER.DAT")
+            )
+            if len(people) == 1:
+                user_dir = people[0]
+            elif people:
+                notes.append(
+                    "Several user profiles and none holds Tor Browser, so no NTUSER.DAT was "
+                    f"chosen: {', '.join(p.name for p in people)}"
+                )
+    if user_dir is not None:
+        ntuser = _ci_file(user_dir, "NTUSER.DAT")
+        usrclass = _ci_file(user_dir, "AppData", "Local", "Microsoft", "Windows", "UsrClass.dat")
+        if ntuser:
+            found["ntuser"] = ntuser
+        if usrclass:
+            found["usrclass"] = usrclass
+        notes.append(f"User hives from the profile {user_dir.name}")
+    return found
+
+
+def with_volume_inputs(resolved: dict, disk_root: str | Path | None) -> dict:
+    """`resolved` (an evidence folder's inputs) with anything still missing filled in from a
+    mounted volume. An acquired copy is the verified evidence, so it is never replaced by
+    the live mount's file; the examiner's own overrides are applied after this, by callers."""
+    merged = dict(resolved)
+    if not disk_root:
+        return merged
+    volume = resolve_volume(str(disk_root))
+    for key, value in volume.items():
+        if key == "volume_notes":
+            merged["volume_notes"] = list(value)
+        elif not merged.get(key):
+            merged[key] = value
+    return merged
+
+
 def resolve_evidence(evidence_dir: Path) -> dict:
     manifest_path = evidence_dir / "acquire_manifest.json"
     if manifest_path.is_file():
@@ -230,6 +370,8 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
     ):
         if value:
             argv += [flag, value]
+    for name in getattr(args, "cookie_names", None) or []:
+        argv += ["--cookie-name", name]
     if args.vol3_extract_pid is not None:
         argv += ["--vol3-extract-pid", str(args.vol3_extract_pid)]
     return argv
@@ -276,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--onion")
     parser.add_argument("--host")
     parser.add_argument("--username")
+    parser.add_argument("--cookie-name", action="append", dest="cookie_names")
     parser.add_argument("--vol3-path")
     parser.add_argument("--vol3-extract-process")
     parser.add_argument("--vol3-extract-pid", type=int)
@@ -283,9 +426,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     resolved = resolve_evidence(args.evidence_dir) if args.evidence_dir else {}
+    resolved = with_volume_inputs(resolved, args.disk_root)
+    for note in resolved.get("volume_notes", []):
+        print(f"[*] {note}", file=sys.stderr)
     main_argv = build_argv(args, resolved)
     return main_module.main(main_argv)
 
 
 if __name__ == "__main__":
+    # A frozen Windows exe re-launches itself for every worker process of the memory
+    # scan's pool; without this each worker would start the whole app again.
+    multiprocessing.freeze_support()
     sys.exit(main())

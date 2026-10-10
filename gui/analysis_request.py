@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from analyze_evidence import resolve_evidence
-from main import CUSTODY_FILENAME
+from analyze_evidence import resolve_evidence, with_volume_inputs
+from main import CUSTODY_FILENAME, no_target_warning
 
 SOURCE_TYPES = ("process", "full-memory")
 OUTPUT_FILES = ("findings.json", "report.html", CUSTODY_FILENAME)
@@ -49,6 +49,7 @@ class AnalysisRequest:
     onion: str = ""
     host: str = ""
     username: str = ""
+    cookie_names: str = ""  # comma-separated; blank = the analyzer's defaults
     report_timezone: str = ""  # IANA zone name; blank = auto-detect this machine's own
     disk_image: str | None = None
     mount_image: bool = False  # mount disk_image read-only and analyse the volume
@@ -96,6 +97,9 @@ def effective_inputs(request: AnalysisRequest, discovered: dict | None = None) -
     inputs that are never auto-discovered -- the dict module_kwargs_from_resolved()
     reads. An override always wins, exactly as an explicit CLI flag does."""
     inputs = dict(discovered if discovered is not None else discovered_inputs(request.evidence_dir))
+    # A mounted disk (the app's own mount or an already-mounted folder) holds the registry
+    # hives, browser profile and tor folder too; fill in whatever the evidence folder didn't.
+    inputs = with_volume_inputs(inputs, request.disk_root)
     for key, value in request.overrides.items():
         if key in INPUT_KEYS and value:
             inputs[key] = value
@@ -217,9 +221,7 @@ def validate(request: AnalysisRequest, inputs: dict) -> Issues:
             errors.append(f"Unknown timezone: {request.report_timezone}")
 
     if inputs.get("dump") and not (request.onion or request.host):
-        warnings.append(
-            "No onion address or host set: the memory section's targeted URLs will be empty."
-        )
+        warnings.append(no_target_warning(source_type))
     return issues
 
 

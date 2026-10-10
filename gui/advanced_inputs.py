@@ -262,6 +262,8 @@ class TargetPage(_Page):
         self.host.setPlaceholderText("e.g. 1.2.3.4:8080")
         self.username = QLineEdit(self)
         self.username.setPlaceholderText("e.g. admin")
+        self.cookie_names = QLineEdit(self)
+        self.cookie_names.setPlaceholderText("e.g. sid, csrf_token — blank uses the built-in names")
         self.report_timezone = QLineEdit(self)
         self.report_timezone.setPlaceholderText("e.g. Asia/Colombo — blank uses this computer's")
         self.body.addLayout(
@@ -277,6 +279,15 @@ class TargetPage(_Page):
                 field_label("Username", self),
                 self.username,
                 "A known account name to highlight in recovered searches.",
+                self,
+            )
+        )
+        self.body.addLayout(
+            labelled(
+                field_label("Cookie names", self),
+                self.cookie_names,
+                "Names of the site's cookies to look for in memory, separated by commas. "
+                "Cookies are only found by name, so give the site's own.",
                 self,
             )
         )

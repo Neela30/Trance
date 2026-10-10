@@ -345,7 +345,7 @@ def _manifest_entries(manifest_path: Path) -> list[tuple[str, str]]:
     return entries
 
 
-def _most_recently_active(installations: list[Path]) -> Path:
+def most_recently_active(installations: list[Path]) -> Path:
     """When auto-discovery finds more than one install, the one whose torrc was
     written to most recently is the best guess at "the one actually in use" --
     torrc's mtime tracks whenever that daemon last started."""
@@ -383,7 +383,7 @@ def acquire_all(
                         "--tor-browser-dir, or both --disk-profile-src and --tor-dir-src, "
                         "explicitly if it's somewhere this scan wouldn't find it."
                     )
-                chosen = _most_recently_active(installations)
+                chosen = most_recently_active(installations)
                 other_installations = [str(p) for p in installations if p != chosen]
             discovered_profile, discovered_tor_dir = discover_tor_browser_paths(chosen)
             profile_src = profile_src or discovered_profile

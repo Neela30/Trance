@@ -190,8 +190,10 @@ def build_volume() -> bytes:
     for number, raw in records.items():
         lcn = 8 + number if number < 8 else 32 + number - 8
         image[lcn * CS : (lcn + 1) * CS] = raw
-    journal = usn_record(1, 99, 5, T0, 0x100, "state") + usn_record(
-        2, 99, 5, T0 + dt.timedelta(minutes=5), 0x2, "state"
+    # A name only the tor daemon writes: a generic one like "state" only counts inside a
+    # Tor folder, and these entries sit at the volume root.
+    journal = usn_record(1, 99, 5, T0, 0x100, "cached-microdesc-consensus") + usn_record(
+        2, 99, 5, T0 + dt.timedelta(minutes=5), 0x2, "cached-microdesc-consensus"
     )
     image[60 * CS : 60 * CS + len(journal)] = journal
     image[70 * CS : 71 * CS] = b"J" * CS
@@ -476,7 +478,10 @@ def test_module_b_analyses_an_exported_volume(tmp_path, fake_device):
     window = ntfs["usnjrnl"]["tor_activity_window"]
     assert window["events"] == 4
     assert window["last_utc"] == (T0 + dt.timedelta(minutes=5)).isoformat()
-    assert {e["path"] for e in ntfs["usnjrnl"]["tor_events"]} == {"C:\\state", "D:\\state"}
+    assert {e["path"] for e in ntfs["usnjrnl"]["tor_events"]} == {
+        "C:\\cached-microdesc-consensus",
+        "D:\\cached-microdesc-consensus",
+    }
     residue = result.details["memory_residue"]
     assert {f["path"] for f in residue["files"]} == {"C:\\pagefile.sys", "D:\\pagefile.sys"}
     assert residue["onion_addresses"][ONION + ".onion"]["occurrences"] == 2
