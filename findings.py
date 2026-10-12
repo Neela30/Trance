@@ -6,7 +6,7 @@ Shape:
       "case": {"name", "output_dir", "evidence_dir"},
       "generated_at": "<UTC ISO-8601>",
       "modules": {
-        "<module>": {"status", "message", "artifact_count", "details": {...module-specific...}}
+        "<module>": {"status", "message", "artifact_count", "warnings", "details": {...module-specific...}}
       },
       "artifacts": [ ...every core.schema.Artifact from every module, flattened... ]
     }
@@ -46,7 +46,13 @@ def build_findings(config: TranceConfig, results: list[ModuleResult]) -> dict:
                 "status": r.status,
                 "message": r.message,
                 "artifact_count": len(r.artifacts),
+                "duration_seconds": r.duration_seconds,
                 "details": r.details,
+                # Surfaced at the top level (not just nested in `details`) so the
+                # root report template's Module-status card can render it for any
+                # module uniformly -- see core.schema.ModuleResult's own docstring for
+                # the shared {"artifact_type", "source", "reason"} shape.
+                "warnings": r.details.get("warnings", []),
             }
             for r in results
         },

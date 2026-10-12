@@ -2,6 +2,11 @@
 
 Progress log for the memory-forensics work (Module C). Read this before picking the task back up.
 
+> **Superseded in part.** `CLAUDE.md` is the current source of truth for the whole system. This
+> file is a dated history of the Module C work; some of it is stale (it says Modules A and B are
+> empty stubs, and that the work is on branch `memory` and not merged -- neither is true any more).
+> The latest entry is "Evaluation and improvements (2026-10-09/10)" just above *Quick reference*.
+
 ## Repo orientation
 
 - Team repo: `https://github.com/Neela30/Trance.git`. Remote branches: `main`, `memory`, `Neela`, `Sahe`, `Thila`.
@@ -188,6 +193,41 @@ once a Windows box is available, that specific file likely won't exercise this w
 next real validation should pair a `winpmem_acquire.py` full-memory image with a real
 Volatility3 run on Windows or against a copied-off image with correct symbols.
 
+## Evaluation and improvements (2026-10-09/10)
+
+Four scripted Tor Browser sessions (powered off / running with the browser closed / running with
+it open / a negative control) were captured and scored against planted ground truth with
+`scripts/score_run.py`; the method, results and limits are in `CLAUDE.md` section 10. Against a
+plain strings search of the same evidence, the analyzer recovered only **22 of the 37** items
+that a full-RAM capture taken with the browser open actually held. What was wrong, each measured
+on the real image first:
+
+- **Credentials 0/2.** Firefox stores a form's field names as one-byte strings and the typed
+  values as UTF-16 a few bytes apart, so `field=value` / JSON matching never saw them. Now paired
+  by adjacency and anchored by the target username or a target mention within 2 KiB.
+- **Form messages 0/3.** No extractor for non-credential form bodies. Now decoded and anchored the
+  same way (Firefox's origin-attribute strings are excluded -- they made 37 junk entries).
+- **Page titles 0/10.** `<title>` sits far from any host string (0/10 within 4 KiB), so distance
+  can't anchor it; a title is kept when the page HTML links to >= 3 paths already seen under the
+  target host (10/10 visited, 0 unvisited, no foreign title).
+- **Noise.** Every regex hit was an artifact: the negative control produced 3,175 (printf
+  `session=%p`, bare `file:///C:`). Now only high-confidence, de-duplicated findings are
+  artifacts; raw observations stay in `details.targeted`.
+- **Cookies** are found by name and the names were the test site's; now `--cookie-name`.
+
+Re-running the same saved evidence: C4 22/37 -> 37/37, C1 and C3 unchanged (already at the
+strings-search ceiling), negative control still clean. The extractors were designed on the same
+capture they now score 37/37 on, so that is not an independent result.
+
+Speed (per full 8.6 GB case, measured): ~16 min -> ~2.4 min. The memory scan was one Python loop
+over every extracted string on one core and read the image twice; it is now split into segments in
+a process pool, hashed once, with each regex skipped when its literal text is absent, and Module B's
+onion carve got the same literal gates (pagefile 146 s -> 28 s). The three modules also run
+concurrently. Outputs were verified identical to the old sequential code on real data.
+
+Open: "seen" vs "visited" URLs can't be told apart from string shape (a decoy download link looks
+like a real one); the process pool is untested inside a built Windows exe.
+
 ## Quick reference
 
 ```
@@ -198,7 +238,7 @@ python -m modules.module_c_memory.dumper --output-dir captures
 python -m modules.module_c_memory.winpmem_acquire --winpmem-path C:\tools\winpmem.exe --output-dir captures
 
 # Analyze the string-carve pass alone (any machine, offline)
-python -m modules.module_c_memory.analyzer captures\firefox_<pid>_<ts>.bin --host 127.0.0.1:5000 --onion <addr>.onion --username <user> --source-type process
+python -m modules.module_c_memory.analyzer captures\firefox_<pid>_<ts>.bin --host 127.0.0.1:5000 --onion <addr>.onion --username <user> --source-type process [--cookie-name <name> ...] [--workers N]
 
 # Full pipeline incl. Volatility3 structural pass (any machine, offline; --vol3-path opt-in)
 python main.py --case demo --dump captures\fullmem_<ts>.raw --host 127.0.0.1:5000 --source-type full-memory --vol3-path vol

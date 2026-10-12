@@ -1,6 +1,10 @@
 volatility3>=2.26.0
 regipy
+yara-python
+regipy[full]
 jinja2
 click
 psutil
 lz4
+tzlocal
+tzdata

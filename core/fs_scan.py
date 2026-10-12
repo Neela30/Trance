@@ -14,7 +14,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 # Skip these by name, anywhere in the tree -- system-internal or reliably huge/
-# irrelevant on a Windows target, not worth walking into during a scan.
+# irrelevant on a Windows target, not worth walking into during a scan. AppData is
+# app cache/scratch space (and, on a dev machine, where leftover test fixtures like
+# a dummy "winpmem.exe" under a pytest temp dir can live) -- never where a human
+# deliberately places a Tor Browser install or a WinPMEM binary.
 SKIP_DIR_NAMES = {
     "$Recycle.Bin",
     "System Volume Information",
@@ -22,6 +25,7 @@ SKIP_DIR_NAMES = {
     "WindowsApps",
     "Config.Msi",
     "$WinREAgent",
+    "AppData",
 }
 DEFAULT_MAX_DEPTH = 8
 

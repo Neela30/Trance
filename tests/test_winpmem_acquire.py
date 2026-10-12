@@ -48,6 +48,25 @@ def test_acquire_surfaces_nonzero_exit(tmp_path, monkeypatch):
     assert not list((tmp_path / "out").glob("*.raw"))
 
 
+def test_acquire_keeps_nonempty_image_despite_nonzero_exit(tmp_path, monkeypatch):
+    # Real WinPMEM 4.0 RC2 copies everything, unloads its driver, and still exits 1.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(winpmem_acquire, "_is_admin", lambda: True)
+
+    def fake_run(cmd, capture_output, text, timeout):
+        with open(cmd[-1], "wb") as f:
+            f.write(b"full image bytes")
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="Driver Unloaded.", stderr="")
+
+    monkeypatch.setattr(winpmem_acquire.subprocess, "run", fake_run)
+    image_path = winpmem_acquire.acquire(fake_winpmem_binary(tmp_path), tmp_path / "out")
+
+    assert image_path.read_bytes() == b"full image bytes"
+    assert image_path.with_name(image_path.name + ".sha256").exists()
+    custody = next((tmp_path / "out").glob("*.custody.json")).read_text()
+    assert "exit code 1" in custody
+
+
 def test_acquire_rejects_empty_output_despite_success_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(winpmem_acquire, "_is_admin", lambda: True)

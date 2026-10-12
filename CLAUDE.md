@@ -57,7 +57,8 @@ core/                     shared: config, schema, custody_log, hashing, exceptio
 modules/module_a_registry/  Module A
 modules/module_b_disk/      Module B
 modules/module_c_memory/    Module C
-tests/                    pytest suite (~210 tests)
+tests/                    pytest suite (~660 tests)
+scripts/score_run.py      scores a run's findings.json against planted ground truth (see §10)
 output/                   local case outputs (gitignored) — some are STALE, see §8
 .github/workflows/ci.yml  pytest + ruff + black on push/PR to main/dev
 ```
@@ -81,23 +82,44 @@ intentionally ignored with written justification in `pyproject.toml` — read it
 modules/<name>/__init__.py:
     def run(config: core.config.TranceConfig, **kwargs) -> core.schema.ModuleResult
 ```
-- `ModuleResult(module, status, artifacts, details, message)`; `status` ∈
-  `ok | skipped | not_implemented | error`.
+- `ModuleResult(module, status, artifacts, details, message, duration_seconds)`; `status` ∈
+  `ok | partial | skipped | not_implemented | error` (`core.schema.MODULE_STATUSES`).
+  `partial` means one or more individual extractors/sub-steps failed but the module still
+  produced real findings — see "Per-extractor isolation" below; `error` is reserved for a
+  whole-module failure (e.g. an integrity-hash mismatch). `duration_seconds` is set by
+  `main.run_module()` (never by a module) and lands in `modules.<name>.duration_seconds`.
 - `artifacts`: flat list of `core.schema.Artifact(module, artifact_type, source, description,
-  sha256, timestamp)` — goes into `findings.json["artifacts"]` for every module.
+  sha256, timestamp, confidence, confidence_reason, category)` — goes into
+  `findings.json["artifacts"]` for every module. The last three fields are Module A-specific
+  (`"high"/"medium"/"low"`, a one-line reason, `"tor-direct"/"context"`); Modules B/C leave
+  them `None`.
 - `details`: arbitrary module-specific dict kept verbatim under
   `findings.json["modules"][name]["details"]` — this is what the report presenters read.
+  By convention `details["warnings"]` is a list of `{"artifact_type", "source", "reason",
+  "traceback"}` dicts for any sub-step that failed without failing the whole module (see
+  below); the root report.py and `report_template.html.j2` render these as a plain-English
+  "could not be read" callout rather than hiding the rest of that module's findings.
 - Heavy analysis imports are done **lazily inside `run()`** so the acquire scripts living in
   the same package stay importable without regipy etc. Keep it that way.
-- A module that raises is caught by `main.run_module()` and recorded as `error`; it never
-  stops the other modules.
+- A module that raises an exception it never catches itself is caught by
+  `main.run_module()` and recorded as `error`; it never stops the other modules. Modules
+  A/B additionally isolate failures **inside** themselves, per extractor/sub-step, so one
+  bad artifact type degrades to `partial` with a warning instead of failing the whole
+  module (Module C's single linear `analyze()` pass has no per-step seams of its own; its
+  `run()` only hardens the outer boundary — `except Exception`, not just its own
+  `TranceError` subclasses — so an unexpected exception still degrades to a clean `error`
+  result rather than propagating).
 
 **Pipeline** (`main.py`):
 - `run_pipeline(config, module_kwargs, progress_cb=None) -> PipelineResult` runs
-  `MODULES = ("module_a_registry", "module_b_disk", "module_c_memory")` in order, builds
-  findings, writes `findings.json` + `report.html`, builds and writes `custody.json`.
-  `progress_cb(step_name, step, total)` fires after each module and once after writing
-  outputs (total = 4). Used by the GUI.
+  `MODULES = ("module_a_registry", "module_b_disk", "module_c_memory")` **at the same time**
+  (threads; Module C's heavy work is in a process pool, see §4) and assembles the results in
+  `MODULES` order, so `findings.json` doesn't depend on which finished first. It then
+  builds findings, writes `findings.json` + `report.html`, builds and writes `custody.json`.
+  `progress_cb(step_name, step, total)` fires once per module *as it finishes* (so the order
+  of names varies; `step` counts up) and once more after writing outputs (total = 4), always
+  from the calling thread. Used by the GUI. `TRANCE_WORKERS=1` runs the modules one after
+  another and turns the memory scan's process pool off.
 - `main(argv)` is the CLI: argparse + validation (case name must be a single path
   component; outputs must not already exist; output dir must be outside disk evidence),
   builds `module_kwargs`, calls `run_pipeline`. Exit code 2 if any module errored.
@@ -114,23 +136,314 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
 
 ### Module A — registry & execution evidence (`modules/module_a_registry/`)
 
-- **Acquire** (`acquire.py`, Windows, admin): `reg save HKLM\SYSTEM` and `reg save HKCU`
-  (current user's NTUSER.DAT); Amcache.hve via a Volume Shadow Copy created with WMI
-  (`Win32_ShadowCopy.Create()` through PowerShell — `vssadmin create shadow` is Server-only,
-  confirmed on real client Windows) and deleted with `vssadmin delete shadows` afterwards.
-  `--ntuser-user <name>` pulls another user's NTUSER.DAT via VSS. Each hive independent.
-- **Analyze** (`pipeline.py`): hash on ingest → regipy extraction (`extractors.py`:
-  UserAssist, RecentDocs from NTUSER; ShimCache from SYSTEM; Amcache) → Tor-relevance filter
-  (`constants.py: is_tor_related`) → normalize to `Artifact`s (`normalize.py`) → re-hash and
-  raise `IntegrityError` on mismatch.
-- **Filter philosophy**: deliberately *recall over precision* — substring path markers
-  (`"tor browser"`, `"torbrowser"`, `"\\tbb\\"`, `"torproject"`, …) plus a list of
-  Tor-specific executable names. `firefox.exe` alone is intentionally NOT a match.
-- **Report** (`report.py`): dedupes, builds a per-component timeline across hives, and counts
-  components *corroborated by 2+ independent hive sources* — the only real correlation logic
-  in the codebase right now, and only within Module A.
+Module A is mid-way through a multi-phase roadmap: Phase 0 "foundations", Phase 1
+"execution evidence", Phase 2 "device evidence" (USB/MountedDevices/MountPoints2/
+EMDMgmt/Windows Portable Devices, plus a direct drive-letter → physical-device
+correlation), Phase 3 "network context" (NetworkList/Tcpip), Phase 4 "persistence and
+configuration" (Run/RunOnce, services, Internet Settings proxy), and Phase 5 "report
+integration" for all of the above are done; Phase 6 (SRUM/event logs) is not started.
+What follows describes the current state.
+
+- **Acquire** (`acquire.py`, Windows, admin): `reg save HKLM\SYSTEM`, `reg save
+  HKLM\SOFTWARE`, and `reg save HKCU` (current user's NTUSER.DAT); Amcache.hve via a
+  Volume Shadow Copy created with WMI (`Win32_ShadowCopy.Create()` through PowerShell —
+  `vssadmin create shadow` is Server-only, confirmed on real client Windows) and deleted
+  with `vssadmin delete shadows` afterwards. `--ntuser-user <name>` pulls another user's
+  NTUSER.DAT via VSS instead of the live HKCU export. UsrClass.dat is acquired the same
+  way (VSS copy, no live-registry variant — see `acquire_usrclass()`'s docstring) for
+  that same target user (or the current session's username if `--ntuser-user` wasn't
+  given). Each hive/flag independent; `--skip-usrclass` etc. opt out.
+- **Analyze** (`pipeline.py`): hash on ingest → extraction (each extractor isolated in its
+  own try/except inside `_process_hive()` — see "Per-extractor isolation" in §3) →
+  Tor-relevance filter (`constants.py: is_tor_related_entry`) → normalize to `Artifact`s
+  (`normalize.py`) → re-hash and raise `IntegrityError` on mismatch. 30 artifact types
+  total, from three sources (plus one bypassed-plugin reimplementation, see below):
+  - **regipy plugins, thin-wrapped in `extractors.py`**: UserAssist, RecentDocs, MUICache,
+    RunMRU, WordWheelQuery, ComDlg32, TypedPaths from NTUSER; ShimCache, BAM, ComputerName,
+    TimeZone, USBSTOR, generic USB devices, MountedDevices, Windows Portable Devices (WPD,
+    resolved per-ControlSet via `get_control_sets()`, same as ComputerName/TimeZone),
+    network interfaces (Tcpip, Phase 3) from SYSTEM; Amcache; InstalledPrograms,
+    WindowsVersion from SOFTWARE; ShellBags from UsrClass.dat (needs the `regipy[full]`
+    extra — `libfwsi-python`/`libfwps-python`, importable as `pyfwsi`/`pyfwps` — see
+    requirements.txt). ShellBags extraction is
+    additionally patched (`_shellbags_patch.py`, applied via `apply_shellbags_patch()`):
+    `pyfwsi`'s `get_creation_time()`/`get_access_time()` can raise a bare `SystemError`
+    ("invalid format string: %hhu.") on certain real entries that regipy's own
+    `except OSError:` doesn't catch, aborting the *entire* hive's ShellBags extraction over
+    one bad timestamp — confirmed by reproducing it against a real UsrClass.dat, not
+    guessed. The patch widens that to `except (OSError, SystemError):` and additionally
+    isolates each MRU slot in its own try/except (`plugin._shellbags_skip_count` tracks how
+    many were skipped) so one malformed entry degrades gracefully instead of losing the
+    whole hive; applying it twice is a no-op (idempotent).
+  - **One regipy *function* reused directly, bypassing a broken plugin *method* for this
+    one sub-case** (`extract_last_visited_pidl_mru` in `extractors.py`): ComDlg32Plugin's
+    own `LastVisitedPidlMRU` handling reuses OpenSavePidlMRU's "value names are
+    digit-indexed MRU slots" assumption, but LastVisitedPidlMRU's real values are named
+    for the *invoking program's full path* with no digit-named values at all — that
+    method silently returns zero entries against a real hive. Reimplemented correctly
+    using regipy's own public `parse_pidl_mru_value()` + `LAST_VISITED_PIDL_MRU_PATH`;
+    OpenSavePidlMRU/OpenSaveMRU (same plugin, unaffected) are still used as-is.
+  - **Hand-written parsers, no regipy plugin exists at all — `custom_extractors.py`**:
+    MUICache from UsrClass.dat (a same-named NTUSER-only plugin exists but can never
+    reach this data — see that file's module docstring), Program Compatibility Assistant
+    Store, `Software\Mozilla\Firefox\Launcher`, `FeatureUsage\AppSwitched`, MountPoints2,
+    Run/RunOnce (Phase 4), Internet Settings proxy config (Phase 4) all from NTUSER;
+    EMDMgmt (ReadyBoost device-eligibility test records), Run/RunOnce (HKLM + WOW6432Node,
+    Phase 4) from SOFTWARE; services (Phase 4) from SYSTEM. Every hive is opened with an
+    **explicit** `hive_type=` (never regipy's own auto-detection, which reads the hive's
+    *embedded* header path and is unreliable for an acquired/renamed copy — confirmed
+    broken for UsrClass.dat specifically, whose check is an exact-equality match no real
+    acquired hive will ever satisfy).
+  - **A fourth source — a regipy plugin that exists but is bypassed and reimplemented
+    using its own public helper functions**, same pattern as the `extract_mounted_devices()`/
+    `extract_last_visited_pidl_mru()` precedent below: network profiles (NetworkList,
+    Phase 3) from SOFTWARE, via `NetworkListPlugin`'s own `parse_network_date()`/
+    `format_mac_address()` against real bytes (its own `run()` is broken the same
+    `trim_values=True` way MountedDevicesPlugin was — see the Phase 3 writeup below).
+  - MUICache-from-UsrClass deliberately shares the `MUICache` artifact type with the
+    NTUSER-sourced one (same kind of evidence, two possible source hives depending on
+    Windows version; merged into one report section, `Artifact.source` differentiates).
+- **Filter philosophy**: deliberately *recall over precision* for every "tor-direct"
+  type — substring path markers (`"tor browser"`, `"torbrowser"`, `"\\tbb\\"`,
+  `"torproject"`, …) plus a list of Tor-specific executable names. `firefox.exe` alone is
+  intentionally NOT a match. `is_tor_related_entry()` extends plain `is_tor_related()`
+  for the one type that needs a second field checked: `LastVisitedPidlMRU`'s `program`
+  field (the invoking exe's full path) can establish Tor-relevance even when its paired
+  folder alone gives no hint (a Tor Browser Save-As dialog pointed at a plain Downloads
+  folder) — `_ADDITIONAL_TOR_CHECK_FIELDS` in `constants.py` is where any future type
+  needing the same treatment gets added.
+- **Confidence / category — structured `Artifact` fields, not description prose**:
+  `Artifact` has `confidence` (`"high"`/`"medium"`/`"low"`), `confidence_reason` (one-line
+  justification), and `category` (`"tor-direct"`/`"context"`), all assigned once per
+  `artifact_type` in `normalize.py` from `constants.py`'s `ARTIFACT_CONFIDENCE` /
+  `ARTIFACT_CONFIDENCE_REASON` / `ARTIFACT_CATEGORY` maps — the single source of truth.
+  Nine types are `category="context"`: Phase 0's ComputerName/TimeZone/WindowsVersion
+  (machine-wide facts) plus Phase 2's USBStor (HIGH — authoritative USB mass-storage
+  connection history), MountedDevices (HIGH — a direct drive-letter/volume-to-device
+  mapping), USBDevices (MEDIUM — generic enumeration, not mass-storage-specific), EMDMgmt
+  (MEDIUM — an independent ReadyBoost-eligibility test record, best-effort on exact value
+  layout beyond the device-identifying subkey name), MountPoints2 and PortableDevices
+  (LOW — "this volume/MTP device was seen at some point", contextual only). None of these
+  nine are filtered by `is_tor_related()` (no USB device's own data ever says "Tor
+  Browser"), and — per `pipeline.py`'s `run_module_a()` — **all are only kept in the final
+  findings if the same run also produced at least one "tor-direct" finding** (a bare
+  computer name or USB history isn't interesting on its own). `findings.json`'s
+  per-module `artifacts` stay a superset across all modules; Module B/C artifacts simply
+  leave these three fields `None`.
+  Program Compatibility Assistant Store's and Firefox Launcher's value **data** (beyond
+  the path-bearing value name) are decoded best-effort / low-confidence-on-exact-layout —
+  neither has been verified against a real captured hive yet; treat
+  `flagged_timestamp`/`raw_value` as supplementary, not authoritative, same caveat
+  ComDlg32's own PIDL decoding and EMDMgmt's `device_capacity` already carry.
+- **Report** (`report.py`): dedupes, builds a per-component cross-hive timeline
+  (`_build_component_timeline()`), and counts components *corroborated by 2+ independent
+  execution sources* — the only cross-hive correlation in the codebase, and only within
+  Module A. `build_context()`'s `system_context` key carries Phase 0's three machine
+  facts separately from the tor-direct `sections` list (structured only — no
+  narrative/template prose; that's Phase 5).
+  **`_build_component_timeline()` only ever iterates tor-direct findings**
+  (`_is_tor_direct()`, reading each finding's own `category` field) — a real, confirmed
+  bug that shipped with Phase 2 and was fixed afterward: widening `_PATH_RE` to also
+  match `"device '...'"`/`"entry '...'"` gave every device-evidence type a `path` field
+  too, and this function iterated every artifact_type unconditionally, so every USB
+  device, drive letter and volume GUID on a real machine was being counted as a "Tor
+  Browser component" (one real acquisition showed "58 distinct files" where only 8 were
+  genuinely Tor-related). `narrative.py`'s account-resolution path scan got the same
+  category guard defensively. The table's "N distinct files" count is just
+  `component_timeline`'s length — fixing the filter fixed that count too, nothing else to
+  maintain.
+  Each component also carries `execution_sources` — the subset of `seen_in` in
+  `EXECUTION_SOURCE_TYPES` (`UserAssist`/`Amcache`/`ShimCache`/`BAM`/`MUICache`) — used
+  for the corroboration count and `narrative.py`'s "N independent sources confirm
+  execution" claims instead of the broader `seen_in`: **ShellBags only ever shows a
+  folder was browsed in Explorer, never that anything inside it was executed**, so it
+  must not inflate that count (it still appears in `seen_in` and the table's "Seen in"
+  chips, and still feeds its own plain-English timeline sentence — just not counted as
+  execution corroboration). MUICache *is* in `EXECUTION_SOURCE_TYPES` — the shell actually
+  invokes a program to populate it — even though its own timestamp (the key's shared
+  last-write time, see below) is never used for timing.
+  Also found and fixed while on this: regipy's own `MountedDevicesPlugin` never actually
+  decodes anything, on any machine — `NKRecord.iter_values()` defaults to
+  `trim_values=True`, which returns a **hex string**, not `bytes`, for `REG_BINARY` data
+  (exactly what every `MountedDevices` value is), so the plugin's own
+  `isinstance(data, bytes)` check is always `False` and its `parse_device_data()` call is
+  never reached. `extractors.extract_mounted_devices()` no longer uses that plugin — it
+  reimplements its short categorization logic directly, reading real bytes via
+  `iter_values(trim_values=False)` and calling regipy's own public `parse_device_data()`
+  itself (same "bypass the one broken piece, reuse the rest of the public API" precedent
+  `extract_last_visited_pidl_mru()` already set for a different plugin). This also
+  surfaced that Windows **Dynamic Disk** volumes store `"DMIO:ID:" + a 16-byte LDM object
+  id` as their `MountedDevices` value — a shape `parse_device_data()` doesn't (and
+  shouldn't) recognize; flagged as `entry["dynamic_disk"] = True` without attempting a
+  decode. Windows does not support dynamic disks on removable USB media, so finding this
+  on the Tor install's own drive is itself real, structural evidence it's an
+  internal/fixed-disk partition, not a USB stick — see `devices` below.
+  `devices` (built by `_build_device_correlation()`, modeled on `_build_profiles_table()`'s
+  is-relevant-flagging pattern) resolves the Tor install's own drive letter (via
+  `narrative.find_install_location_path()` + `extract_drive_letter()`, called *before*
+  `build_narrative()` so the result can feed back into its sentences) through a chain,
+  strongest first: (1) a Dynamic Disk identifier on that drive stops resolution right
+  there (see above); (2) the decoded `MountedDevices` value directly names a
+  USBSTOR-shaped path — join its serial against `USBStor`/`PortableDevices` (both embed
+  the same serial; a real Phase 2 bug put PortableDevices in the "never matches" bucket,
+  fixed); (3) the decoded value instead names a bare `\??\Volume{GUID}` — look for a
+  *sibling* `MountedDevices` entry literally named that same `\??\Volume{GUID}` string
+  and retry step 2 against it (exact value-name match only; USBSTOR's own `disk_guid`
+  field was checked against real `MountedDevices` volume GUIDs and never matches, so no
+  fuzzy/near-GUID matching was built — confirmed dead end, not merely unneeded); (4)
+  nothing resolves — state so plainly and offer every `USBStor`/`PortableDevices` entry as
+  a candidate (never `USBDevices` hubs/cameras/sensors, never `MountPoints2`/`EMDMgmt`).
+  Nothing is discarded at any step: every device/volume the machine has ever recorded
+  still renders in the "All connected devices and volumes" appendix, with only the
+  matched row(s) flagged `is_relevant`. Verified end-to-end against a real evidence
+  capture: that machine's `E:`/`C:`/`D:` are genuine Dynamic Disk volumes (confirmed via
+  raw bytes) while its `F:`/`G:` decode cleanly to real USBSTOR paths — proving both the
+  dynamic-disk branch and the decode path itself are sound, not just mocked.
+- **"Last opened" = the UserAssist launch** (headline, timeline, network instant). A BAM time
+  more than `BAM_SAME_USE_SECONDS` (60 s) later is its own sentence ("Windows last recorded Tor
+  Browser running …; most likely when that use ended"): on a real capture BAM was the exact
+  second the browser process exited (psscan), ten minutes after the launch. Before 2026-10-10
+  the later of the two was reported as "most recent use".
+- **Narrative** (`narrative.py`): deterministic, rule-based plain-English story
+  (`key_finding`/`timeline`/`reliability`/`not_determined`/`device_story` for a
+  non-technical reader, plus a `technical` sub-dict) — still doesn't reference Phase 0's
+  three context facts.
+  `describe_drive_device()` is the one shared function behind both
+  `describe_install_location()`'s inline install-location caveat and the dedicated
+  **"Where Tor Browser ran from"** section (`device_story`, new) — so the two can never
+  disagree. Three cases: resolved (names the device, serial, and — `device_story` only,
+  via `include_timing=True` — first/last-connected when USBSTOR provides them), Dynamic
+  Disk (the "Windows does not allow dynamic disks on removable USB drives..." sentence),
+  or unknown (the inline caveat keeps exactly its original pre-Phase-2 generic wording,
+  regression-pinned; `device_story` instead states plainly the device couldn't be
+  identified and lists candidates).
+  ShellBags gets a plain-English timeline sentence too, chronologically interleaved with
+  the launch sentence (both carry real timestamps; everything else in the timeline keeps
+  its fixed logical position). Wording was deliberately checked against
+  `ShellBagUsrclassPlugin.iter_sk()`'s own source first: a ShellBags entry's `timestamp`
+  is the **BagMRU registry key's own last-write time**, shared by every slot under that
+  key — not the folder's own filesystem access time (that field exists in the raw plugin
+  data as `access_time`/`creation_time`/`modification_time` but was never surfaced past
+  extraction, and still isn't). A key-write isn't guaranteed to mean "freshly visited at
+  this exact instant", so the sentence says *"Explorer recorded the folder ... (last
+  updated X)"*, not *"the user opened the folder ... on X"* — the stronger claim the data
+  doesn't actually support.
+- MUICache's Vista+ convention stores **two separate registry values per program**
+  (`<path>.FriendlyAppName` / `<path>.ApplicationCompany`) — both `extract_muicache()`
+  and `extract_muicache_usrclass()` used to treat each as its own finding, so one real
+  program showed up as two fake "files" with the literal suffix stuck onto the basename.
+  Both now call the new `_muicache_grouping.group_muicache_values()` before returning,
+  merging the pair (or passing a bare pre-Vista single-value entry through unchanged) into
+  one record; `normalize.py` renders both fields, e.g. `"... entry for
+  'firefox.exe' — 'Tor Browser', Mozilla Corporation."`. MUICache's timestamp is also the
+  registry key's own shared last-write time, not a per-program run time — the "Raw
+  findings by hive" table labels that column "Registry key last updated" specifically for
+  MUICache's rows, with a one-line caption saying so.
+- **Phase 3 — network context.** `extractors.extract_network_profiles()` joins SOFTWARE's
+  `NetworkList\Profiles` with `NetworkList\Signatures\{Managed,Unmanaged}` (on
+  `ProfileGuid`), new `ARTIFACT_TYPE_NETWORK_PROFILE` (`CATEGORY_CONTEXT`, same "only kept
+  alongside a tor-direct finding" gate as Phase 2's device types). Deliberately does NOT
+  use regipy's own `NetworkListPlugin`, despite one existing: confirmed against a real
+  SOFTWARE hive (59 real profiles) that its `run()` reads every value through
+  `extract_values()`'s default `iter_values()` (`trim_values=True`), which returns a HEX
+  STRING, not bytes, for `DateCreated`/`DateLastConnected`/`DefaultGatewayMac` (REG_BINARY)
+  — the same bug class already fixed for `MountedDevicesPlugin`. Confirmed real-world
+  effect: `date_created`/`date_last_connected` came back `None` for every one of 59 real
+  profiles, and `default_gateway_mac` came back a raw hex string (`"e47deb7a4551"`)
+  instead of a formatted MAC. Fixed the same way as `extract_mounted_devices()`: bypass
+  the plugin's `run()`, reuse its own public `parse_network_date()`/`format_mac_address()`
+  against real bytes read via `iter_values(trim_values=False)`. `DateCreated`/
+  `DateLastConnected` decode to a **naive local-time** ISO string (confirmed by manually
+  decoding a real SYSTEMTIME blob against the known acquisition date) — never promoted to
+  `Artifact.timestamp` (which every other type treats as UTC); report.py converts to UTC
+  explicitly via `narrative.local_systemtime_to_utc()` using the system's own recorded
+  `TimeZoneInformation` Bias (`UTC = local + bias_minutes`, confirmed against this
+  project's own real evidence: Sri Lanka Standard Time, UTC+5:30, recorded `Bias=-330`) —
+  deliberately NOT the examiner's own `local_tz` display preference, a different concept
+  (see `format_dual_time()`). `extractors.extract_network_interfaces()` thin-wraps
+  regipy's `NetworkDataPlugin` (SYSTEM's `Services\Tcpip\Parameters\Interfaces`, resolved
+  per existing ControlSet) — unlike NetworkListPlugin, this one works correctly against
+  real evidence (DHCP lease times are Unix-epoch DWORDs, not FILETIME, and the plugin
+  converts them correctly); its own recursive `sub_interface` field is dropped (confirmed
+  against real data to be leftover WLAN-profile-shaped garbage, not real nested
+  interfaces). `report.py`'s `_build_network_context()` resolves the Tor launch instant via
+  `narrative.find_latest_tor_use_iso()` (same "second, independent call" precedent as
+  `find_install_location_path()`) and produces the brief's required careful wording —
+  *"The most recent network connection recorded before Tor Browser was last opened was to
+  [SSID] (router [MAC]) at [time]"* — never "connected while using Tor"; plus same-day
+  network-creation notes and DHCP-lease-covers-launch sentences
+  (`narrative.build_network_narrative()`). When the system's time zone is unknown, no
+  local→UTC comparison is attempted at all (profiles shown local-time-only, explicitly
+  labeled, per the brief) — see `_TIMEZONE_UNKNOWN_CAVEAT`. **Found and fixed along the
+  way** (blocking this phase, since it needs a working Bias value): `normalize.py`'s
+  `_normalize_time_zone()`/`_normalize_windows_version()` read the wrong-cased field names
+  (`time_zone_key_name`/`bias`/`product_name`/... vs. the real
+  `TimeZoneKeyName`/`Bias`/`ProductName`/... regipy plugins actually return, confirmed
+  against real hives) — every real report said *"Windows time zone configured as
+  '\<unknown\>'."* and *"Windows version recorded as '\<unknown\>'."* since Phase 0; the
+  hand-built test fixtures used the same wrong casing, which is why ~210 passing tests
+  never caught it.
+- **Phase 4 — persistence and configuration.** Three new `CATEGORY_TOR_DIRECT` types
+  (unlike Phase 2/3's context types, only ever present at all once they reference Tor —
+  Module A still never reports "every autostart entry"): `ARTIFACT_TYPE_RUNKEY`
+  (`custom_extractors.extract_run_keys_ntuser/_software()` — HKCU Run/RunOnce plus HKLM
+  Run/RunOnce/WOW6432Node, no regipy plugin exists), `ARTIFACT_TYPE_SERVICE`
+  (`extract_services()`, SYSTEM's `Services`), `ARTIFACT_TYPE_PROXY_SETTINGS`
+  (`extract_proxy_settings()`, NTUSER's Internet Settings). A shared
+  `constants.extract_command_executable()` strips quoting/arguments from a Run value or a
+  service's ImagePath before matching — confirmed real gap: a real ImagePath like
+  `'"C:\...\RtkAudUService64.exe" -background'` would otherwise defeat
+  `is_tor_related()`'s basename check entirely (it would extract `'...exe" -background'`,
+  never matching `TOR_EXECUTABLE_NAMES`). `extract_services()` is NOT a plain "read every
+  service" loop: regipy's own `ServicesPlugin` (recursive per-service parameter walk) took
+  **~76 seconds** against a real SYSTEM hive (858 services); even a bare `iter_values()`
+  per service with no recursion took **~30 seconds** — regipy parses every value's data
+  unconditionally, confirmed by timing a bare `iter_subkeys()` pass (instant) against one
+  that also touches values. A naive `"tor" in name.lower()` substring filter was also
+  tried and rejected: `DriverStore`-shaped ImagePaths (hundreds of real services) contain
+  `"tor"` as a substring of `"Store"`. The shipped design does a cheap first pass reading
+  only each service's `ImagePath` (one `get_value()` call, confirmed ~7.5s for 858 real
+  services) applying the same `is_tor_service_name()`/`is_tor_related()` predicates
+  `is_tor_related_entry()` uses downstream, and only does the fuller `iter_values()`-style
+  read for an actual match. `is_tor_related_entry()` gained two special cases (not a
+  generic path check): `ARTIFACT_TYPE_PROXY_SETTINGS` dispatches to
+  `constants.is_tor_proxy_config()` (`ProxyEnable==1` AND `ProxyServer` resolves to
+  127.0.0.1/localhost on port 9050/9150 — handles Windows' multi-protocol
+  `"socks=host:port;http=..."` shape too; disabled or wrong-port never produces a finding
+  at all, per the brief), and `ARTIFACT_TYPE_SERVICE` also matches on the service's own
+  name (`is_tor_service_name()`, exact `"tor"`/`"tor service"`/`"tor windows service"`) —
+  independent of `ImagePath`, since an nssm-wrapped Tor service's image is `nssm.exe`, not
+  `tor.exe`.
+- **Phase 5 — report integration.** Three new sections, each rendered only when non-empty:
+  "Network context at time of use" (Phase 3's correlation sentences/caveats plus a
+  collapsed full network/interface table), "Automatic start and proxy settings" (Phase 4's
+  `narrative.build_autostart_narrative()`), "Files involved" (`report._build_files_involved()`
+  — a plain merge of already-tor-direct-filtered ComDlg32/RecentDocs/ShellBags findings; no
+  new filtering needed since every one of those already passed `is_tor_related_entry()`).
+  `narrative.describe_not_determined()` gained an opt-in `has_network_profiles` bullet
+  ("which network was in use at the exact moment..."). The "portable Tor Browser never
+  appears in Installed Programs" sentence (`narrative.describe_portable_install_note()`)
+  was added to `report._quiet_hive_notes()` — same "silence doesn't mean absence" mechanism
+  already used there for Amcache/ShimCache/BAM, gated on SOFTWARE being supplied and no
+  `InstalledPrograms` finding existing. `EXECUTION_SOURCE_TYPES`/`corroborated_components`
+  deliberately untouched — RunKey/Service/ProxySettings findings can still appear in a
+  component's `seen_in` (real corroborating context, e.g. a RunKey entry for the same
+  `firefox.exe` UserAssist already found), but never count toward the execution-source
+  tally; verified end-to-end against the real evidence capture that the "Confirmed Tor
+  Browser components" count (4 files, 2 corroborated) is byte-for-byte unchanged by all of
+  Phase 3–5.
 - Standalone CLI: `python -m modules.module_a_registry.cli` (uses `click`).
-- Real runs produce ~21 artifacts — manageable, low noise.
+- Phase 0/1's extractors are still mostly mocked-tested only; `extract_mounted_devices()`,
+  the device-correlation chain above, and Phase 3's `extract_network_profiles()`/
+  `extract_network_interfaces()` **have** been verified against a real
+  SYSTEM/SOFTWARE/NTUSER/UsrClass.dat capture (which also turned out to contain genuine
+  Tor Browser usage — 3 launches, last run confirmed against UserAssist+BAM+MUICache) —
+  `pyfwsi`/`pyfwps`'s actual ShellBags behavior remains the other piece of Phase 1 verified
+  against real data (via the SystemError fix). Phase 4's RunKey/Service/ProxySettings
+  extractors are mocked-tested only so far — this machine's real evidence has none of the
+  three (no Tor service/autostart/proxy configured), which is a useful negative check but
+  not a positive one; same "mostly mocked-only" caveat Volatility3 carries in Module C
+  otherwise.
 
 ### Module B — disk (`modules/module_b_disk/`) — mostly written by teammate (branch `Sahe`)
 
@@ -145,6 +458,8 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
     Documents first, then every drive; skip-list of system dirs; depth ≤ 8). Several installs
     → picks the one whose `torrc` was modified most recently, records the others in
     `other_installations_found`.
+    Finding **no** install is a per-step error on `profile`/`tor_dir` only — the downloads
+    scan (and `disk.ntfs`) still run, since a deleted install is when those matter most.
   - Plain file copy (`shutil.copy2`), **not VSS** — copying while Tor Browser runs can catch a
     sqlite db mid-write. Each file is copied independently: one that can't be read (the
     running `tor.exe` keeps `lock` locked) goes under `failed` instead of aborting the rest.
@@ -182,9 +497,27 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
 - **Report**: dedicated presenter `modules/module_b_disk/report.py`.
 - Note: `acquire_all.py` never produces `--disk-image` or `--disk-root` inputs — those need a
   separate imaging step (not implemented; see §8). The downloads correlation no longer needs
-  them (live scan), but `$MFT`/`$UsnJrnl` and pagefile/hiberfil residue still do.
-- Known gap: any sub-step error (e.g. an incomplete profile) sets the whole module to
-  `error`, and the report then drops Module B's dedicated presenter for the generic table.
+  them (live scan), and `$MFT`/`$UsnJrnl`/pagefile residue now come from
+  `acquire_ntfs.py`'s raw-volume export (`ntfs_dir` input; see §8).
+- Sub-step isolation (commit `db2f33a`): each sub-analysis has its own try/except; a failed
+  one degrades the module to `partial` with a `details["warnings"]` entry, and the dedicated
+  presenter still renders. `error` is reserved for a hash-verification (`IntegrityError`)
+  failure.
+- **Journal/MFT path resolution** (`analyze_ntfs_journal._folder_path`): a parent reference is
+  record number + sequence; the parent must be a directory and its sequence must match (or be
+  one higher on a freed record = a deleted folder still holding its name), else
+  `<unresolved:N>`. Resolving by number alone filed entries under whatever reused the record
+  (`prefs.js\contrast-black`). Generic names (`state`, `lock`, Firefox profile files) count as
+  Tor activity only inside a Tor Browser path or a `\tor\` folder (`_is_tor_related`);
+  names only Tor writes count anywhere. c3: 3,880 -> 3,750 Tor journal events.
+- Report wording: per-file residue onion counts use the same valid-v3 rule as the summary
+  (other pattern matches shown, not counted); the live downloads scan is "found by the live
+  scan" with its skipped folders listed (it skips `AppData`, `Windows`, …), plus the `$MFT`'s
+  independent Zone.Identifier count; only a mounted volume says "the whole volume".
+- `$MFT` resident content is also scanned with `AUTH_CRED_RE`: an `.auth_private` file is
+  small enough to live inside its MFT record, so a deleted credential's address + key are
+  recovered (`mft.resident_auth_credentials`, artifact `ntfs_onion_client_auth`; the key
+  stays in `details` only, never in the artifact text or HTML).
 
 ### Module C — memory (`modules/module_c_memory/`) — the most-developed module
 
@@ -204,6 +537,70 @@ generic artifact table (capped at 200 rows). Everything is deterministic, offlin
   with the target host in the same extracted string ("host anchoring"); failures go to
   `host_anchoring.unanchored`. Produces `key_findings` (deduped, high-confidence only) and an
   offset-ordered pseudo-timeline (explicitly **not** chronological).
+  - **Evaluated against 4 scripted runs (2026-10-09/10; see `scripts/score_run.py`)**: a
+    plain strings search found every planted item in a full-RAM capture taken with the
+    browser open, but the analyzer recovered only 22/37. Three extractor gaps were closed,
+    each measured on the real image first rather than guessed:
+    - **Login pairs** (`username`/`password`): Firefox keeps field names as one-byte strings
+      and typed values as UTF-16 a few bytes apart, so `field=value`/JSON never matched.
+      Field name + a value starting within `ADJACENT_GAP` (64 B) are paired, grouped, and
+      kept only if the target username is among the values or a target mention is within
+      `PROXIMITY_WINDOW` (2 KiB; measured 352/432/768 B on the capture). Needs `--onion`/
+      `--host`/`--username` to anchor to; with none, nothing new is emitted.
+    - **Form bodies** (`details.targeted.form_submissions`): `name=value&...` bodies, decoded,
+      same proximity/username anchor; Firefox origin-attribute strings
+      (`privateBrowsingId=1&firstPartyDomain=...`) are excluded (they made 37 junk entries).
+    - **Page titles** (`details.targeted.page_titles`): `<title>` can't be anchored by
+      distance (0/10 real titles within 4 KiB of the host) so a title is kept when the HTML
+      right after it links to >= `MIN_TITLE_LINKS` (3) paths already seen under the target
+      host. Real capture: 10/10 visited titles, 0 of the unvisited ones, no foreign title.
+  - **Artifacts are findings only**: observations (every hit, low confidence included) stay
+    in `details.targeted`; `artifacts` gets only target URLs, high-confidence cookies /
+    credentials / downloads and non-placeholder searches, once per distinct (type,
+    description). A negative-control capture went from 3,175 to 28 B/C artifacts.
+  - **Cookie names are an input** (`--cookie-name`, repeatable, on `main.py`, `analyze_evidence.py`
+    and the standalone analyzer; GUI "Cookie names" field; default = the control site's
+    `session`/`trance_user`/`trance_pref`). Cookies sit 24 KB+ from any
+    host string, so they can't be proximity-anchored; they are found by name.
+  - **Speed**: the scan is split into CHUNK-aligned segments run in a process pool (up to 8
+    workers; `TRANCE_WORKERS=1` = fully sequential, also serialises the modules), the file
+    is hashed once beside the scans, and each regex is skipped when the literal text it
+    needs is absent. A segment owns strings that *start* in it and reads 64 KiB past its end;
+    past its end it only finishes pairs/titles it began. Module B's onion carve got the same
+    per-chunk literal gates. `run_pipeline` runs A/B/C concurrently and still assembles
+    results in `MODULES` order. Full 8.6 GB capture: ~16 min -> ~2.4 min. Each module's
+    wall time is in `findings.json` (`modules.<name>.duration_seconds`). Outputs were checked
+    identical to the old sequential code on real data (only the raw string count can differ
+    by one where a long run straddled a read window). A frozen exe needs
+    `multiprocessing.freeze_support()` (called at the three entry points) -- **not yet tried
+    in a built Windows exe**. The standalone analyzer also takes `--workers`.
+  - **Measured result** (same four runs re-analysed, §10): C4 22/37 -> **37/37**; C1 and C3
+    unchanged (they were already at the strings-search ceiling: 6/7 and 7/8); the negative
+    control still passes and its B/C artifacts fell 3,175 -> 28; ~16 min -> ~2.4 min per case.
+  - **No target on a full-memory image** (no `--onion`/`--host`): nothing can be tied to Tor
+    Browser, so credentials, searches, cookies and downloads all stay in
+    `host_anchoring.unanchored` with `"no_target": true`, no memory artifacts are emitted, and
+    the report opens the memory section with a callout naming the most-mentioned onion as a
+    re-run command; `main.py` and the GUI warn up front (`main.no_target_warning()`). A
+    full-memory image is now *always* host-anchored (username-only no longer turns it off).
+    **Still open:** with a target given, downloads and cookies are still not anchored, so
+    antivirus-signature paths (`c:\users\admin\downloads\…virus.exe`) and `session=`
+    PowerShell text remain findings even in the negative control (19 + 5 there). Letter case
+    does not separate them (checked: junk in proper case, the real installer path lowercase);
+    the fix is cross-module -- a memory download path counts only if the disk evidence has
+    the file.
+  - **Report: Tor Browser processes** (`report._process_activity`, needs Volatility3 psscan):
+    firefox.exe/tor.exe grouped by parent PID (parents have usually exited, so no tree is
+    claimed); processes created > 10 min after the capture time (from the image's
+    `fullmem_<UTC stamp>` name; no stamp = no check) are clock anomalies, kept out of the
+    timing. Root `report._relate_processes_to_registry()` adds notes when Module A's times
+    meet these (an earlier run; BAM within 5 s of a firefox.exe exit).
+  - **Known limits**: the extractors were designed while looking at the same capture they
+    are scored on, so 37/37 is *not* an independent result -- validate on a fresh run.
+    "Seen" vs "visited" URLs is not separable from string shape (a decoy download link sits
+    in the same kind of string list as a real download URL); the decoy claims-form link is
+    still reported as a URL artifact. Cross-module corroboration (a `/download/` URL with no
+    file in Downloads) is the likely fix.
 - **Structural pass** (`volatility_analyze.py`, opt-in `--vol3-path`): shells out to
   Volatility3's `vol` CLI (psscan/netscan/filescan/cmdline/hivelist) — never imported
   in-process. `--vol3-extract-process firefox.exe` narrows a full image to one process first.
@@ -225,16 +622,19 @@ python -m PyInstaller --onefile --name trance-acquire acquire_all.py
 dist\trance-acquire.exe --output-dir evidence
 ```
 Flags: `--skip-registry/--skip-memory/--skip-disk`, `--ntuser-user`, `--winpmem-path`,
-`--tor-browser-dir`, `--disk-profile-src`, `--tor-dir-src`. Omitting the path flags triggers
+`--tor-browser-dir`, `--disk-profile-src`, `--tor-dir-src`, `--skip-ntfs`, `--ntfs-volume`,
+`--skip-pagefile`, `--include-hiberfil`. Omitting the path flags triggers
 auto-discovery. Every category prints its outcome now (it didn't before commit `95b462c` —
 memory/disk used to fail silently).
 
 Output:
 ```
 evidence/
-  registry/  SYSTEM_<ts>, NTUSER_<ts>.DAT, Amcache_<ts>.hve (+ .sha256, custody json)
+  registry/  SYSTEM_<ts>, SOFTWARE_<ts>, NTUSER_<ts>.DAT, UsrClass_<user>_<ts>.dat,
+             Amcache_<ts>.hve (+ .sha256, custody json)
   memory/    firefox_<pid>_<ts>.bin and/or fullmem_<ts>.raw (+ .sha256, custody json)
   disk/      profile/, tor_dir/ (each with hashes.sha256) + custody json
+             ntfs/<letter>/ MFT, UsnJrnl_J, pagefile.sys, swapfile.sys, ntfs_metadata.json
   acquire_manifest.json   status + path per artifact
 ```
 
@@ -242,16 +642,18 @@ evidence/
 ```bash
 source .venv/bin/activate
 # Explicit flags:
-python main.py --case demo --output-dir output --ntuser ... --system ... --amcache ... \
+python main.py --case demo --output-dir output \
+    --ntuser ... --system ... --amcache ... --software ... --usrclass ... \
     --disk-profile ... --tor-dir ... [--disk-root ...] [--disk-image ...] \
     --dump ... --source-type full-memory --onion X.onion --host 1.2.3.4:5000 --username alice \
-    [--vol3-path vol --vol3-extract-process firefox.exe]
+    [--vol3-path vol --vol3-extract-process firefox.exe] [--cookie-name sid --cookie-name csrf]
 # Point at an acquire folder instead (reads acquire_manifest.json, or globs if absent):
 python analyze_evidence.py --case demo --evidence-dir evidence --onion X.onion --host ...
 # Desktop app:
 pip install -r requirements-gui.txt && python gui_main.py [--output-dir output]
 ```
-`analyze_evidence.resolve_evidence()` accepts both the `acquire_all.py` layout
+`TRANCE_WORKERS=<n>` caps the memory scan's worker processes (default up to 8; `1` = fully
+sequential, modules included). `analyze_evidence.resolve_evidence()` accepts both the `acquire_all.py` layout
 (`registry/`, `memory/`, `disk/profile`, `disk/tor_dir`) and a **flat** folder (the older
 individual-script VM captures in `../vm-shared/` are flat). It excludes `.sha256` sidecars
 from the extension-less `SYSTEM_*` glob, and prefers a full-memory image over a live dump.
@@ -259,8 +661,11 @@ from the extension-less `SYSTEM_*` glob, and prefers a full-memory image over a 
 ### Dev loop
 ```bash
 source .venv/bin/activate
-python -m pytest -q          # ~210 tests, ~5s
+python -m pytest -q          # ~660 tests, ~16s
 ruff check . && black --check .
+# Score a run against the planted ground truth (recall, decoy hits, strings baseline):
+python scripts/score_run.py score --ground-truth ground_truth.json --findings <case>/findings.json \
+    --run-id c4-r01 --condition C4 --baseline <evidence folder>
 ```
 
 ---
@@ -275,7 +680,7 @@ ruff check . && black --check .
   `trance-acquire.exe` stays CLI (it runs on the target).
 - `analyse_tab.py` — 720px centered, scrollable form: evidence folder (optional; read-only,
   `NoFocus`, drag-and-drop), case name, and collapsible sections (`advanced_inputs.py`):
-  targeting; **Review detected inputs** (each auto-discovered input with Change…/reset —
+  targeting (host, username, **cookie names**, report timezone); **Review detected inputs** (each auto-discovered input with Change…/reset —
   the `--system/--ntuser/--amcache/--dump/--disk-profile/--tor-dir/--downloads-scan`
   overrides); **disk image or mounted volume** (`--disk-image` carve, mount-from-the-app,
   or an already-mounted `--disk-root`); **memory options** (`--source-type`, `--vol3-path`
@@ -288,6 +693,13 @@ ruff check . && black --check .
   --run-analysis <request.json>`; frozen: the same exe re-launches itself) so Cancel can stop
   it; stdout carries log lines plus `@@TRANCE {json}` progress/result/error lines. Cancel
   removes the case folder only if this run created it.
+- **A mounted volume is a full input source** (`analyze_evidence.resolve_volume()`, used by
+  `effective_inputs()`): the hives (case-insensitive paths), the Tor Browser install (the
+  acquisition side's own torrc search; most recently active if several), its profile and tor
+  folder, and the NTUSER.DAT/UsrClass.dat of the user it lives under are found inside the
+  mount. An evidence folder's copy is never replaced; overrides still win; choices go to the
+  live log. Before 2026-10-10 a mounted disk only fed Module B's whole-volume passes, so a
+  disk-image run skipped Module A. **The project is GUI-first: no CLI-only features.**
 - `mount_helper.py` (stdlib only, **runs as root via pkexec**, `gui_main.py --mount-helper` when
   frozen) — validates the image (regular file; refuses VirtualBox *differencing* VDIs by
   header type 4 at 0x4C), `qemu-nbd --read-only`, mounts the largest NTFS partition with
@@ -345,10 +757,20 @@ pyinstaller --onefile --name trance-acquire acquire_all.py
 pyinstaller --onefile --name trance-analyze analyze_evidence.py \
   --hidden-import modules.module_a_registry --hidden-import modules.module_b_disk \
   --hidden-import modules.module_c_memory \
+  --collect-all tzdata \
   --add-data "report_template.html.j2:." \
   --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
 # trance-gui: same flags as trance-analyze plus --collect-all PySide6, entry gui_main.py
 ```
+`--collect-all tzdata` is required on both trance-analyze and trance-gui: Windows has no
+OS-level tz database, so `zoneinfo` (report-timezone display, both CLI and GUI) depends
+entirely on the `tzdata` package's data files, which PyInstaller's default import analysis
+does not follow (they're not `.py` modules). Without it every zone name silently fails to
+resolve in the built exe even though it works fine from source.
+The memory scan now uses a process pool: a frozen exe re-launches itself per worker, which
+is why `multiprocessing.freeze_support()` is called at `main.py`, `analyze_evidence.py` and
+`gui_main.py`'s entry points -- **untested in a built Windows exe**; check it when the exes
+are next built.
 PyInstaller never cross-compiles: Windows exes must be built on Windows. `*.spec`, `build/`,
 `dist/` are gitignored.
 
@@ -375,20 +797,26 @@ PyInstaller never cross-compiles: Windows exes must be built on Windows. `*.spec
 
 ### P1 — rule-based findings instead of regex-hit dumping (the main quality problem)
 
+> **Partly done (see Module C's "Evaluated against 4 scripted runs" in §4):** artifacts are now
+> high-confidence + de-duplicated, three extractor gaps are closed and cookie names are an
+> input. Still open below: a named-rule registry with tiers, built-in exclusion rules
+> (TRANCE's own acquisition traces), cross-module corroboration, golden-file tests.
+
 The report's stated goal is "every interpretive note is a fixed, auditable rule". In
 practice Module C turns every regex hit into a finding. Measured on
 `output/Test002/findings.json` (full-memory image): **4,017 Module C artifacts** —
 3,106 `download` (1,962 of them the analyzer's *own* `confidence: low`), 685
 `search_query`, 213 `credential` (106 low), 13 `cookie` (12 low). Concretely:
 
-- `analyzer.record_artifact()` is called for **every** hit regardless of confidence, so
-  low-confidence noise lands in `findings.json["artifacts"]` and the generic tables.
+- ~~`analyzer.record_artifact()` is called for every hit regardless of confidence~~ —
+  **fixed**: only high-confidence, de-duplicated findings become artifacts; observations stay
+  in `details["targeted"]` (see §4, Module C).
 - Examples of noise recorded as evidence: `file:///%s` (printf format strings), the Tor
   Browser install's own `firefox.exe` path, search "queries" like `%s` and `google`, and
   **the examiner's own activity on the target** (`winpmem+download+for+Windows`) — the
   acquisition process contaminates the evidence and nothing filters it.
-- `COOKIE_RE` is hardcoded to the test app's cookie names
-  (`session|trance_user|trance_pref`) — won't generalize to any real target.
+- ~~`COOKIE_RE` is hardcoded to the test app's cookie names~~ — **fixed**: cookie names are
+  an input (`--cookie-name`); the defaults are still the test app's.
 - `CREDENTIAL_FIELDS` includes very generic names (`user`, `login`, `email`); 68 "high
   confidence" credentials in one run is not believable.
 - Confidence is a binary label from ad-hoc heuristics (`_is_noise_value`, path shape) with
@@ -414,11 +842,11 @@ workflow on large changes):
   daemon's `lock`/`state` window; a download seen in memory *and* as a Zone.Identifier file
   *and* as a USN `.part` rename. This probably belongs in a new post-module step between
   `run_pipeline`'s module loop and `build_findings`.
-- Parameterize target-specific patterns (cookie names etc.) via CLI/GUI inputs instead of
-  constants.
-- Evaluate with ground truth: the team ran scripted VM scenarios (`output/vm-run-*`); build
-  golden-file tests that assert expected findings present and known-noise absent, and track
-  precision/recall.
+- ~~Parameterize target-specific patterns (cookie names etc.)~~ — done for cookie names.
+- Evaluate with ground truth: **partly done** — `scripts/score_run.py` scores a run against
+  planted ground truth (§10). Still open: golden-file tests in `tests/` that assert expected
+  findings present and known-noise absent, and re-validating on a *fresh* capture (the
+  current extractors were designed on the capture they score 37/37 on).
 
 ### P1 — packaging
 
@@ -445,25 +873,32 @@ workflow on large changes):
   multi-process and content processes hold page data. Consider dumping all of them.
 - Only one Tor Browser install is acquired and the analyze side only accepts one
   profile/tor_dir pair end to end (acquire → manifest → `module_b_disk.run`).
-- No acquire step produces a disk image or the read-only mount `--disk-root` needs.
-- **Planned (agreed 2026-10-04, not built): NTFS metadata collection in trance-acquire.**
-  New `modules/module_b_disk/acquire_ntfs.py` (stdlib, Windows, admin) reads the raw volume
-  and exports `disk/ntfs/{MFT, UsnJrnl_J, pagefile.sys, swapfile.sys}` + `ntfs_metadata.json`
-  + `hashes.sha256`, so Module B's `$MFT`/`$UsnJrnl`/residue analysis runs without imaging.
-  Decisions: read `$MFT`/`$J` from a **VSS snapshot device** (reuse Module A's WMI create/
-  delete), **fall back to the live volume** and record which; `$MFT` via record 0's `$DATA`
-  runlist; `$J` via the `$UsnJrnl` record under `$Extend` (record 11, follow
-  `$ATTRIBUTE_LIST`), copying **allocated runs only** into a compact file (records are
-  self-describing; original offsets kept in metadata); **pagefile + swapfile on by default**
-  from the live volume (VSS excludes them) with a free-space check and `--skip-pagefile`,
-  hiberfil opt-in; volumes = **system drive + the Tor Browser install's drive**;
-  `--skip-ntfs`; manifest `disk.ntfs`. Analyze side: Module B `ntfs_dir` input →
-  `analyze_ntfs(mft=, usnjrnl=)` + `carve_residue(ntfs_dir)` (it globs by file name), hash-
-  verified, `disk_root` wins when both exist; auto-resolved for the GUI (checklist row +
-  Inputs override). Verify: unit tests for boot sector/runlist/attribute list/compaction;
-  byte-compare the reader's `$MFT` against ntfs-3g's `/mnt/win10/$MFT` on the flattened VM
-  image and reproduce the `--disk-root` run (7,535 Tor USN events, 3 `.part` downloads,
-  382 deleted Tor files); then a real VM run.
+- No acquire step produces a disk image or the read-only mount `--disk-root` needs (the
+  `$MFT`/`$UsnJrnl`/pagefile part of that is now covered by `acquire_ntfs.py`, below).
+- **NTFS metadata collection in trance-acquire — built 2026-10-07, not yet run on Windows.**
+  `modules/module_b_disk/acquire_ntfs.py` (stdlib, Windows, admin) reads raw volumes and
+  writes `disk/ntfs/<letter>/{MFT, UsnJrnl_J, pagefile.sys, swapfile.sys}` +
+  `ntfs_metadata.json` + `hashes.sha256`; manifest `disk.ntfs`. `$MFT`/`$J` come from a VSS
+  snapshot device (Module A's WMI create / vssadmin delete), falling back to the live volume
+  (`metafile_source` records which); pagefile/swapfile always from the live volume (VSS
+  excludes them), with a free-space check; hiberfil opt-in. `$J` is copied as allocated runs
+  only (extents with original stream offsets in the metadata). The exported `MFT` is the
+  **on-disk bytes** (fixups not applied) — what `analyze_ntfs_journal` expects; `ntfscat`
+  output differs only at the fixup bytes. Volumes = system drive + every drive a Tor install
+  was seen on (`acquire_all.ntfs_volumes()`), and the step runs even when the disk step found
+  no install (the deleted-install case). Flags: `--skip-ntfs`, `--ntfs-volume X`
+  (repeatable), `--skip-pagefile`, `--include-hiberfil`. Analyze side: `--ntfs-dir` / GUI
+  "NTFS metadata" input → Module B hash-verifies each volume, runs `analyze_ntfs` +
+  `carve_residue` per volume and merges them (`merge_ntfs_reports`/`merge_residue_reports`,
+  paths prefixed `C:\`); `disk_root` wins when both exist.
+  Verified: unit tests on a hand-built volume (fragmented `$MFT` via attribute list, sparse
+  `$J`, negative LCN deltas, uninitialized tail, deleted same-name record); a real
+  `mkntfs`/`ntfscp` volume (pagefile byte-identical; `$MFT` equal to `ntfscat` after
+  fixups); the Windows-formatted `~/tor-transfer/evidence.vdi` data disk (same `$MFT`
+  equality; that disk has no `$UsnJrnl`). **Still to do:** rebuild `trance-acquire.exe` and
+  run it on the VM — the raw `\\.\C:` / shadow-device reads, a real `$J`, a 1 GB+ `$MFT`
+  and multi-GB pagefile are untested; then compare against a `--disk-root` run of the same
+  machine's image.
 
 ### P2 — smaller cleanups
 
@@ -501,5 +936,78 @@ workflow on large changes):
   `find_winpmem_binaries` (or `core.fs_scan` roots). Unmocked, they scan the real home
   directory — this slipped in twice already (3–20s tests). Use `pytest --durations=10` after
   adding tests to catch it.
+- This session's checkout is also at `/mnt/sda1/Academics/UOM (Semester 05)/Cyber Security
+  Project/Trance` (branch `sahe`, an NTFS drive: every file reports as executable, so `ruff`
+  prints a harmless `EXE002` for each; use `ruff check . --extend-ignore EXE002`, and `sed -i`
+  prints a permissions warning but works). The evaluation workspace is described in §10.
 - Windows-only code paths are tested with `monkeypatch` on `sys.platform`, `is_admin`, and
   `subprocess.run`; they have not been exercised for real beyond the one VM run above.
+
+---
+
+## 10. Evaluating the tool (scripted runs) — added 2026-10-10
+
+How well does TRANCE recover a *known* Tor Browser session, depending on how the machine is
+seized? One scripted session is run on a clean Windows 10 VM snapshot, then captured four ways,
+and `scripts/score_run.py` scores each capture against what was actually planted.
+
+**Conditions** (one run each so far): `C1` powered off (flattened VM disk clone, analysed via a
+read-only mount); `C3` running, browser closed (5 min later, `trance-acquire.exe`);
+`C4` running, browser open (acquire immediately); `NC` negative control (Tor idle ~15 min, no
+browsing, then the C4 capture). `C2` (hibernated) was dropped: the VM firmware has no hibernation.
+Part B of the plan (real sites) was left out of every run.
+
+**Ground truth.** A control onion site (GCP `torlab-server`, `/var/www/control-site`) logs every
+request; `build_ground_truth.py fixed --since <boot UTC> --out ~/<run>.json` turns the log into the
+run's truth (37 performed items to score, 12 decoys that must not be touched). The template with
+match strings is `ground_truth.json` (in the `Cyber Security Project/` folder that contains this repo); per-run server files are
+passed with `--server-gt`. Items are matched on (type, marker).
+
+**Scoring** (`scripts/score_run.py score ...`): an item is *recovered* if one of its `match`
+strings appears in the findings (`details.targeting` excluded -- it only echoes the CLI targets);
+recall = recovered / 37. `--baseline <evidence path>` (repeatable) adds the control the plan asked
+for: a plain case-insensitive byte search (ASCII + UTF-16LE) of the same evidence, reporting what
+is *present*, so a tool miss can be told apart from something never captured, plus per-source
+presence (`ram-full`, `ram-process`, `pagefile`, `ntfs-metadata`, `browser-profile`, ...).
+`aggregate <dir>` gives mean/range per condition. A decoy that appears anywhere in the findings
+counts as a false positive under the strict rule (so `details...unanchored` hits count too).
+
+**Results** ("before" = the tool as of `b1e29e2`; "after" = analysis code as of `65eb932` -- later
+commits only add CLI flags and docs):
+
+| Case | In evidence (strings) | Before | After | B/C artifacts before -> after |
+|---|---|---|---|---|
+| C1 powered off | 7/37 (whole raw disk image incl. unallocated also 7) | 6/37 | 6/37 | 10 -> 10 |
+| C3 running, closed | 8/37 (RAM holds all 8) | 7/37 | 7/37 | 2,360 -> 49 |
+| C4 running, open | 37/37 (RAM) | 22/37 | **37/37** | 7,931 -> 138 |
+| NC control | 0/37 | pass | pass | 3,175 -> 28 |
+
+What it showed: with the browser open everything is in RAM; after it closes ~8 items survive
+in RAM, and on a powered-off disk only 7 (profile + NTFS journal; Tor keeps no history).
+The C4 gap was extractor gaps, now closed (login pairs, form bodies, page titles; §4).
+
+**Deviations and limits -- state these when quoting the numbers**: one run per condition (no
+variance); `c1-r01` idle gap ~2 min (target 5; a back-dated close time was contradicted by the
+server log and not used); `c3-r01` gap 8 min 46 s (target 5); `c4-r01` acquire delayed ~4 min
+(evidence ISO not attached after the snapshot restore); the "after" C4 number is not independent
+(see §4 "Known limits"); the two C4 "decoy false positives" are a search candidate in the
+rejected `unanchored` bucket and a URL artifact for a link on a page (seen, not visited).
+
+**Reviewer feedback round (2026-10-10)** on a c3 report run *without a target*: all eight
+points were checked against the data -- seven confirmed, one partly (the downloads count of 3
+held, the "whole volume" wording didn't) -- and fixed in `4fa390e` (no-target memory),
+`bf0b633` (journal paths), `d6db0b1` (last opened vs BAM), `3f72b6e` (psscan processes, clock
+anomalies), `95decfa` (residue counts, scan coverage). Re-scored afterwards: NC pass, C3 7/37,
+C4 37/37 -- unchanged.
+
+**Workspace** (the examiner host, outside the repo): `~/trance-eval/` -- `shared/evidence/<run>/`
+(acquire folders, also the VM's `Z:`), `ground_truth/`, `results/` + `output/` (original tool),
+`results-v2/` + `output-v2/` (improved tool), `comparison/` (PDF/HTML report,
+`make_comparison.py`), `mount_image.sh` (qemu-nbd + ntfs-3g read-only mount, needs sudo),
+`/mnt/sda1/trance-eval-images/c1-r01.vdi`, and `run_log.jsonl` next to `ground_truth.json`
+(UTC event log per run). The VM is "Windows 10" in VirtualBox; **the evidence ISO
+(`trance-eval-b1e29e2.iso`, acquire exe + WinPMEM) is dropped on every snapshot restore** --
+re-insert with `VBoxManage storageattach "Windows 10" --storagectl SATA --port 1 --device 0
+--type dvddrive --medium ~/trance-eval/trance-eval-b1e29e2.iso`; it appears as `D:`, write
+output to `Z:\evidence\<run>`.
+

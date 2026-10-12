@@ -352,6 +352,7 @@ class AnalyseTab(QWidget):
             host=self._host_field.text().strip(),
             username=self._username_field.text().strip(),
             cookie_names=self._cookie_names_field.text().strip(),
+            report_timezone=self._report_timezone_field.text().strip(),
             **self._options.disk.values(),
             **self._options.memory.values(),
         )

@@ -7,6 +7,9 @@ from modules.module_b_disk import run as run_disk_module
 
 ONION = "jnagl5n7q47bdox4zscwgfyxcqsliulrh34qnexorwjwpbn37avtcdqd"
 AUTH = "xm3raaijein7aeuike2d53kodwwpx4uhc5fg2wromy547ohbphoriaid"
+# Synthetic x25519 key (52 base32 chars) -- format only, not a real credential.
+KEY = "a" * 52
+CRED = f"{AUTH}:descriptor:x25519:{KEY}\n".encode()
 T0 = dt.datetime(2026, 9, 19, 8, 0, tzinfo=dt.timezone.utc)
 
 
@@ -30,9 +33,9 @@ def _attr(attr_type, value, name=""):
     return bytes(out)
 
 
-def _file_name_attr(name, parent, created, size=0):
+def _file_name_attr(name, parent, created, size=0, parent_seq=1):
     body = bytearray(66)
-    struct.pack_into("<Q", body, 0, parent | (1 << 48))
+    struct.pack_into("<Q", body, 0, parent | (parent_seq << 48))
     struct.pack_into("<QQQQ", body, 8, created, created, created, created)
     struct.pack_into("<QQ", body, 40, size, size)
     body[64] = len(name)
@@ -44,9 +47,21 @@ def _std_info(created):
     return _attr(0x10, struct.pack("<QQQQ", created, created, created, created) + b"\x00" * 16)
 
 
-def _mft_record(number, name, parent, in_use=True, is_dir=False, data=None, streams=None):
+def _mft_record(
+    number,
+    name,
+    parent,
+    in_use=True,
+    is_dir=False,
+    data=None,
+    streams=None,
+    sequence=1,
+    parent_seq=1,
+):
     created = _filetime(T0 + dt.timedelta(minutes=number))
-    attrs = _std_info(created) + _file_name_attr(name, parent, created, len(data or b""))
+    attrs = _std_info(created) + _file_name_attr(
+        name, parent, created, len(data or b""), parent_seq
+    )
     if data is not None:
         attrs += _attr(0x80, data)
     for sname, sdata in (streams or {}).items():
@@ -57,7 +72,7 @@ def _mft_record(number, name, parent, in_use=True, is_dir=False, data=None, stre
     usa_offset, usa_count = 48, 3
     struct.pack_into("<HH", rec, 4, usa_offset, usa_count)
     flags = (0x01 if in_use else 0) | (0x02 if is_dir else 0)
-    struct.pack_into("<HHHH", rec, 16, 1, 1, 56, flags)
+    struct.pack_into("<HHHH", rec, 16, sequence, 1, 56, flags)
     struct.pack_into("<I", rec, 44, number)
     rec[56 : 56 + len(attrs)] = attrs
     # Fixups: sector tails hold the USN; the USA stores the displaced bytes.
@@ -77,7 +92,7 @@ def _mft(tmp_path):
         66: _mft_record(66, "Downloads", 65, is_dir=True),
         70: _mft_record(70, "Tor Browser", 65, is_dir=True),
         71: _mft_record(71, "onion-auth", 70, is_dir=True),
-        80: _mft_record(80, f"{AUTH}.auth_private", 71, in_use=False),
+        80: _mft_record(80, f"{AUTH}.auth_private", 71, in_use=False, data=CRED),
         81: _mft_record(
             81,
             "gone.txt",
@@ -87,6 +102,8 @@ def _mft(tmp_path):
         ),
         82: _mft_record(82, "notes.txt", 66, data=f"see http://{ONION}.onion/x".encode()),
         83: _mft_record(83, "state", 70, in_use=False),
+        # A hand-made copy with the wrong extension: tor never loads it.
+        84: _mft_record(84, "key.auth_private.txt", 65, data=CRED),
     }
     blob = b"".join(records.get(i, b"\x00" * 1024) for i in range(90))
     path = tmp_path / "MFT"
@@ -165,7 +182,7 @@ def test_mft_parses_names_paths_streams_and_deleted_records(tmp_path):
     records = analyze_ntfs_journal.parse_mft(_mft(tmp_path))
     assert analyze_ntfs_journal.resolve_path(records, 81) == "Users\\u\\Downloads\\gone.txt"
     report = analyze_ntfs_journal.analyze_mft_records(records)
-    assert report["in_use"] == 7
+    assert report["in_use"] == 8
     [onion] = report["onion_filenames"]
     assert onion["onion_address"] == AUTH + ".onion"
     assert onion["deleted"] is True
@@ -176,6 +193,36 @@ def test_mft_parses_names_paths_streams_and_deleted_records(tmp_path):
     assert resident["onion_addresses"] == [ONION + ".onion"]
     deleted_names = {d["name"] for d in report["deleted_tor_files"]}
     assert deleted_names == {f"{AUTH}.auth_private", "state"}
+
+
+def test_mft_recovers_credential_content_from_deleted_resident_file(tmp_path):
+    """An .auth_private file is small enough to live inside its MFT record, so the
+    credential itself (stored bare, without ".onion") survives deletion."""
+    records = analyze_ntfs_journal.parse_mft(_mft(tmp_path))
+    creds = analyze_ntfs_journal.analyze_mft_records(records)["resident_auth_credentials"]
+    by_record = {c["record"]: c for c in creds}
+    assert set(by_record) == {80, 84}
+    deleted = by_record[80]
+    assert deleted["onion_address"] == AUTH + ".onion"
+    assert deleted["x25519_private_key"] == KEY
+    assert deleted["deleted"] is True and deleted["loadable_by_tor"] is True
+    assert deleted["path"] == f"Users\\u\\Tor Browser\\onion-auth\\{AUTH}.auth_private"
+    assert by_record[84]["loadable_by_tor"] is False
+    assert by_record[84]["deleted"] is False
+
+
+def test_mft_credential_scan_rejects_invalid_address(tmp_path):
+    records = {
+        5: analyze_ntfs_journal.parse_mft_record(_mft_record(5, ".", 5, is_dir=True), 5),
+        90: analyze_ntfs_journal.parse_mft_record(
+            _mft_record(
+                90, "x.auth_private", 5, data=f"{'a' * 56}:descriptor:x25519:{KEY}".encode()
+            ),
+            90,
+        ),
+    }
+    report = analyze_ntfs_journal.analyze_mft_records(records)
+    assert report["resident_auth_credentials"] == []
 
 
 def test_usn_journal_yields_addresses_and_window(tmp_path):
@@ -200,9 +247,12 @@ def test_analyze_ntfs_merges_sources_and_reports_missing(tmp_path):
     assert report["onion_addresses"] == {
         AUTH
         + ".onion": {
-            "sources": ["mft", "usnjrnl"],
+            "sources": ["mft", "mft_resident_credential", "usnjrnl"],
             "deleted": True,
-            "paths": [f"Users\\u\\Tor Browser\\onion-auth\\{AUTH}.auth_private"],
+            "paths": [
+                f"Users\\u\\Tor Browser\\onion-auth\\{AUTH}.auth_private",
+                "Users\\u\\key.auth_private.txt",
+            ],
         },
         ONION
         + ".onion": {
@@ -254,7 +304,15 @@ def test_module_b_runs_residue_and_ntfs_under_disk_root(tmp_path, monkeypatch):
         "ntfs_onion_address",
         "ntfs_deleted_download",
         "ntfs_tor_activity_window",
+        "ntfs_onion_client_auth",
     } <= types
+    creds = [a for a in result.artifacts if a.artifact_type == "ntfs_onion_client_auth"]
+    assert len(creds) == 2
+    real = next(a for a in creds if "deleted file" in a.description)
+    assert AUTH in real.description and "never loaded" not in real.description
+    assert KEY not in real.description
+    copy = next(a for a in creds if "key.auth_private.txt" in a.description)
+    assert "tor never loaded it" in copy.description
     deleted = next(a for a in result.artifacts if a.artifact_type == "ntfs_deleted_download")
     assert "gone.txt" in deleted.description
     auth = next(
@@ -341,3 +399,83 @@ def test_onion_checksum_rejects_lookalike_filenames(tmp_path):
     (tmp_path / "pagefile.sys").write_bytes(b"a" * 56 + b".onion " + ONION.encode() + b".onion")
     result = analyze_memory_residue.carve_residue(tmp_path)
     assert list(result["onion_addresses"]) == [ONION + ".onion"]
+
+
+def _ref(number, sequence):
+    return number | (sequence << 48)
+
+
+def _reuse_volume(tmp_path):
+    """Records whose numbers NTFS has reused since the journal entries were written."""
+    records = {
+        5: _mft_record(5, ".", 5, is_dir=True),
+        64: _mft_record(64, "Users", 5, is_dir=True),
+        70: _mft_record(70, "Tor Browser", 64, is_dir=True),
+        # Was a folder (sequence 2); now the file prefs.js inside Tor Browser (sequence 3).
+        90: _mft_record(90, "prefs.js", 70, sequence=3),
+        # Was an unrelated folder (sequence 6); now a Tor Browser folder (sequence 7).
+        93: _mft_record(93, "TorData", 70, is_dir=True, sequence=7),
+        # A Tor Browser folder deleted since (NTFS bumped its sequence 2 -> 3 when freeing it).
+        94: _mft_record(94, "old-profile", 70, in_use=False, is_dir=True, sequence=3),
+        # A folder that has not changed.
+        95: _mft_record(95, "Data", 70, is_dir=True, sequence=4),
+        # A file whose own name record points at a parent incarnation that is gone.
+        96: _mft_record(96, "orphan.txt", 93, parent_seq=6),
+    }
+    mft = tmp_path / "MFT"
+    mft.write_bytes(b"".join(records.get(i, b"\x00" * 1024) for i in range(100)))
+    journal = [
+        _usn_record(1, 200, _ref(90, 2), 1, 0x100, "contrast-black"),
+        _usn_record(2, 201, _ref(93, 6), 2, 0x100, "LargeTile.scale-100.png"),
+        _usn_record(3, 202, _ref(94, 2), 3, 0x100, "places.sqlite"),
+        _usn_record(4, 203, _ref(95, 4), 4, 0x100, "torrc"),
+    ]
+    usn = tmp_path / "J"
+    usn.write_bytes(b"\x00" * 4096 + b"".join(journal) + b"\x00" * 4096)
+    return analyze_ntfs_journal.parse_mft(mft), usn
+
+
+def test_journal_never_files_an_entry_under_a_reused_record(tmp_path):
+    records, usn = _reuse_volume(tmp_path)
+    report = analyze_ntfs_journal.analyze_usn(usn, records)
+    paths = {e["name"]: e["path"] for e in report["tor_events"]}
+    # A file can't be a folder, and a reused folder isn't the one the entry meant: neither
+    # may lend its (Tor Browser) path to an unrelated entry.
+    assert "contrast-black" not in paths
+    assert "LargeTile.scale-100.png" not in paths
+    # A deleted folder still holding its name, and an unchanged folder, still resolve.
+    assert paths["places.sqlite"] == "Users\\Tor Browser\\old-profile\\places.sqlite"
+    assert paths["torrc"] == "Users\\Tor Browser\\Data\\torrc"
+    assert report["tor_events_total"] == 2
+
+
+def test_reused_parent_is_shown_as_unresolved(tmp_path):
+    records, _ = _reuse_volume(tmp_path)
+    assert analyze_ntfs_journal._folder_path(records, 90, 2) == "<unresolved:90>"
+    assert analyze_ntfs_journal._folder_path(records, 93, 6) == "<unresolved:93>"
+    # The MFT's own parent links are checked the same way.
+    assert analyze_ntfs_journal.resolve_path(records, 96) == "<unresolved:93>\\orphan.txt"
+    assert analyze_ntfs_journal.resolve_path(records, 95) == "Users\\Tor Browser\\Data"
+
+
+def test_a_reference_without_a_sequence_still_needs_a_directory(tmp_path):
+    records, _ = _reuse_volume(tmp_path)
+    assert analyze_ntfs_journal._folder_path(records, 95, 0) == "Users\\Tor Browser\\Data"
+    assert analyze_ntfs_journal._folder_path(records, 90, 0) == "<unresolved:90>"
+
+
+def test_generic_file_names_only_count_inside_a_tor_folder():
+    is_tor = analyze_ntfs_journal._is_tor_related
+    # Names only Tor writes count anywhere.
+    assert is_tor("cached-microdesc-consensus", "Windows\\cached-microdesc-consensus")
+    assert is_tor(f"{AUTH}.auth_private", "<unresolved:9>\\" + f"{AUTH}.auth_private")
+    # Names other programs use too count only inside a Tor folder.
+    for name in ("state", "lock", "places.sqlite", "prefs.js"):
+        assert not is_tor(name, f"ProgramData\\USOShared\\{name}"), name
+        assert not is_tor(name, f"<unresolved:105397>\\{name}"), name
+        assert not is_tor(name, f"Users\\u\\AppData\\Roaming\\Mozilla\\Firefox\\p\\{name}"), name
+        assert is_tor(name, f"Users\\u\\Desktop\\Tor Browser\\Browser\\x\\{name}"), name
+        assert is_tor(name, f"Users\\u\\AppData\\Roaming\\tor\\{name}"), name
+    # "tor" must be a whole folder name, not part of one.
+    assert not is_tor("state", "Program Files\\Editor\\state")
+    assert not is_tor("lock", "Users\\u\\Storage\\lock")

@@ -8,7 +8,9 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username: str) -> dict:
+def module_kwargs_from_resolved(
+    resolved: dict, onion: str, host: str, username: str, cookie_names: str = ""
+) -> dict:
     """Same shape main.py's argparse builds -- see main.py's module_kwargs dict -- just
     sourced from analyze_evidence.resolve_evidence()'s output plus the GUI's targeting
     fields, instead of parsed CLI flags. `resolved` may also carry the inputs that are
@@ -23,6 +25,8 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
             "ntuser": _path("ntuser"),
             "system": _path("system"),
             "amcache": _path("amcache"),
+            "software": _path("software"),
+            "usrclass": _path("usrclass"),
         },
         "module_b_disk": {
             "profile_dir": _path("disk_profile"),
@@ -30,12 +34,14 @@ def module_kwargs_from_resolved(resolved: dict, onion: str, host: str, username:
             "disk_image": _path("disk_image"),
             "disk_root": _path("disk_root"),
             "downloads_scan": _path("downloads_scan"),
+            "ntfs_dir": _path("ntfs_dir"),
         },
         "module_c_memory": {
             "dump": _path("dump"),
             "onion": onion or None,
             "host": host or None,
             "username": username or None,
+            "cookie_names": [n.strip() for n in cookie_names.split(",") if n.strip()] or None,
             "source_type": resolved.get("source_type", "process"),
             "vol3_path": resolved.get("vol3_path") or None,
             "vol3_extract_process": resolved.get("vol3_extract_process") or None,

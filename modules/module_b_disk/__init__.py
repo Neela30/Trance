@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import traceback
 from pathlib import Path
 
 from core.config import TranceConfig
+from core.exceptions import IntegrityError
 from core.schema import Artifact, ModuleResult
 
 MODULE_NAME = "module_b_disk"
@@ -188,22 +190,23 @@ def _carve_artifacts(report: dict) -> list[Artifact]:
 
 
 def _download_artifacts(scan: dict) -> list[Artifact]:
+    """One artifact per internet-origin file created while the Tor daemon was running.
+
+    Zone.Identifier is on every browser download and every file extracted from a
+    downloaded archive, so a whole-disk scan finds hundreds. Only files correlated to the
+    daemon window are findings; the full list stays in `details` as observations."""
     source = scan["volume_root"]
-    window = scan.get("tor_daemon_window")
+    window = scan.get("tor_daemon_window") or {}
     artifacts = []
     for hit in scan["internet_origin_files"]:
+        if hit.get("within_tor_daemon_window") is not True:
+            continue
         stamps = hit["timestamps"]
         created = stamps["created_utc"] or stamps["modified_utc"]
-        within = hit.get("within_tor_daemon_window")
-        if within is True:
-            correlation = (
-                f"created while the Tor daemon was running ({window['start_utc']} to "
-                f"{window['end_utc']}); network origin established, source URL not recoverable"
-            )
-        elif within is False:
-            correlation = "created outside the last recorded Tor daemon window"
-        else:
-            correlation = "no Tor daemon window available for correlation"
+        correlation = (
+            f"created while the Tor daemon was running ({window['start_utc']} to "
+            f"{window['end_utc']}); network origin established, source URL not recoverable"
+        )
         recycled = hit.get("recycle_bin")
         if recycled:
             deleted = f", deleted {recycled['deleted_utc']}" if recycled.get("deleted_utc") else ""
@@ -271,6 +274,24 @@ def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
                 "verify this is not an examiner transfer file before treating it as evidence"
             )
         artifacts.append(Artifact(MODULE_NAME, "ntfs_onion_address", source, description))
+    for cred in ntfs.get("mft", {}).get("resident_auth_credentials", []):
+        state = "deleted file" if cred["deleted"] else "file"
+        loadable = (
+            ""
+            if cred["loadable_by_tor"]
+            else "; filename does not end in .auth_private, so tor never loaded it"
+        )
+        artifacts.append(
+            Artifact(
+                MODULE_NAME,
+                "ntfs_onion_client_auth",
+                source,
+                f"Client credential for {cred['onion_address']} recovered from the content of "
+                f"{state} {cred['path']} ($MFT record {cred['record']}){loadable}; "
+                "configuration, not proof of a visit",
+                timestamp=cred.get("created_utc"),
+            )
+        )
     for stream in ntfs.get("mft", {}).get("zone_identifier_streams", []):
         if not stream["deleted"]:
             continue
@@ -326,6 +347,61 @@ def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
     return artifacts
 
 
+def load_ntfs_export(ntfs_dir: Path) -> dict[str, Path]:
+    """The exported volumes under trance-acquire's disk/ntfs folder, each verified
+    against its own hashes.sha256 first, same as the profile/tor_dir copies."""
+    from modules.module_b_disk.analyze_ntfs_journal import exported_volumes
+    from modules.module_b_disk.evidence import verify_hashes
+
+    volumes = exported_volumes(ntfs_dir)
+    if not volumes:
+        raise ValueError(f"no exported $MFT/$UsnJrnl found under {ntfs_dir}")
+    for label, folder in volumes.items():
+        verification = verify_hashes(folder)
+        failures = {k: v for k, v in verification.items() if v["status"] != "match"}
+        if failures:
+            raise IntegrityError(f"Volume {label}: manifest verification failed: {failures}")
+    return volumes
+
+
+def _analyze_ntfs_export(ntfs_dir: Path, details: dict, artifacts: list, record_failure) -> None:
+    try:
+        volumes = load_ntfs_export(ntfs_dir)
+    except Exception as exc:
+        details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("ntfs", "NTFS export verification", exc)
+        return
+    try:
+        from modules.module_b_disk.analyze_ntfs_journal import (
+            analyze_exported_volume,
+            merge_ntfs_reports,
+        )
+
+        details["ntfs"] = merge_ntfs_reports(
+            {label: analyze_exported_volume(folder) for label, folder in volumes.items()}
+        )
+        if not details["ntfs"].get("error"):
+            daemon = details.get("tor_daemon", {})
+            window = daemon_window(daemon) if not daemon.get("error") else None
+            artifacts.extend(_ntfs_artifacts(details["ntfs"], window))
+    except Exception as exc:
+        details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("ntfs", "NTFS metadata analysis", exc)
+    try:
+        from modules.module_b_disk.analyze_memory_residue import (
+            carve_residue,
+            merge_residue_reports,
+        )
+
+        details["memory_residue"] = merge_residue_reports(
+            {label: carve_residue(folder) for label, folder in volumes.items()}
+        )
+        artifacts.extend(_residue_artifacts(details["memory_residue"]))
+    except Exception as exc:
+        details["memory_residue"] = {"error": f"{type(exc).__name__}: {exc}"}
+        record_failure("memory_residue", "memory residue carve", exc)
+
+
 def run(
     config: TranceConfig,
     profile_dir: Path | None = None,
@@ -333,9 +409,10 @@ def run(
     disk_image: Path | None = None,
     disk_root: Path | None = None,
     downloads_scan: Path | None = None,
+    ntfs_dir: Path | None = None,
     **_: object,
 ) -> ModuleResult:
-    if not any((profile_dir, tor_dir, disk_image, disk_root, downloads_scan)):
+    if not any((profile_dir, tor_dir, disk_image, disk_root, downloads_scan, ntfs_dir)):
         return ModuleResult(
             module=MODULE_NAME, status="skipped", message="no disk evidence supplied"
         )
@@ -343,6 +420,33 @@ def run(
     details: dict[str, dict] = {}
     artifacts: list[Artifact] = []
     errors = []
+    # Uniform {"artifact_type", "source", "reason", "traceback"} shape -- same as Module
+    # A's (see core.schema.ModuleResult's docstring) so root report.py's Module-status
+    # card renders either module's failures the same way. Each of the 6 sub-analyses
+    # below was already independently isolated before this change (one failing has
+    # never stopped the others); this only adds traceback capture and the shared
+    # warnings record feeding the status below.
+    warnings: list[dict] = []
+    # A hash-verification failure (IntegrityError) means that sub-analysis's evidence
+    # cannot be trusted at all -- the same "error" reservation Module A's __init__.py
+    # makes for a whole-hive IntegrityError. Every other exception is a single
+    # sub-analysis failing to run, which degrades to "partial" instead (one bad
+    # analysis must not hide every OTHER sub-analysis's real findings).
+    integrity_failures: list[str] = []
+
+    def _record_failure(source: str, label: str, exc: Exception) -> None:
+        errors.append(f"{label} failed")
+        if isinstance(exc, IntegrityError):
+            integrity_failures.append(label)
+        warnings.append(
+            {
+                "artifact_type": label,
+                "source": source,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            }
+        )
+
     if profile_dir:
         try:
             from modules.module_b_disk.recover_evidence import analyze_profile
@@ -353,7 +457,7 @@ def run(
                 errors.append("profile analysis incomplete")
         except Exception as exc:
             details["profile"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("profile analysis failed")
+            _record_failure("profile", "profile analysis", exc)
     if tor_dir:
         try:
             from modules.module_b_disk.analyze_tor_datadir import analyze_tor_directory
@@ -364,7 +468,7 @@ def run(
                 errors.append("Tor daemon analysis incomplete")
         except Exception as exc:
             details["tor_daemon"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("Tor daemon analysis failed")
+            _record_failure("tor_daemon", "Tor daemon analysis", exc)
     if disk_image:
         try:
             from modules.module_b_disk.carve_onion_strings import scan
@@ -376,7 +480,7 @@ def run(
             artifacts.extend(_carve_artifacts(details["raw_carve"]))
         except Exception as exc:
             details["raw_carve"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("raw-image carve failed")
+            _record_failure("raw_carve", "raw-image carve", exc)
     if downloads_scan and not disk_root:
         # A mounted volume (disk_root) is the stronger source when both exist; the live
         # scan is what trance-acquire.exe produces when there's no imaged volume.
@@ -389,7 +493,7 @@ def run(
             artifacts.extend(_download_artifacts(details["downloads"]))
         except Exception as exc:
             details["downloads"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("downloads scan analysis failed")
+            _record_failure("downloads", "downloads scan analysis", exc)
     if disk_root:
         try:
             from modules.module_b_disk.analyze_downloads import scan_volume
@@ -400,7 +504,7 @@ def run(
             artifacts.extend(_download_artifacts(details["downloads"]))
         except Exception as exc:
             details["downloads"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("volume download scan failed")
+            _record_failure("downloads", "volume download scan", exc)
         try:
             from modules.module_b_disk.analyze_memory_residue import carve_residue
 
@@ -408,7 +512,7 @@ def run(
             artifacts.extend(_residue_artifacts(details["memory_residue"]))
         except Exception as exc:
             details["memory_residue"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("memory residue carve failed")
+            _record_failure("memory_residue", "memory residue carve", exc)
         try:
             from modules.module_b_disk.analyze_ntfs_journal import analyze_ntfs
 
@@ -422,6 +526,18 @@ def run(
             errors.append("NTFS metadata analysis failed")
     any_ok = any(isinstance(v, dict) and "error" not in v for v in details.values())
     status = "ok" if not errors else ("partial" if any_ok else "error")
+            _record_failure("ntfs", "NTFS metadata analysis", exc)
+
+    if ntfs_dir and not disk_root:
+        # trance-acquire's raw-volume export of the same metafiles; a mounted volume
+        # (disk_root) already covers them, and more, when both exist.
+        _analyze_ntfs_export(Path(ntfs_dir), details, artifacts, _record_failure)
+
+    details["warnings"] = warnings
+    # "error" only for an integrity (hash-verification) failure; "partial" for any other
+    # sub-analysis failure (some succeeded, some didn't); root report.py's presenter
+    # gate still treats "partial" as "show the full disk section", same as Module A.
+    status = "error" if integrity_failures else ("partial" if errors else "ok")
     return ModuleResult(
         module=MODULE_NAME,
         status=status,

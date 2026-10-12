@@ -7,6 +7,9 @@ did to disk, independent of what those programs chose to persist:
                 small (resident) contents survive until the record is reused.
                 Zone.Identifier streams are resident, so a download's mark-of-
                 the-web is recoverable here even after the file was removed.
+                So is a client-auth credential: an .auth_private file is ~130
+                bytes, so its whole content (bare address + x25519 key) lives in
+                the record and outlives deleting the Tor Browser folder.
   $UsnJrnl:$J   the change journal: a timestamped log of every create, write,
                 rename, stream change and delete, by name. tor writes client-auth
                 credentials as <onion>.auth_private (via a .tmp rename) and the
@@ -39,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from modules.module_b_disk.analyze_downloads import parse_zone_identifier
-from modules.module_b_disk.carve_onion_strings import ONION_RE
+from modules.module_b_disk.carve_onion_strings import AUTH_CRED_RE, ONION_RE
 from modules.module_b_disk.onion import is_v3_onion
 
 MFT_RECORD_SIZE = 1024
@@ -136,6 +139,7 @@ def parse_mft_record(raw: bytes, number: int) -> dict | None:
         "name": None,
         "namespace": None,
         "parent": None,
+        "parent_sequence": None,
         "created_utc": None,
         "modified_utc": None,
         "fn_created_utc": None,
@@ -180,6 +184,7 @@ def parse_mft_record(raw: bytes, number: int) -> dict | None:
                 entry["name"] = fname
                 entry["namespace"] = namespace
                 entry["parent"] = parent_ref & 0xFFFFFFFFFFFF
+                entry["parent_sequence"] = parent_ref >> 48
                 entry["fn_created_utc"] = _filetime(fn_created)
                 entry["size"] = real_size
         elif attr_type == ATTR_DATA:
@@ -209,33 +214,78 @@ def parse_mft(path: Path) -> dict[int, dict]:
     return records
 
 
-def resolve_path(records: dict[int, dict], number: int) -> str:
+def _is_parent_of(entry: dict, sequence: int | None) -> bool:
+    """Whether MFT entry `entry` is still the directory a reference with `sequence` meant.
+
+    A file reference is a record number plus a sequence number, and NTFS reuses record
+    numbers: when it frees a record it increments the sequence, so a stale reference stops
+    matching. Resolving by record number alone (as this used to) attached old entries to
+    whatever now holds the number -- a reviewer found "prefs.js\\contrast-black" and
+    "Tor\\state\\LargeTile.scale-100.png" (files used as folders), and unrelated WindowsApps
+    files counted as Tor activity. A parent must be a directory, and its sequence must match,
+    or be one higher on a record that is no longer in use (a deleted directory that still
+    holds its name). A sequence of 0 means none was recorded, so only the directory check
+    applies."""
+    if not entry["is_dir"]:
+        return False
+    if not sequence:
+        return True
+    current = entry["sequence"]
+    return current == sequence or (not entry["in_use"] and current == (sequence + 1) & 0xFFFF)
+
+
+def _folder_path(records: dict[int, dict], parent: int | None, sequence: int | None) -> str:
+    """The folder a reference (record number + sequence) points at, as a path from the root;
+    "<unresolved:N>" where a link in the chain is missing, reused or not a directory."""
     parts = []
     seen = set()
-    current = number
-    while current in records and current not in seen and current != ROOT_RECORD:
+    current, expected = parent, sequence
+    while current is not None and current != ROOT_RECORD:
+        entry = records.get(current)
+        if entry is None or current in seen or not _is_parent_of(entry, expected):
+            parts.append(f"<unresolved:{current}>")
+            break
         seen.add(current)
-        entry = records[current]
         parts.append(entry["name"])
-        current = entry["parent"]
-    if current != ROOT_RECORD:
-        parts.append(f"<unresolved:{current}>")
+        current, expected = entry["parent"], entry.get("parent_sequence")
     return "\\".join(reversed(parts))
 
 
+def resolve_path(records: dict[int, dict], number: int) -> str:
+    if number == ROOT_RECORD:
+        return ""
+    entry = records.get(number)
+    if entry is None:
+        return f"<unresolved:{number}>"
+    folder = _folder_path(records, entry["parent"], entry.get("parent_sequence"))
+    return f"{folder}\\{entry['name']}" if folder else entry["name"]
+
+
+# Daemon file names other programs use too. Like Firefox's own profile file names (a plain
+# Firefox install writes places.sqlite and prefs.js as well), they only count inside a Tor
+# folder: by name alone, every "state" file Windows writes was counted as Tor activity.
+GENERIC_DAEMON_FILES = frozenset({"state", "lock"})
+# A Tor Browser install, or a folder named "tor" (the tor daemon's own default data folder,
+# %APPDATA%\tor, and the Data\Tor folder inside Tor Browser).
+TOR_FOLDER_RE = re.compile(r"tor ?browser|torbrowser|(?:^|\\)tor(?:\\|$)", re.IGNORECASE)
+
+
 def _is_tor_related(name: str, path: str) -> bool:
-    return bool(
-        TOR_PATH_RE.search(path)
-        or AUTH_PRIVATE_RE.match(name)
-        or name in TOR_DAEMON_FILES
-        or PROFILE_FILE_RE.match(name)
-    )
+    if TOR_PATH_RE.search(path) or AUTH_PRIVATE_RE.match(name):
+        return True
+    if name in TOR_DAEMON_FILES and name not in GENERIC_DAEMON_FILES:
+        return True
+    if name in GENERIC_DAEMON_FILES or PROFILE_FILE_RE.match(name):
+        folder = path.rsplit("\\", 1)[0] if "\\" in path else ""
+        return bool(TOR_FOLDER_RE.search(folder))
+    return False
 
 
 def analyze_mft_records(records: dict[int, dict]) -> dict:
     onion_files = []
     zone_streams = []
     resident_onions = []
+    resident_creds = []
     deleted_tor = []
     for number, entry in records.items():
         name = entry["name"]
@@ -288,6 +338,28 @@ def analyze_mft_records(records: dict[int, dict]) -> dict:
                         "onion_addresses": found,
                     }
                 )
+            # Credential files store the address bare (no ".onion"), so ONION_RE above
+            # never sees them.
+            for m in AUTH_CRED_RE.finditer(data):
+                address = m.group(1).decode().lower()
+                if not is_v3_onion(address):
+                    continue
+                resident_creds.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "record": number,
+                        "deleted": deleted,
+                        "onion_address": address + ".onion",
+                        "x25519_private_key": m.group(2).decode(),
+                        # tor only loads files ending exactly in ".auth_private"; any other
+                        # name (e.g. a hand-made "key.auth_private.txt") was never used by
+                        # tor -- same rule analyze_tor_datadir applies to live files.
+                        "loadable_by_tor": name.lower().endswith(".auth_private"),
+                        "created_utc": entry["created_utc"] or entry["fn_created_utc"],
+                        "modified_utc": entry["modified_utc"],
+                    }
+                )
         if deleted and _is_tor_related(name, path):
             deleted_tor.append(
                 {
@@ -303,6 +375,7 @@ def analyze_mft_records(records: dict[int, dict]) -> dict:
         "onion_filenames": onion_files,
         "zone_identifier_streams": zone_streams,
         "resident_onion_strings": resident_onions,
+        "resident_auth_credentials": resident_creds,
         "deleted_tor_files": deleted_tor[:MAX_EVENTS],
     }
 
@@ -379,6 +452,7 @@ def parse_usn_record(record: bytes) -> dict | None:
         "reasons": [label for bit, label in USN_REASONS.items() if reason & bit],
         "record": file_ref & 0xFFFFFFFFFFFF,
         "parent": parent_ref & 0xFFFFFFFFFFFF,
+        "parent_sequence": parent_ref >> 48,
         "name": name,
     }
 
@@ -408,12 +482,13 @@ def analyze_usn(path: Path, records: dict[int, dict]) -> dict:
     temp_created: dict[int, dict] = {}
     pending_rename: dict[int, dict] = {}
     recent_download: dict[int, dict] = {}
-    path_cache: dict[int, str] = {}
+    path_cache: dict[tuple[int, int], str] = {}
 
-    def parent_path(parent: int) -> str:
-        if parent not in path_cache:
-            path_cache[parent] = resolve_path(records, parent) if records else ""
-        return path_cache[parent]
+    def parent_path(parent: int, sequence: int) -> str:
+        key = (parent, sequence)
+        if key not in path_cache:
+            path_cache[key] = _folder_path(records, parent, sequence) if records else ""
+        return path_cache[key]
 
     for raw in _iter_usn_records(path):
         rec = parse_usn_record(raw)
@@ -422,7 +497,7 @@ def analyze_usn(path: Path, records: dict[int, dict]) -> dict:
         total += 1
         first = first or rec["time_utc"]
         last = rec["time_utc"] or last
-        folder = parent_path(rec["parent"])
+        folder = parent_path(rec["parent"], rec["parent_sequence"])
         full = f"{folder}\\{rec['name']}" if folder else rec["name"]
         match = AUTH_PRIVATE_RE.match(rec["name"])
         if match:
@@ -540,6 +615,11 @@ def analyze_ntfs(
             found = entry(address)
             found["sources"].add("mft_resident_data")
             found["paths"].append(item["path"])
+    for item in report.get("mft", {}).get("resident_auth_credentials", []):
+        found = entry(item["onion_address"])
+        found["sources"].add("mft_resident_credential")
+        found["deleted"] = found["deleted"] or item["deleted"]
+        found["paths"].append(item["path"])
     for item in report.get("usnjrnl", {}).get("onion_filenames", []):
         found = entry(item["onion_address"])
         found["sources"].add("usnjrnl")
@@ -553,6 +633,160 @@ def analyze_ntfs(
         for address, v in sorted(addresses.items())
     }
     return report
+
+
+# Layout trance-acquire's acquire_ntfs.py writes per volume (disk/ntfs/<letter>/).
+EXPORTED_MFT = "MFT"
+EXPORTED_USNJRNL = "UsnJrnl_J"
+EXPORTED_METADATA = "ntfs_metadata.json"
+
+
+def exported_volumes(ntfs_dir: Path) -> dict[str, Path]:
+    """{drive label: folder} for each exported volume under an acquire_ntfs.py output
+    folder (or the folder itself, if it is a single volume's export)."""
+    ntfs_dir = ntfs_dir.resolve(strict=True)
+    candidates = [ntfs_dir] + sorted(p for p in ntfs_dir.iterdir() if p.is_dir())
+    volumes: dict[str, Path] = {}
+    for folder in candidates:
+        if not ((folder / EXPORTED_MFT).is_file() or (folder / EXPORTED_USNJRNL).is_file()):
+            continue
+        label = folder.name
+        try:
+            meta = json.loads((folder / EXPORTED_METADATA).read_text(encoding="utf-8"))
+            label = meta.get("drive") or label
+        except (OSError, ValueError):
+            pass
+        volumes[label.rstrip(":").upper()] = folder
+    return volumes
+
+
+def analyze_exported_volume(folder: Path) -> dict:
+    mft = folder / EXPORTED_MFT
+    usn = folder / EXPORTED_USNJRNL
+    report = analyze_ntfs(
+        mft=mft if mft.is_file() else None, usnjrnl=usn if usn.is_file() else None
+    )
+    try:
+        meta = json.loads((folder / EXPORTED_METADATA).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    report["acquisition"] = {
+        "metafile_source": meta.get("metafile_source"),
+        "warnings": meta.get("warnings", []),
+    }
+    return report
+
+
+def _prefix_paths(node: object, prefix: str) -> object:
+    if isinstance(node, dict):
+        out = {}
+        for key, value in node.items():
+            if key == "path" and isinstance(value, str):
+                out[key] = prefix + value
+            elif key == "paths" and isinstance(value, list):
+                out[key] = [prefix + v for v in value]
+            elif key in ("sources", "acquisition"):
+                out[key] = value
+            else:
+                out[key] = _prefix_paths(value, prefix)
+        return out
+    if isinstance(node, list):
+        return [_prefix_paths(v, prefix) for v in node]
+    return node
+
+
+def merge_ntfs_reports(reports: dict[str, dict]) -> dict:
+    """One analyze_ntfs()-shaped report from several volumes' reports, every path
+    prefixed with its drive ("C:\\Users\\..."), so Module B's presenter and artifact
+    builder treat a multi-volume export exactly like one mounted volume."""
+    prefixed = {label: _prefix_paths(report, f"{label}:\\") for label, report in reports.items()}
+    usable = {k: r for k, r in prefixed.items() if not r.get("error")}
+    merged: dict = {
+        "sources": {
+            key: "; ".join(
+                f"{label}: {r['sources'][key]}"
+                for label, r in usable.items()
+                if r["sources"].get(key)
+            )
+            or None
+            for key in ("mft", "usnjrnl")
+        },
+        "note": next(iter(prefixed.values()))["note"] if prefixed else "",
+        "volumes": {
+            label: {
+                "error": r.get("error"),
+                "mft_records": r.get("mft", {}).get("records"),
+                "usn_records": r.get("usnjrnl", {}).get("records"),
+                **r.get("acquisition", {}),
+            }
+            for label, r in prefixed.items()
+        },
+    }
+    if not usable:
+        merged["error"] = "; ".join(f"{k}: {r['error']}" for k, r in prefixed.items()) or (
+            "no exported volume found"
+        )
+        return merged
+    mfts = [r["mft"] for r in usable.values() if "mft" in r]
+    if mfts:
+        merged["mft"] = {
+            "records": sum(m["records"] for m in mfts),
+            "in_use": sum(m["in_use"] for m in mfts),
+            **{
+                key: [item for m in mfts for item in m.get(key, [])]
+                for key in (
+                    "onion_filenames",
+                    "zone_identifier_streams",
+                    "resident_onion_strings",
+                    "resident_auth_credentials",
+                    "deleted_tor_files",
+                )
+            },
+        }
+    usns = [r["usnjrnl"] for r in usable.values() if "usnjrnl" in r]
+    if usns:
+        events = sorted(
+            (e for u in usns for e in u["tor_events"]), key=lambda e: e["time_utc"] or ""
+        )[-MAX_EVENTS:]
+        windows = [u["tor_activity_window"] for u in usns if u["tor_activity_window"]]
+        firsts = [u["journal_first_utc"] for u in usns if u["journal_first_utc"]]
+        lasts = [u["journal_last_utc"] for u in usns if u["journal_last_utc"]]
+        total = sum(u["tor_events_total"] for u in usns)
+        merged["usnjrnl"] = {
+            "records": sum(u["records"] for u in usns),
+            "journal_first_utc": min(firsts) if firsts else None,
+            "journal_last_utc": max(lasts) if lasts else None,
+            "tor_events": events,
+            "tor_events_total": total,
+            "tor_events_truncated": total > len(events),
+            "tor_activity_window": (
+                {
+                    "first_utc": min(w["first_utc"] for w in windows),
+                    "last_utc": max(w["last_utc"] for w in windows),
+                    "events": sum(w["events"] for w in windows),
+                }
+                if windows
+                else None
+            ),
+            "onion_filenames": [o for u in usns for o in u["onion_filenames"]],
+            "downloads": [d for u in usns for d in u["downloads"]],
+        }
+    addresses: dict[str, dict] = {}
+    for report in usable.values():
+        for address, info in report.get("onion_addresses", {}).items():
+            entry = addresses.setdefault(address, {"sources": set(), "deleted": False, "paths": []})
+            entry["sources"].update(info["sources"])
+            entry["deleted"] = entry["deleted"] or info["deleted"]
+            entry["paths"].extend(info["paths"])
+    merged["onion_addresses"] = {
+        address: {
+            "sources": sorted(v["sources"]),
+            "deleted": v["deleted"],
+            "paths": sorted(set(v["paths"])),
+        }
+        for address, v in sorted(addresses.items())
+    }
+    return merged
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -583,6 +817,7 @@ def main(argv: list[str] | None = None) -> int:
             f"$MFT: {m['records']} named records, {m['in_use']} in use; "
             f"{len(m['onion_filenames'])} onion filename(s), "
             f"{len(m['zone_identifier_streams'])} Zone.Identifier stream(s), "
+            f"{len(m['resident_auth_credentials'])} client-auth credential(s) in record content, "
             f"{len(m['deleted_tor_files'])} deleted Tor-related file(s)"
         )
     if "usnjrnl" in report:

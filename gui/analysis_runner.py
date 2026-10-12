@@ -67,14 +67,17 @@ def run(request_path: Path) -> int:
     try:
         request = AnalysisRequest.from_json(Path(request_path).read_text(encoding="utf-8"))
         inputs = effective_inputs(request)
+        for note in inputs.get("volume_notes", []):
+            print(f"[*] {note}")
         module_kwargs = module_kwargs_from_resolved(
-            inputs, request.onion, request.host, request.username
+            inputs, request.onion, request.host, request.username, request.cookie_names
         )
         request.case_dir.mkdir(parents=True, exist_ok=True)
         config = TranceConfig(
             case_name=request.case_name,
             output_dir=request.case_dir,
             evidence_dir=Path(request.evidence_dir) if request.evidence_dir else None,
+            report_timezone=request.report_timezone or None,
         )
         result = main.run_pipeline(
             config,

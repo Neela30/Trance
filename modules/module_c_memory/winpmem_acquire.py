@@ -108,16 +108,27 @@ def acquire(winpmem_path: Path, output_dir: Path, extra_args: list[str] | None =
 
     print(f"[*] Running WinPMEM: {winpmem_path} -> {image_path}")
     result = run_winpmem(winpmem_path, image_path, extra_args)
-    if result.returncode != 0:
+    written = image_path.exists() and image_path.stat().st_size > 0
+    if not written:
         image_path.unlink(missing_ok=True)
-        raise AcquisitionError(
-            f"WinPMEM exited with code {result.returncode}.\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
-        )
-    if not image_path.exists() or image_path.stat().st_size == 0:
-        image_path.unlink(missing_ok=True)
+        if result.returncode != 0:
+            raise AcquisitionError(
+                f"WinPMEM exited with code {result.returncode}.\n"
+                f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+            )
         raise AcquisitionError(
             "WinPMEM reported success (exit 0) but produced no output file, or an empty one."
+        )
+    # A non-empty image is evidence: never delete it over the exit code alone. Real
+    # winpmem_mini_x64_rc2.exe runs copied all of RAM, unloaded its driver and still exited
+    # with code 1, so the exit code isn't a reliable success signal. Keep the image and
+    # record the code so the examiner can judge it.
+    exit_note = ""
+    if result.returncode != 0:
+        exit_note = f", WinPMEM exit code {result.returncode} (image kept; verify completeness)"
+        print(
+            f"[!] WinPMEM exited with code {result.returncode} but wrote an image; "
+            "keeping it. Check the WinPMEM output above for errors."
         )
 
     total_bytes = image_path.stat().st_size
@@ -132,7 +143,7 @@ def acquire(winpmem_path: Path, output_dir: Path, extra_args: list[str] | None =
             sha256=digest,
             action="acquire",
             notes=f"full-memory image via WinPMEM ({winpmem_path.name}), source_type=full-memory, "
-            f"{total_bytes} bytes",
+            f"{total_bytes} bytes{exit_note}",
         )
     )
     custody.save()

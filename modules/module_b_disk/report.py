@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import datetime as dt
 
+from modules.module_b_disk.acquire_downloads import SKIP_DIR_NAMES
+from modules.module_b_disk.onion import is_v3_onion
+
 PRTIME_UNITS_PER_SECOND = 1_000_000
 
 
@@ -188,7 +191,7 @@ def _num(value: str | None) -> str:
 
 
 def _downloads_context(scan: dict) -> dict:
-    hits = [
+    all_hits = [
         {
             "path": h["path"],
             "size": h["size"],
@@ -211,10 +214,24 @@ def _downloads_context(scan: dict) -> dict:
         }
         for h in scan.get("internet_origin_files", [])
     ]
+    # Only files created inside the Tor daemon window are listed (same rule as the
+    # artifacts); the rest are counted so the report still says how many were skipped.
+    hits = [h for h in all_hits if h["within_window"] is True]
     window = scan.get("tor_daemon_window")
     return {
         "volume_root": scan.get("volume_root"),
         "live_scan": scan.get("scan_method") == "live_windows",
+        # A mounted volume is walked in full; the live scan on the target skips Windows'
+        # own folders and AppData (acquire_downloads.SKIP_DIR_NAMES), so it is not "the
+        # whole volume" and the report must not say it is.
+        "scope": (
+            "by the live scan"
+            if scan.get("scan_method") == "live_windows"
+            else "on the whole volume"
+        ),
+        "skipped_folders": (
+            sorted(SKIP_DIR_NAMES) if scan.get("scan_method") == "live_windows" else []
+        ),
         "files_walked": scan.get("files_walked", 0),
         "scan_seconds": scan.get("scan_seconds"),
         "xattr_support": scan.get("xattr_support"),
@@ -228,10 +245,11 @@ def _downloads_context(scan: dict) -> dict:
             else None
         ),
         "hits": hits,
+        "total": len(all_hits),
         "recycled": sum(1 for h in hits if h["recycled"]),
-        "inside": sum(1 for h in hits if h["within_window"] is True),
-        "outside": sum(1 for h in hits if h["within_window"] is False),
-        "unknown": sum(1 for h in hits if h["within_window"] is None),
+        "inside": len(hits),
+        "outside": sum(1 for h in all_hits if h["within_window"] is False),
+        "unknown": sum(1 for h in all_hits if h["within_window"] is None),
         "any_url_fields": any(h["host_url"] or h["referrer_url"] for h in hits),
         "note": scan.get("note"),
     }
@@ -253,6 +271,19 @@ def _carve_context(carve: dict) -> dict:
     }
 
 
+def _valid_onions(record: dict) -> set[str]:
+    """The v3 onion addresses one residue file holds, by the same rule
+    analyze_memory_residue.carve_residue() uses for the volume-wide list, so the per-file
+    count and the summary can't disagree (they did: a 16-character string shaped like a
+    dead v2 address counted as 1 in the table and 0 in the summary)."""
+    found = {a for a in record.get("onion_addresses", {}) if is_v3_onion(a)}
+    for name in record.get("utf16_filenames", {}):
+        host = name.split(".")[0]
+        if is_v3_onion(host):
+            found.add(host + ".onion")
+    return found
+
+
 def _residue_context(residue: dict) -> dict:
     files = [
         {
@@ -262,7 +293,13 @@ def _residue_context(residue: dict) -> dict:
             "modified": _iso(f.get("modified_utc")),
             "compressed": f.get("compressed", False),
             "error": f.get("error"),
-            "onion_count": len(f.get("onion_addresses", {})),
+            "onion_count": len(_valid_onions(f)),
+            # Strings the carve's pattern matched that aren't valid v3 addresses (the retired
+            # 16-character v2 form, or a 56-character string failing the v3 checksum) --
+            # in a pagefile almost always random text. Shown, not hidden, but not counted.
+            "invalid_onion_count": sum(
+                1 for a in f.get("onion_addresses", {}) if not is_v3_onion(a)
+            ),
             "credential_count": len(f.get("client_auth_credentials", [])),
             "markers": sorted(f.get("tor_markers", {})),
         }
@@ -296,7 +333,9 @@ def _ntfs_context(ntfs: dict) -> dict:
                 "sources": v["sources"],
                 "deleted": v["deleted"],
                 "paths": v.get("paths", []),
-                "filename_evidence": bool(set(v["sources"]) & {"mft", "usnjrnl"}),
+                "filename_evidence": bool(
+                    set(v["sources"]) & {"mft", "usnjrnl", "mft_resident_credential"}
+                ),
             }
             for a, v in ntfs.get("onion_addresses", {}).items()
         ],
@@ -313,6 +352,17 @@ def _ntfs_context(ntfs: dict) -> dict:
         "resident_onion_files": [
             {"path": r["path"], "deleted": r["deleted"], "addresses": r["onion_addresses"]}
             for r in mft.get("resident_onion_strings", [])
+        ],
+        "resident_credentials": [
+            {
+                "address": c["onion_address"],
+                "path": c["path"],
+                "record": c["record"],
+                "deleted": c["deleted"],
+                "loadable_by_tor": c["loadable_by_tor"],
+                "created": _iso(c.get("created_utc")),
+            }
+            for c in mft.get("resident_auth_credentials", [])
         ],
         "deleted_tor_files": [
             {"path": d["path"], "modified": _iso(d.get("modified_utc"))}
@@ -362,7 +412,11 @@ SECTIONS = (
 )
 
 
-def build_context(details: dict) -> dict:
+def build_context(details: dict, local_tz: str | None = None) -> dict:
+    # local_tz: unused for now -- accepted so root report.py can pass it to every
+    # module's build_context() uniformly. Module A's report.py (narrative.py) is the
+    # reference implementation for a plain-English section that uses it; add one here
+    # the same way when this module gets its own.
     sections = {}
     errors = {}
     notes = {}
@@ -378,6 +432,16 @@ def build_context(details: dict) -> dict:
                 errors[name] = section["error"]
             continue
         sections[name] = builder(section)
+    downloads, ntfs_details = sections.get("downloads"), details.get("ntfs") or {}
+    mft = ntfs_details.get("mft") if isinstance(ntfs_details, dict) else None
+    if downloads is not None and mft and "zone_identifier_streams" in mft:
+        # Independent coverage check: the $MFT lists every file on its volume, deleted
+        # ones included, whatever folder they are in.
+        streams = mft["zone_identifier_streams"]
+        downloads["mft_zone_streams"] = {
+            "total": len(streams),
+            "deleted": sum(1 for s in streams if s.get("deleted")),
+        }
     return {
         "supplied": [name for name, _ in SECTIONS if name in details],
         "errors": errors,

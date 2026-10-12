@@ -262,6 +262,10 @@ class TargetPage(_Page):
         self.host.setPlaceholderText("e.g. 1.2.3.4:8080")
         self.username = QLineEdit(self)
         self.username.setPlaceholderText("e.g. admin")
+        self.cookie_names = QLineEdit(self)
+        self.cookie_names.setPlaceholderText("e.g. sid, csrf_token — blank uses the built-in names")
+        self.report_timezone = QLineEdit(self)
+        self.report_timezone.setPlaceholderText("e.g. Asia/Colombo — blank uses this computer's")
         self.body.addLayout(
             labelled(
                 field_label("Host and port", self),
