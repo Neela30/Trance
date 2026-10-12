@@ -178,7 +178,7 @@ def parse_onion_auth(auth_dir: Path, metadata: dict | None = None) -> dict:
             "mtime_utc": _utc(f, file_metadata),
             "sha256": hash_file(f),
             "onion_address": (m.group(1) + ".onion") if m else None,
-            "x25519_private_key": m.group(2) if m else None,
+            "key_present": m is not None,
         }
         # tor only loads files ending exactly in ".auth_private"; anything else
         # in this directory was placed by a user and was never read by tor.

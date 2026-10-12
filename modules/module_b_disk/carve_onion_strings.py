@@ -166,7 +166,7 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
         "client_auth_credentials": [
             {
                 "onion_address": addr.decode() + ".onion",
-                "x25519_private_key": key.decode(),
+                "key_present": True,
                 "occurrences": auth_counts[(addr, key)],
                 "first_offsets": offs,
             }
@@ -217,7 +217,7 @@ def main() -> int:
     print(f"\n*** Tor client-auth credentials recovered: {len(creds)} ***")
     for c in creds:
         print(f"  hidden service : {c['onion_address']}")
-        print(f"  x25519 privkey : {c['x25519_private_key']}")
+        print(f"  x25519 privkey : [present — redacted from output]")
         print(
             f"  found at       : x{c['occurrences']}, "
             f"{', '.join(f'0x{o:x}' for o in c['first_offsets'][:6])}"
