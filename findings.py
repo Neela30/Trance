@@ -8,7 +8,8 @@ Shape:
       "modules": {
         "<module>": {"status", "message", "artifact_count", "warnings", "details": {...module-specific...}}
       },
-      "artifacts": [ ...every core.schema.Artifact from every module, flattened... ]
+      "artifacts": [ ...every core.schema.Artifact from every module, flattened... ],
+      "provenance": {...}   # added by main.run_pipeline -- see core/provenance.py
     }
 
 `artifacts` is the cross-module, uniform list (each entry carries its `module`), so

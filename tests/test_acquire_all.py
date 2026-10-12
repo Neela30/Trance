@@ -6,6 +6,7 @@ import pytest
 import acquire_all
 from core.exceptions import AcquisitionError
 from core.hashing import hash_bytes
+from core.version import __version__
 
 
 def test_acquire_refuses_on_non_windows(tmp_path, monkeypatch):
@@ -50,6 +51,9 @@ def test_acquire_writes_manifest_with_one_section_per_category(tmp_path, monkeyp
 
     written = json.loads((tmp_path / "acquire_manifest.json").read_text())
     assert written["registry"]["SYSTEM"]["path"] == "registry/SYSTEM_x"
+    assert written["acquired_by"]["tool"] == "trance-acquire"
+    assert written["acquired_by"]["version"] == __version__
+    assert written["acquired_by"]["hostname"]
 
 
 def test_acquire_writes_paths_relative_to_the_evidence_folder(tmp_path, monkeypatch):

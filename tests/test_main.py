@@ -23,6 +23,8 @@ def test_run_pipeline_matches_cli_main_for_the_same_inputs(tmp_path):
     direct_findings = json.loads(pipeline.findings_path.read_text())
     cli_findings["generated_at"] = direct_findings["generated_at"] = None
     cli_findings["case"]["output_dir"] = direct_findings["case"]["output_dir"] = None
+    for f in (cli_findings, direct_findings):
+        f["provenance"]["analysis_started_at"] = f["provenance"]["analysis_finished_at"] = None
     assert cli_findings == direct_findings
 
 

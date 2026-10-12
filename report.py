@@ -129,7 +129,31 @@ def _resolve_local_tz(local_tz: str | None) -> str | None:
         return None
 
 
-def render_report(findings: dict, local_tz: str | None = None) -> str:
+def _relative_to(value: str | None, base: str | None) -> str | None:
+    """An evidence path shown under the report's "Evidence dir" (already in the header)
+    rather than repeating that whole prefix on every row; unchanged when outside it."""
+    if not value or not base:
+        return value
+    try:
+        return Path(value).relative_to(Path(base)).as_posix()
+    except ValueError:
+        return value
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return "—"
+    size = float(value)
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{value:,} bytes" if unit == "bytes" else f"{size:,.1f} {unit}"
+        size /= 1024
+    return f"{value:,} bytes"
+
+
+def render_report(
+    findings: dict, local_tz: str | None = None, findings_sha256: str | None = None
+) -> str:
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
         # Not select_autoescape(["html"]): it decides by filename suffix and this template
@@ -140,6 +164,8 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
     )
     env.filters["fmt_ts"] = _format_timestamp
     env.filters["wrap_path"] = _wrap_path
+    env.filters["fmt_bytes"] = _format_bytes
+    env.filters["relative_to"] = _relative_to
     template = env.get_template(TEMPLATE_NAME)
 
     resolved_tz = _resolve_local_tz(local_tz)
@@ -192,11 +218,18 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
         memory=presented.get("module_c_memory"),
         generic_modules=generic,
         glossary=sorted(glossary.items()),
+        provenance=findings.get("provenance"),
+        findings_sha256=findings_sha256,
     )
 
 
-def write_report(findings: dict, output_dir: Path, local_tz: str | None = None) -> Path:
+def write_report(
+    findings: dict,
+    output_dir: Path,
+    local_tz: str | None = None,
+    findings_sha256: str | None = None,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / REPORT_FILENAME
-    path.write_text(render_report(findings, local_tz), encoding="utf-8")
+    path.write_text(render_report(findings, local_tz, findings_sha256), encoding="utf-8")
     return path

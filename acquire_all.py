@@ -32,13 +32,17 @@ same philosophy as every acquire.acquire_all() this wraps.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import platform
+import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from core.exceptions import AcquisitionError
 from core.hashing import hash_file
+from core.version import __version__
 from core.winadmin import is_admin
 from modules.module_a_registry import acquire as registry_acquire
 from modules.module_b_disk import acquire as disk_acquire
@@ -181,6 +185,24 @@ def _print_category(name: str, result: dict) -> None:
         print(f"[*] {name}.{key}: {status}{' — ' + detail if detail else ''}")
 
 
+def acquisition_context() -> dict:
+    """Which tool, machine and account made this capture -- printed in the analysis report's
+    provenance section next to the evidence it produced."""
+    try:
+        user = getpass.getuser()
+    except Exception:  # no login name available
+        user = None
+    return {
+        "tool": "trance-acquire",
+        "version": __version__,
+        "packaged": bool(getattr(sys, "frozen", False)),
+        "hostname": socket.gethostname(),
+        "os": platform.platform(),
+        "user": user,
+        "python": platform.python_version(),
+    }
+
+
 def acquire(
     output_dir: Path,
     include_registry: bool = True,
@@ -207,6 +229,7 @@ def acquire(
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict = {
         "acquired_at": datetime.now(timezone.utc).isoformat(),
+        "acquired_by": acquisition_context(),
         "registry": {},
         "memory": {},
         "disk": {},

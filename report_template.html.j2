@@ -78,6 +78,10 @@
   .chip.high, .chip.ok { background: var(--confirm-bg); color: var(--confirm); }
   .chip.low, .chip.skipped, .chip.not_implemented, .chip.partial { background: var(--noise-bg); color: var(--noise); }
   .chip.error { background: var(--accent-bg); color: var(--accent); }
+  .chip.verified { background: var(--confirm-bg); color: var(--confirm); }
+  .chip.unrecorded, .chip.not_hashed { background: var(--noise-bg); color: var(--noise); }
+  .chip.MISMATCH, .chip.missing { background: var(--accent-bg); color: var(--accent); }
+  .hash { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
   .path-list { display: flex; flex-wrap: wrap; gap: 8px; }
   .path-pill { font-family: ui-monospace, monospace; font-size: 12.5px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; }
   .path-pill.odd { border-color: var(--noise); color: var(--noise); }
@@ -126,6 +130,7 @@
       <dt>Artifacts</dt><dd>{{ findings.artifacts|length }} across all modules</dd>
       <dt>Output dir</dt><dd>{{ findings.case.output_dir|wrap_path }}</dd>
       {% if findings.case.evidence_dir %}<dt>Evidence dir</dt><dd>{{ findings.case.evidence_dir|wrap_path }}</dd>{% endif %}
+      {% if provenance %}<dt>Tool</dt><dd>TRANCE {{ provenance.tool.version }}{% if provenance.tool.git_commit %} · commit <span class="mono">{{ provenance.tool.git_commit[:12] }}</span>{% if provenance.tool.git_dirty %} (modified){% endif %}{% endif %}</dd>{% endif %}
     </dl>
   </div>
 
@@ -149,6 +154,57 @@
       {% endfor %}
     </div>
   </section>
+
+  {% if provenance %}
+  {% set items = provenance.evidence_items %}
+  {% set bad = items|selectattr("status", "in", ["MISMATCH", "missing"])|list %}
+  <section>
+    <div class="section-head"><h2>Evidence examined</h2><span class="count">{{ items|length }} item{{ "s" if items|length != 1 }} · SHA-256 checked against the hash recorded at acquisition</span></div>
+    {% if bad %}
+    <div class="callout"><strong>{{ bad|length }} evidence item{{ "s" if bad|length != 1 }} did not verify.</strong> A file that is missing or whose hash differs from the one recorded at acquisition cannot be shown to be the evidence that was collected; findings drawn from it should not be relied on until the difference is explained.</div>
+    {% endif %}
+    {% if items %}
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Item</th><th>File</th><th>Size</th><th>SHA-256 (now)</th><th>Check</th></tr></thead>
+        <tbody>
+          {% for it in items %}
+          <tr>
+            <td>{{ it.label }}</td>
+            <td class="mono" style="font-size:12px;">{{ it.path|relative_to(findings.case.evidence_dir)|wrap_path }}{% if it.note %}<div class="note" style="font-size:11.5px;">{{ it.note }}</div>{% endif %}</td>
+            <td class="mono" style="font-size:12px; white-space:nowrap;">{{ it.size_bytes|fmt_bytes }}</td>
+            <td class="hash">{{ it.sha256 or "—" }}{% if it.status == "MISMATCH" and it.acquisition_sha256 %}<div style="color:var(--accent);">recorded at acquisition: {{ it.acquisition_sha256 }}</div>{% endif %}</td>
+            <td><span class="chip {{ it.status }}">{{ {"verified": "matches acquisition", "MISMATCH": "hash differs", "unrecorded": "no acquisition hash", "missing": "missing", "not_hashed": "not hashed"}.get(it.status, it.status) }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="note">No evidence files were supplied to this analysis.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Analysis provenance</h2><span class="count">what produced this report — needed to repeat the analysis and get the same result</span></div>
+    <dl class="meta-grid">
+      <dt>Tool</dt><dd>TRANCE {{ provenance.tool.version }}{{ " (packaged build)" if provenance.tool.packaged }}</dd>
+      <dt>Source commit</dt><dd>{% if provenance.tool.git_commit %}<span class="mono">{{ provenance.tool.git_commit }}</span>{% if provenance.tool.git_dirty %} — <strong>with uncommitted changes</strong>; the exact code is not recoverable from this commit alone{% endif %}{% else %}not recorded{% endif %}</dd>
+      <dt>Analysis ran</dt><dd>{{ provenance.analysis_started_at }} → {{ provenance.analysis_finished_at }}</dd>
+      <dt>Examiner machine</dt><dd>{{ provenance.runtime.hostname }}{% if provenance.runtime.user %} · user {{ provenance.runtime.user }}{% endif %} · {{ provenance.runtime.platform }} · Python {{ provenance.runtime.python }}</dd>
+      <dt>Libraries</dt><dd class="mono" style="font-size:12px;">{% for name, v in provenance.runtime.libraries.items() if v %}{{ name }} {{ v }}{{ " · " if not loop.last }}{% endfor %}</dd>
+      {% set acq = provenance.acquisition %}
+      {% if acq %}
+      <dt>Acquired</dt><dd>{{ acq.acquired_at or "time not recorded" }}{% if acq.acquired_by %} on {{ acq.acquired_by.hostname or "unknown host" }}{% if acq.acquired_by.os %} ({{ acq.acquired_by.os }}){% endif %}{% if acq.acquired_by.user %} by {{ acq.acquired_by.user }}{% endif %} with {{ acq.acquired_by.tool or "trance-acquire" }} {{ acq.acquired_by.version or "" }}{% endif %}</dd>
+      <dt>Acquisition manifest</dt><dd>{{ acq.manifest|wrap_path }}{% if acq.manifest_sha256 %}<div class="hash">SHA-256 {{ acq.manifest_sha256 }}</div>{% endif %}</dd>
+      {% if acq.winpmem_path %}<dt>Memory imager</dt><dd>{{ acq.winpmem_path|wrap_path }}{% if acq.winpmem_sha256 %}<div class="hash">SHA-256 {{ acq.winpmem_sha256 }}</div>{% endif %}</dd>{% endif %}
+      {% if acq.custody_logs %}<dt>Acquisition custody logs</dt><dd class="mono" style="font-size:12px;">{% for c in acq.custody_logs %}{{ c|wrap_path }}{{ "; " if not loop.last }}{% endfor %}</dd>{% endif %}
+      {% else %}
+      <dt>Acquired</dt><dd>No <span class="mono">acquire_manifest.json</span> with this evidence — acquisition details are not recorded here.</dd>
+      {% endif %}
+    </dl>
+  </section>
+  {% endif %}
 
   {% if registry %}
   <div class="band">
@@ -1556,7 +1612,10 @@
   {% endif %}
 
   <footer>
-    <span>TRANCE · findings.json schema v{{ findings.schema_version }}</span>
+    <span>TRANCE{% if provenance %} {{ provenance.tool.version }}{% endif %} · findings.json schema v{{ findings.schema_version }}</span>
+    {% if findings_sha256 %}
+    <span>findings.json SHA-256 {{ findings_sha256 }}</span>
+    {% endif %}
     <span>{{ findings.generated_at }}</span>
   </footer>
 

@@ -22,11 +22,13 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
 from core.config import TranceConfig
 from core.custody_log import CustodyEntry, CustodyLog
 from core.hashing import hash_file
+from core.provenance import build_provenance
 from core.schema import ModuleResult
 from findings import build_findings, write_findings
 from report import write_report
@@ -133,11 +135,21 @@ def run_pipeline(
     each module and once more after writing outputs -- total_steps is len(MODULES) + 1.
     """
     total_steps = len(MODULES) + 1
+    started_at = datetime.now(timezone.utc).isoformat()
     results = _run_modules(config, module_kwargs, progress_cb, total_steps)
 
     findings = build_findings(config, results)
+    findings["provenance"] = build_provenance(
+        module_kwargs, results, config.evidence_dir, started_at
+    )
     findings_path = write_findings(findings, config.output_dir)
-    report_path = write_report(findings, config.output_dir, config.report_timezone)
+    # The report prints findings.json's hash so a printed copy can be matched to the file.
+    report_path = write_report(
+        findings,
+        config.output_dir,
+        config.report_timezone,
+        findings_sha256=hash_file(findings_path),
+    )
 
     custody = CustodyLog(config.output_dir / CUSTODY_FILENAME)
     disk_result = next((r for r in results if r.module == "module_b_disk"), None)

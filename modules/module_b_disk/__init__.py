@@ -347,9 +347,11 @@ def _ntfs_artifacts(ntfs: dict, window: dict | None) -> list[Artifact]:
     return artifacts
 
 
-def load_ntfs_export(ntfs_dir: Path) -> dict[str, Path]:
+def load_ntfs_export(ntfs_dir: Path, verification_out: dict | None = None) -> dict[str, Path]:
     """The exported volumes under trance-acquire's disk/ntfs folder, each verified
-    against its own hashes.sha256 first, same as the profile/tor_dir copies."""
+    against its own hashes.sha256 first, same as the profile/tor_dir copies.
+    verification_out, if given, receives each volume's verify_hashes() result by drive
+    label (core.provenance lists it rather than hashing a multi-GB pagefile twice)."""
     from modules.module_b_disk.analyze_ntfs_journal import exported_volumes
     from modules.module_b_disk.evidence import verify_hashes
 
@@ -358,6 +360,8 @@ def load_ntfs_export(ntfs_dir: Path) -> dict[str, Path]:
         raise ValueError(f"no exported $MFT/$UsnJrnl found under {ntfs_dir}")
     for label, folder in volumes.items():
         verification = verify_hashes(folder)
+        if verification_out is not None:
+            verification_out[label] = verification
         failures = {k: v for k, v in verification.items() if v["status"] != "match"}
         if failures:
             raise IntegrityError(f"Volume {label}: manifest verification failed: {failures}")
@@ -365,8 +369,10 @@ def load_ntfs_export(ntfs_dir: Path) -> dict[str, Path]:
 
 
 def _analyze_ntfs_export(ntfs_dir: Path, details: dict, artifacts: list, record_failure) -> None:
+    verification: dict = {}
+    details["ntfs_export_verification"] = verification
     try:
-        volumes = load_ntfs_export(ntfs_dir)
+        volumes = load_ntfs_export(ntfs_dir, verification)
     except Exception as exc:
         details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
         record_failure("ntfs", "NTFS export verification", exc)
