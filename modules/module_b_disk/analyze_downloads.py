@@ -32,9 +32,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from core.hashing import hash_file
+try:
+    from core.hashing import hash_file
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from core.hashing import hash_file
 
 ZONE_STREAM = "Zone.Identifier"
 NTFS_TIMES_XATTR = "system.ntfs_times"
