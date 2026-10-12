@@ -174,7 +174,7 @@ def test_free_nbd_device_skips_busy_devices(tmp_path):
         (device / "size").write_text(size)
         if busy:
             (device / "pid").write_text("1")
-    assert mount_helper.free_nbd_device(tmp_path) == "nbd2"
+    assert mount_helper.free_nbd_devices(tmp_path) == ["nbd2", "nbd10"]
 
 
 def test_mount_helper_refuses_to_run_without_root(capsys):
