@@ -102,17 +102,18 @@ def choose_partition(lsblk: dict) -> tuple[str, list[dict]]:
     return max(ntfs, key=lambda c: c["size"])["name"], listed
 
 
-def free_nbd_device(sys_block: Path = Path("/sys/block")) -> str:
-    """The first /dev/nbdN with nothing attached (size 0 and no serving pid)."""
+def free_nbd_devices(sys_block: Path = Path("/sys/block")) -> list[str]:
+    """All /dev/nbdN devices with nothing attached (size 0 and no serving pid), ascending."""
     devices = sorted(
         (p for p in sys_block.glob("nbd*") if p.name[3:].isdigit()),
         key=lambda p: int(p.name[3:]),
     )
-    for device in devices:
-        size = (device / "size").read_text().strip() if (device / "size").exists() else "0"
-        if size == "0" and not (device / "pid").exists():
-            return device.name
-    raise HelperError("No free /dev/nbd device (all in use).")
+    candidates = []
+    for d in devices:
+        size = (d / "size").read_text().strip() if (d / "size").exists() else "0"
+        if size == "0" and not (d / "pid").exists():
+            candidates.append(d.name)
+    return candidates
 
 
 def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -172,14 +173,30 @@ class Session:
     def mount(self) -> None:
         image_format = detect_format(self.image)
         _ensure_nbd_module()
-        self.device = free_nbd_device()
-        _run(
-            "qemu-nbd",
-            "--read-only",
-            f"--format={image_format}",
-            f"--connect=/dev/{self.device}",
-            str(self.image),
-        )
+        candidates = free_nbd_devices()
+        if not candidates:
+            raise HelperError("No free /dev/nbd device (all in use).")
+        last_err: Exception | None = None
+        for name in candidates:
+            result = _run(
+                "qemu-nbd",
+                "--read-only",
+                f"--format={image_format}",
+                f"--connect=/dev/{name}",
+                str(self.image),
+                check=False,
+            )
+            if result.returncode == 0:
+                self.device = name
+                break
+            last_err = HelperError(
+                f"qemu-nbd failed on /dev/{name}: "
+                + (result.stderr or result.stdout).strip().splitlines()[-1]
+                if (result.stderr or result.stdout).strip()
+                else str(result.returncode)
+            )
+        else:
+            raise last_err or HelperError("qemu-nbd failed on all candidate devices.")
         partition, partitions = choose_partition(_wait_for_partitions(self.device))
         MOUNT_BASE.mkdir(mode=0o755, exist_ok=True)
         self.mountpoint = MOUNT_BASE / f"{self.device}-{secrets.token_hex(4)}"

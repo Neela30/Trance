@@ -19,6 +19,8 @@ module's richer structured output verbatim for the report and for re-analysis.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,7 +63,16 @@ def build_findings(config: TranceConfig, results: list[ModuleResult]) -> dict:
 def write_findings(findings: dict, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / FINDINGS_FILENAME
-    path.write_text(json.dumps(findings, indent=2))
+    text = json.dumps(findings, indent=2)
+    fd, tmp = tempfile.mkstemp(dir=output_dir, prefix=".findings-")
+    try:
+        os.write(fd, text.encode())
+        os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        os.close(fd)
+        os.unlink(tmp)
+        raise
     return path
 
 

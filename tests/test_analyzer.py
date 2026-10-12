@@ -67,7 +67,12 @@ def test_cookie_host_anchoring_never_applied_even_on_full_memory(tmp_path):
     dump = make_dump(tmp_path, b"session=REALTOKEN123\x00http://target.onion/dashboard\x00")
 
     report = analyze(
-        dump, onion="target.onion", host=None, username=None, source_type="full-memory"
+        dump,
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
+        cookie_names=["session"],
     )
     values = [c["value"] for c in report["targeted"]["cookies"]]
     assert "REALTOKEN123" in values
@@ -165,7 +170,7 @@ def test_noise_value_filters_code_shaped_cookie_values(tmp_path):
         b"session=e}clear(){this.session.clearCache()}resetCacheControl(){this.setCacheControl(\x00"
         b"session=c[0],l.count=uo(c[2])+1,l.upgrade=uo(c[3]),l.upload=c.length\x00",
     )
-    report = analyze(dump, onion=None, host=None, username=None)
+    report = analyze(dump, onion=None, host=None, username=None, cookie_names=["session"])
     by_value = {c["value"]: c["confidence"] for c in report["targeted"]["cookies"]}
     assert by_value["eyJyb2xlIjoidXNlciJ9"] == "high"
     assert (

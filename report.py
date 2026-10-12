@@ -9,7 +9,9 @@ later without touching this file's rendering.
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -148,13 +150,8 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
     generic: list[dict] = []
     for name, module in findings["modules"].items():
         presenter = PRESENTERS.get(name)
-        # "partial" (some extractors/sub-analyses failed, others didn't) still gets the
-        # module's full presenter -- narrative, tables, everything -- same as "ok". Only
-        # "error" (nothing in this module can be trusted -- e.g. an integrity hash
-        # mismatch) falls back to the generic table below. This is the fix for one failed
-        # extractor silently discarding every OTHER artifact type's real findings from
-        # the report (status used to be a strict binary, so any failure looked identical
-        # to a whole-module failure here).
+        # "partial" still gets the full presenter; only "error" (nothing trustworthy, e.g. an
+        # integrity hash mismatch) falls back to the generic table below.
         if presenter and module["status"] in ("ok", "partial"):
             presented[name] = presenter(module["details"], resolved_tz)
             presented[name]["module_status"] = module["status"]
@@ -198,5 +195,14 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
 def write_report(findings: dict, output_dir: Path, local_tz: str | None = None) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / REPORT_FILENAME
-    path.write_text(render_report(findings, local_tz), encoding="utf-8")
+    text = render_report(findings, local_tz)
+    fd, tmp = tempfile.mkstemp(dir=output_dir, prefix=".report-")
+    try:
+        os.write(fd, text.encode())
+        os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        os.close(fd)
+        os.unlink(tmp)
+        raise
     return path
