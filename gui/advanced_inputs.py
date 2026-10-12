@@ -278,6 +278,17 @@ class TargetPage(_Page):
                 self,
             )
         )
+        self.cookie_names = QLineEdit(self)
+        self.cookie_names.setPlaceholderText("e.g. session,auth_token")
+        self.body.addLayout(
+            labelled(
+                field_label("Session-cookie names", self),
+                self.cookie_names,
+                "Comma-separated cookie names to look for in memory. Target-app-specific — "
+                "leave empty if unknown.",
+                self,
+            )
+        )
         self.finish()
 
 
