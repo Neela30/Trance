@@ -45,7 +45,7 @@ def render_report(findings: dict) -> str:
     generic: list[dict] = []
     for name, module in findings["modules"].items():
         presenter = PRESENTERS.get(name)
-        if presenter and module["status"] == "ok":
+        if presenter and module["status"] in ("ok", "partial"):
             presented[name] = presenter(module["details"])
             continue
         artifacts = [a for a in findings["artifacts"] if a["module"] == name]

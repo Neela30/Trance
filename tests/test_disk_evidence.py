@@ -607,5 +607,5 @@ def test_tampered_live_scan_is_rejected(tmp_path):
     result = run_disk_module(
         TranceConfig("test", tmp_path / "out"), tor_dir=tor_dir, downloads_scan=scan
     )
-    assert result.status == "error"
+    assert result.status == "partial"
     assert "IntegrityError" in result.details["downloads"]["error"]

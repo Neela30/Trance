@@ -15,7 +15,7 @@ class Artifact:
     timestamp: str | None = None
 
 
-MODULE_STATUSES = ("ok", "skipped", "not_implemented", "error")
+MODULE_STATUSES = ("ok", "partial", "skipped", "not_implemented", "error")
 
 
 @dataclass

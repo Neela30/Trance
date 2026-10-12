@@ -420,9 +420,11 @@ def run(
         except Exception as exc:
             details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
             errors.append("NTFS metadata analysis failed")
+    any_ok = any(isinstance(v, dict) and "error" not in v for v in details.values())
+    status = "ok" if not errors else ("partial" if any_ok else "error")
     return ModuleResult(
         module=MODULE_NAME,
-        status="error" if errors else "ok",
+        status=status,
         artifacts=artifacts,
         details=details,
         message="; ".join(errors) if errors else None,
