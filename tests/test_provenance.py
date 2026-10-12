@@ -196,3 +196,25 @@ def test_report_flags_an_evidence_item_that_did_not_verify():
     html = report.render_report(findings)
     assert "did not verify" in html
     assert "2" * 64 in html
+
+
+def test_print_stylesheet_puts_case_page_and_findings_hash_on_every_page():
+    findings = {
+        "schema_version": 1,
+        "case": {"name": "c1", "output_dir": "out", "evidence_dir": None},
+        "generated_at": "2026-10-12T00:00:00+00:00",
+        "modules": {},
+        "artifacts": [],
+    }
+    html = report.render_report(findings, findings_sha256="ab" * 32)
+    assert '@top-left { content: "TRANCE · Case c1"' in html
+    assert '"findings.json SHA-256 ' + "ab" * 32 + '"' in html
+    assert 'counter(page) " of " counter(pages)' in html
+    assert "@media print" in html
+
+
+def test_css_string_cannot_break_out_of_the_style_block():
+    value = report._css_string('a"b\\c</style><script>')
+    assert "</style>" not in value
+    assert '"' not in value[1:-1]
+    assert value.startswith('"') and value.endswith('"')

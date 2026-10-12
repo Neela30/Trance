@@ -130,6 +130,25 @@ modules/<name>/__init__.py:
 `report.py`. A module with status `ok` and a presenter gets a dedicated section; otherwise a
 generic artifact table (capped at 200 rows). Everything is deterministic, offline, no LLM.
 
+**Provenance and court-readiness** (added 2026-10-12, for reports that go to court):
+`core/provenance.py` adds `findings.json["provenance"]`. It holds the tool version
+(`core/version.py`, kept equal to pyproject by a test), the git commit and a "dirty" flag
+(both `None` in a packaged exe), the examiner host and library versions, the facts from
+`acquire_manifest.json` (`acquired_by` is written by `acquire_all.py` since then), and one
+`evidence_items` row per input file. Each row checks the file's SHA-256 against the
+acquisition-time `.sha256` sidecar or the folder's `hashes.sha256`. Hashes that modules
+already computed are reused (Module C's image hash, Module B's own manifest checks, incl.
+`details["ntfs_export_verification"]`), so multi-GB files are not read twice. The report
+shows "Evidence examined" and "Analysis provenance" sections, and prints `findings.json`'s
+SHA-256 in the footer and on every printed page. Print/PDF: `@page` A4 with margin boxes
+(case, page X of Y, findings hash), a light palette and all `<details>` opened. The GUI
+Report tab's "Save as PDF…" (`gui/pdf_export.py`) appends an `exported_pdf` entry to
+`custody.json`. Qt's `printToPdf` margins override the CSS ones, so keep the two equal.
+Remaining plan: case metadata (examiner/case no./exhibits), report restructure
+(Scope/Method/Findings/Interpretation/Limitations/Declaration, replacing the
+"Authorized security exercise" stamp), reproducibility test, and a Sri Lanka Evidence
+(Special Provisions) Act certificate template (needs legal check of wording).
+
 ---
 
 ## 4. The three modules
@@ -714,7 +733,9 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
 - Progress bar: 0–100 with a `QTimer` easing toward the last real checkpoint (25/50/75/100).
   Honest limitation: there are only 4 real checkpoints; it's visual smoothing.
 - `report_tab.py` — `QWebEngineView` loading the existing `report.html` (paths must be
-  resolved to absolute before `QUrl.fromLocalFile`).
+  resolved to absolute before `QUrl.fromLocalFile`). "Save as PDF…" prints it via
+  `page().printToPdf` (PySide6 spelling; `printToPDF` doesn't exist) after opening every
+  `<details>`, then hashes the PDF into custody.json.
 - `history_tab.py` — scans `<output-dir>/*/findings.json` (no separate DB, by design).
   Sortable table with filter box, relative-time "Generated" column (ISO in tooltip), status
   chips painted by a `QStyledItemDelegate`, selection-gated View/Delete, Delete behind a

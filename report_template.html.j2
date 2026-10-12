@@ -108,7 +108,56 @@
   .reco-list li::before { content: "→"; position: absolute; left: 14px; top: 12px; color: var(--accent); font-weight: 600; }
   footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--border); font-family: ui-monospace, monospace; font-size: 11px; color: var(--ink-muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+  /* Print / PDF: always the light palette on white, every collapsed section expanded (see
+     the script below), the case and page number on every page so a loose page can be put
+     back, and findings.json's hash in each page's footer to tie paper to file. */
+  @page {
+    size: A4;
+    margin: 18mm 14mm 20mm;
+    @top-left { content: {{ ("TRANCE · Case " ~ findings.case.name)|css_string }}; font: 8pt ui-monospace, monospace; color: #5b6570; }
+    @top-right { content: {{ ("Generated " ~ findings.generated_at[:19] ~ " UTC")|css_string }}; font: 8pt ui-monospace, monospace; color: #5b6570; }
+    @bottom-left { content: {{ ("findings.json SHA-256 " ~ (findings_sha256 or "not recorded"))|css_string }}; font: 6.5pt ui-monospace, monospace; color: #5b6570; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font: 8pt ui-monospace, monospace; color: #5b6570; }
+  }
+  @media print {
+    :root, :root[data-theme="dark"], :root:not([data-theme="light"]) {
+      --bg: #ffffff; --surface: #ffffff; --surface-2: #f1f3f3; --ink: #111518; --ink-muted: #4a535c;
+      --border: #b9c0bf; --accent: #9a3522; --accent-bg: #f6e4df; --confirm: #23664b; --confirm-bg: #e3f0e9;
+      --noise: #7d5f20; --noise-bg: #f2ecdc; --mono-chip-bg: #eef0f0; --shadow: none;
+    }
+    html, body { background: #ffffff; }
+    body { font-size: 10.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .page { max-width: none; padding: 0; }
+    .table-scroll { overflow: visible; }
+    table { page-break-inside: auto; }
+    thead { display: table-header-group; }
+    tr, .tile, .callout, .reco-list li, .sequence li { break-inside: avoid; }
+    h1, h2, h3, .section-head, .eyebrow { break-after: avoid; }
+    .band { break-before: page; margin-top: 0; }
+    details.appendix summary { list-style: none; color: var(--ink); }
+    details summary::-webkit-details-marker { display: none; }
+    .stamp { transform: none; }
+    a { color: inherit; text-decoration: none; }
+    footer { display: none; }
+  }
 </style>
+<script>
+  // Collapsed <details> print as their summary line only, so open them all for printing
+  // (browser Ctrl+P or the app's Save as PDF) and put them back afterwards.
+  window.addEventListener("beforeprint", function () {
+    document.querySelectorAll("details:not([open])").forEach(function (d) {
+      d.setAttribute("data-print-opened", "");
+      d.open = true;
+    });
+  });
+  window.addEventListener("afterprint", function () {
+    document.querySelectorAll("details[data-print-opened]").forEach(function (d) {
+      d.removeAttribute("data-print-opened");
+      d.open = false;
+    });
+  });
+</script>
 </head>
 <body>
 <div class="page">

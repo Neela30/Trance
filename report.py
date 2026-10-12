@@ -140,6 +140,14 @@ def _relative_to(value: str | None, base: str | None) -> str | None:
         return value
 
 
+def _css_string(value: object) -> Markup:
+    """A quoted CSS string literal for the print stylesheet's page headers. Escapes the
+    quote and backslash, and writes "<" as a CSS escape so no value can close <style>."""
+    text = str(value)
+    escaped = "".join(f"\\{ord(c):x} " if c in '"\\<>&\n\r' else c for c in text)
+    return Markup(f'"{escaped}"')
+
+
 def _format_bytes(value: int | None) -> str:
     if value is None:
         return "—"
@@ -166,6 +174,7 @@ def render_report(
     env.filters["wrap_path"] = _wrap_path
     env.filters["fmt_bytes"] = _format_bytes
     env.filters["relative_to"] = _relative_to
+    env.filters["css_string"] = _css_string
     template = env.get_template(TEMPLATE_NAME)
 
     resolved_tz = _resolve_local_tz(local_tz)
