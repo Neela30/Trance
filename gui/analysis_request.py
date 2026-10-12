@@ -54,6 +54,7 @@ class AnalysisRequest:
     vol3_path: str | None = None
     vol3_extract_process: str | None = None
     vol3_extract_pid: int | None = None
+    cookie_names: str = ""  # comma-separated; empty = no cookie matching
 
     @property
     def case_dir(self) -> Path:
@@ -108,6 +109,8 @@ def effective_inputs(request: AnalysisRequest, discovered: dict | None = None) -
         value = getattr(request, key)
         if value not in (None, ""):
             inputs[key] = value
+    if request.cookie_names:
+        inputs["cookie_names"] = request.cookie_names
     return inputs
 
 

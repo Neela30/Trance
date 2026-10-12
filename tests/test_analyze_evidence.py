@@ -25,6 +25,7 @@ def _base_args(**overrides):
         "vol3_path": None,
         "vol3_extract_process": None,
         "vol3_extract_pid": None,
+        "cookie_names": None,
     }
     defaults.update(overrides)
     return type("Args", (), defaults)()

@@ -256,6 +256,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         help="Skip --vol3-extract-process's PID discovery and extract this exact PID instead",
     )
+    memory.add_argument(
+        "--cookie-names",
+        help="Comma-separated session-cookie names to look for in memory (e.g. "
+        "'session,auth_token'). Target-app-specific; omitting leaves the cookie section empty",
+    )
     args = parser.parse_args(argv)
 
     if (
@@ -310,6 +315,10 @@ def main(argv: list[str] | None = None) -> int:
             "vol3_path": args.vol3_path,
             "vol3_extract_process": args.vol3_extract_process,
             "vol3_extract_pid": args.vol3_extract_pid,
+            "cookie_names": (
+                [n.strip() for n in args.cookie_names.split(",") if n.strip()]
+                if args.cookie_names else None
+            ),
         },
     }
 

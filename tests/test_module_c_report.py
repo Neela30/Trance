@@ -9,7 +9,7 @@ def base_details(tmp_path, host="127.0.0.1:5000", username=None):
         + b"session=REALTOKEN123\x00"
         + b"C:\\Users\\alice\\Downloads\\evidence_report.txt\x00"
     )
-    return analyze(dump, onion=None, host=host, username=username)
+    return analyze(dump, onion=None, host=host, username=username, cookie_names=["session"])
 
 
 def test_missing_volatility3_key_degrades_to_skipped(tmp_path):

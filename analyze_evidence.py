@@ -204,6 +204,7 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         ("--username", args.username),
         ("--vol3-path", args.vol3_path),
         ("--vol3-extract-process", args.vol3_extract_process),
+        ("--cookie-names", args.cookie_names),
     ):
         if value:
             argv += [flag, value]
@@ -248,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vol3-path")
     parser.add_argument("--vol3-extract-process")
     parser.add_argument("--vol3-extract-pid", type=int)
+    parser.add_argument(
+        "--cookie-names",
+        help="Comma-separated session-cookie names (passed through to main.py)",
+    )
 
     args = parser.parse_args(argv)
 
