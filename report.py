@@ -9,6 +9,8 @@ later without touching this file's rendering.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -71,5 +73,14 @@ def render_report(findings: dict) -> str:
 def write_report(findings: dict, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / REPORT_FILENAME
-    path.write_text(render_report(findings))
+    text = render_report(findings)
+    fd, tmp = tempfile.mkstemp(dir=output_dir, prefix=".report-")
+    try:
+        os.write(fd, text.encode())
+        os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        os.close(fd)
+        os.unlink(tmp)
+        raise
     return path
