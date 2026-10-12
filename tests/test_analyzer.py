@@ -67,7 +67,11 @@ def test_cookie_host_anchoring_never_applied_even_on_full_memory(tmp_path):
     dump = make_dump(tmp_path, b"session=REALTOKEN123\x00http://target.onion/dashboard\x00")
 
     report = analyze(
-        dump, onion="target.onion", host=None, username=None, source_type="full-memory",
+        dump,
+        onion="target.onion",
+        host=None,
+        username=None,
+        source_type="full-memory",
         cookie_names=["session"],
     )
     values = [c["value"] for c in report["targeted"]["cookies"]]

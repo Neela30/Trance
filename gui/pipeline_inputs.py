@@ -46,9 +46,5 @@ def module_kwargs_from_resolved(
             "vol3_path": resolved.get("vol3_path") or None,
             "vol3_extract_process": resolved.get("vol3_extract_process") or None,
             "vol3_extract_pid": resolved.get("vol3_extract_pid"),
-            "cookie_names": (
-                [n.strip() for n in resolved["cookie_names"].split(",") if n.strip()]
-                if resolved.get("cookie_names") else None
-            ),
         },
     }

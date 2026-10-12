@@ -244,7 +244,7 @@ def main() -> int:
     print(f"\n*** Tor client-auth credentials recovered: {len(creds)} ***")
     for c in creds:
         print(f"  hidden service : {c['onion_address']}")
-        print(f"  x25519 privkey : [present — redacted from output]")
+        print("  x25519 privkey : [present — redacted from output]")
         print(
             f"  found at       : x{c['occurrences']}, "
             f"{', '.join(f'0x{o:x}' for o in c['first_offsets'][:6])}"

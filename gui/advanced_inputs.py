@@ -282,14 +282,21 @@ class TargetPage(_Page):
                 self,
             )
         )
-        self.cookie_names = QLineEdit(self)
-        self.cookie_names.setPlaceholderText("e.g. session,auth_token")
         self.body.addLayout(
             labelled(
-                field_label("Session-cookie names", self),
+                field_label("Cookie names", self),
                 self.cookie_names,
-                "Comma-separated cookie names to look for in memory. Target-app-specific — "
-                "leave empty if unknown.",
+                "Names of the site's cookies to look for in memory, separated by commas. "
+                "Cookies are only found by name, so give the site's own.",
+                self,
+            )
+        )
+        self.body.addLayout(
+            labelled(
+                field_label("Report timezone", self),
+                self.report_timezone,
+                "An IANA zone name the report's plain-English section shows local times "
+                "in, alongside UTC.",
                 self,
             )
         )

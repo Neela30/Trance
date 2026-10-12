@@ -122,7 +122,6 @@ def run(
 
     try:
         details = analyze(
-            analyzer_dump_path, onion, host, username, source_type=analyzer_source_type,
             analyzer_dump_path,
             onion,
             host,

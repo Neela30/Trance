@@ -100,8 +100,18 @@ ONION_RE = re.compile(
     re.IGNORECASE,
 )
 ONION_DOMAIN_RE = re.compile(r"[a-z2-7]{16,56}\.onion", re.IGNORECASE)
-# Not a module-level constant: cookie names are target-specific and must be supplied
-# by the examiner via --cookie-names.  The regex is built inside analyze() from that list.
+# Cookie names to look for. Defaults to the control site's names so existing runs behave the
+# same; a real target's names come in through analyze(cookie_names=...) / --cookie-name.
+DEFAULT_COOKIE_NAMES = ("session", "trance_user", "trance_pref")
+
+
+@functools.lru_cache(maxsize=8)
+def _cookie_regex(names: tuple[str, ...]) -> re.Pattern[str]:
+    alternatives = "|".join(re.escape(n) for n in names)
+    return re.compile(r"\b(" + alternatives + r")=([^\s;\"'<>]+)")
+
+
+COOKIE_RE = _cookie_regex(DEFAULT_COOKIE_NAMES)
 SEARCH_QUERY_RE = re.compile(r"\?q=([^\s&\"'<>]+)")
 # Lowercase-only and literal =/JSON-":" separators on purpose: keeps this from
 # matching uppercase Windows env-var dumps (USERNAME=<os user>) and C++/JS
@@ -297,20 +307,24 @@ def iter_strings_ex(
             carry = window[-OVERLAP:] if len(window) > OVERLAP else window
 
 
-def verify_integrity(dump_path: Path) -> tuple[bool | None, str]:
-    """Return (verified, sha256). verified is True if a .sha256 sidecar matched, None
-    if no sidecar exists. Raises IntegrityError on mismatch. Always hashes the file so
-    the caller never needs to hash it a second time."""
-    actual = hash_file(dump_path)
+def iter_strings(path: Path, min_len: int = DEFAULT_MIN_LEN) -> Iterator[tuple[int, str]]:
+    """Yield (offset, string) for printable ASCII and UTF-16LE runs, in offset order."""
+    for offset, string, _ in iter_strings_ex(path, min_len):
+        yield offset, string
+
+
+def _check_sidecar(dump_path: Path, actual_sha256: str) -> bool | None:
+    """True if a <dump>.sha256 sidecar matches the computed hash, None if there is no sidecar,
+    else raise."""
     sidecar = dump_path.with_name(dump_path.name + ".sha256")
     if not sidecar.exists():
-        return None, actual
+        return None
     expected = sidecar.read_text().split()[0].strip().lower()
-    if expected != actual:
+    if expected != actual_sha256:
         raise IntegrityError(
             f"Hash mismatch for {dump_path}: sidecar says {expected}, computed {actual_sha256}"
         )
-    return True, actual
+    return True
 
 
 def verify_integrity(dump_path: Path) -> bool | None:
@@ -445,22 +459,12 @@ def _scan_segment(
     min_len: int,
     targets: list[str],
     username: str | None,
-    min_len: int = DEFAULT_MIN_LEN,
-    source_type: str = DEFAULT_SOURCE_TYPE,
-    cookie_names: list[str] | None = None,
+    record_cap: int,
+    require_host_anchor: bool,
+    anchor_enabled: bool,
+    cookie_names: tuple[str, ...],
 ) -> dict:
-    if not dump_path.exists():
-        raise ParsingError(f"Dump file not found: {dump_path}")
-
-    integrity_verified, dump_sha256 = verify_integrity(dump_path)
-    # Build per-run cookie regex from examiner-supplied names; None/empty = no cookie matching.
-    cookie_re = (
-        re.compile(r"\b(" + "|".join(re.escape(n) for n in cookie_names) + r")=([^\s;\"'<>]+)")
-        if cookie_names
-        else None
-    )
-    targets = [t.lower() for t in (onion, host) if t]
-    record_cap = SOURCE_TYPE_RECORD_CAPS.get(source_type, MAX_RECORDS_PER_TYPE)
+    """String-carve [start, end) of the dump and return the raw, unmerged partial results.
 
     Pure function of its arguments, so segments can run in separate processes. A string is
     owned by the segment its first byte falls in; the read continues SEGMENT_LOOKAHEAD bytes
@@ -623,13 +627,14 @@ def _scan_segment(
             if len(onion_domain_hits) > 10_000:
                 onion_domain_hits = Counter(dict(onion_domain_hits.most_common(1_000)))
 
-        for m in (cookie_re.finditer(s) if cookie_re else ()):
+        for m in cookie_re.finditer(s) if has_eq else ():
             # Not host-anchored, unlike credentials/search-queries below: a cookie lives
             # in Firefox's own cookie-jar structure, not co-located in memory with the
             # page/URL text that set it, so the same-string proximity check that works
             # for form submissions just drops real cookies here (verified: it silently
-            # ate a real, high-confidence JWT session cookie in testing). The caller's
-            # explicit cookie names are already the precision this needs.
+            # ate a real, high-confidence JWT session cookie in testing). COOKIE_RE's own
+            # exact app-specific name match (session/trance_user/trance_pref, not a
+            # generic field name) is already the precision this needs.
             name, value = m.group(1), m.group(2)
             match_offset = offset + m.start()
             confidence = "low" if _is_noise_value(value) else "high"
@@ -1325,12 +1330,6 @@ def main() -> None:
         "and report labeling, not extraction logic (default: %(default)s)",
     )
     parser.add_argument(
-        "--cookie-names",
-        help="Comma-separated session-cookie names to look for in memory (e.g. "
-        "'session,auth_token'). Target-app-specific: omitting this leaves the cookie "
-        "section empty",
-    )
-    parser.add_argument(
         "--output", type=Path, help="Path for the JSON report (default: <dump>.report.json)"
     )
     args = parser.parse_args()
@@ -1341,7 +1340,6 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    cookie_names = [n.strip() for n in args.cookie_names.split(",") if n.strip()] if args.cookie_names else None
     try:
         report = analyze(
             args.dump,
@@ -1350,7 +1348,8 @@ def main() -> None:
             args.username,
             min_len=args.min_length,
             source_type=args.source_type,
-            cookie_names=cookie_names,
+            workers=args.workers,
+            cookie_names=args.cookie_names,
         )
     except (ParsingError, IntegrityError) as exc:
         print(f"[!] {exc}", file=sys.stderr)

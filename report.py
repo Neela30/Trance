@@ -10,6 +10,7 @@ later without touching this file's rendering.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -149,8 +150,11 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
     generic: list[dict] = []
     for name, module in findings["modules"].items():
         presenter = PRESENTERS.get(name)
+        # "partial" still gets the full presenter; only "error" (nothing trustworthy, e.g. an
+        # integrity hash mismatch) falls back to the generic table below.
         if presenter and module["status"] in ("ok", "partial"):
-            presented[name] = presenter(module["details"])
+            presented[name] = presenter(module["details"], resolved_tz)
+            presented[name]["module_status"] = module["status"]
             continue
         artifacts = [a for a in findings["artifacts"] if a["module"] == name]
         generic.append(
@@ -191,7 +195,7 @@ def render_report(findings: dict, local_tz: str | None = None) -> str:
 def write_report(findings: dict, output_dir: Path, local_tz: str | None = None) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / REPORT_FILENAME
-    text = render_report(findings)
+    text = render_report(findings, local_tz)
     fd, tmp = tempfile.mkstemp(dir=output_dir, prefix=".report-")
     try:
         os.write(fd, text.encode())

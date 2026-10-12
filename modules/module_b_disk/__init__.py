@@ -523,9 +523,6 @@ def run(
                 artifacts.extend(_ntfs_artifacts(details["ntfs"], window))
         except Exception as exc:
             details["ntfs"] = {"error": f"{type(exc).__name__}: {exc}"}
-            errors.append("NTFS metadata analysis failed")
-    any_ok = any(isinstance(v, dict) and "error" not in v for v in details.values())
-    status = "ok" if not errors else ("partial" if any_ok else "error")
             _record_failure("ntfs", "NTFS metadata analysis", exc)
 
     if ntfs_dir and not disk_root:

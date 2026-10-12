@@ -131,6 +131,7 @@ class AnalyseTab(QWidget):
         self._host_field = self._options.target.host
         self._username_field = self._options.target.username
         self._cookie_names_field = self._options.target.cookie_names
+        self._report_timezone_field = self._options.target.report_timezone
         content_layout.addWidget(self._options)
         content_layout.addLayout(self._build_run_area())
 
