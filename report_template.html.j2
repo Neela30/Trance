@@ -78,6 +78,11 @@
   .chip.high, .chip.ok { background: var(--confirm-bg); color: var(--confirm); }
   .chip.low, .chip.skipped, .chip.not_implemented, .chip.partial { background: var(--noise-bg); color: var(--noise); }
   .chip.error { background: var(--accent-bg); color: var(--accent); }
+  .chip.interp { background: var(--noise-bg); color: var(--noise); margin-left: 8px; vertical-align: middle; }
+  .sign-grid { display: grid; grid-template-columns: 150px 1fr; gap: 22px 14px; margin-top: 18px; font-size: 13px; }
+  .sign-grid dt { color: var(--ink-muted); font-family: ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding-top: 6px; }
+  .sign-grid dd { margin: 0; border-bottom: 1px solid var(--ink); min-height: 26px; }
+  .declaration { break-inside: avoid; }
   .chip.verified { background: var(--confirm-bg); color: var(--confirm); }
   .chip.unrecorded, .chip.not_hashed { background: var(--noise-bg); color: var(--noise); }
   .chip.MISMATCH, .chip.missing { background: var(--accent-bg); color: var(--accent); }
@@ -171,7 +176,7 @@
         <div class="eyebrow">TRANCE · Forensic Artifact Triage · Case Report</div>
         <h1>{{ findings.case.name }}</h1>
       </div>
-      <div class="stamp">Authorized security exercise<br>Test environment</div>
+      <div class="stamp">Forensic examination report<br>Not valid unless signed</div>
     </div>
     <dl class="meta-grid">
       <dt>Generated</dt><dd>{{ findings.generated_at }}</dd>
@@ -182,6 +187,18 @@
       {% if provenance %}<dt>Tool</dt><dd>TRANCE {{ provenance.tool.version }}{% if provenance.tool.git_commit %} · commit <span class="mono">{{ provenance.tool.git_commit[:12] }}</span>{% if provenance.tool.git_dirty %} (modified){% endif %}{% endif %}</dd>{% endif %}
     </dl>
   </div>
+
+  <section>
+    <div class="callout" style="border-left-color: var(--ink-muted);">
+      <strong>How to read this report.</strong> Tables, counts, timestamps and hashes are data
+      recorded in the evidence and are reported as found. Sections marked
+      <span class="chip interp" style="margin-left:0;">Interpretation</span> are conclusions drawn
+      from that data by fixed, documented rules in TRANCE {{ provenance.tool.version if provenance else "" }};
+      they are opinion for the examiner to confirm, not facts in themselves. All times are UTC
+      unless a local time is shown beside them. The methods, their limits and the tool's tested
+      accuracy follow the findings.
+    </div>
+  </section>
 
   <section>
     <div class="section-head"><h2>Module status</h2></div>
@@ -255,6 +272,23 @@
   </section>
   {% endif %}
 
+  <section>
+    <div class="section-head"><h2>Methodology</h2><span class="count">how each kind of evidence was examined</span></div>
+    <ul class="narrative-list">
+      <li>Evidence was examined read-only. Each input's SHA-256 was compared with the hash recorded when it was acquired (see "Evidence examined"); browser databases were opened only on verified, disposable working copies, and registry hives were hashed again after parsing to show they were not changed.</li>
+      {% if modules.module_a_registry and modules.module_a_registry.status in ["ok", "partial"] %}
+      <li><strong>Registry (Module A).</strong> The SYSTEM, SOFTWARE, NTUSER.DAT, UsrClass.dat and Amcache.hve hives were parsed with regipy {{ provenance.runtime.libraries.regipy if provenance and provenance.runtime.libraries.regipy else "" }} and TRANCE's own parsers for execution records (UserAssist, BAM, ShimCache, Amcache, MUICache), file and folder access (RecentDocs, ShellBags, open/save dialogs), devices, networks and autostart settings. Entries were kept when their path or program name matches Tor Browser; device, network and machine facts are kept only alongside at least one such entry.</li>
+      {% endif %}
+      {% if modules.module_b_disk and modules.module_b_disk.status in ["ok", "partial"] %}
+      <li><strong>Disk (Module B).</strong> The Tor Browser profile databases and the Tor daemon's data folder were read for bookmarks, history, guard relays and session times; internet-origin files (Zone.Identifier) were placed against the Tor session window; where supplied, the NTFS $MFT and $UsnJrnl were parsed for file activity and deleted files, and the pagefile, swapfile and raw disk bytes were searched for onion addresses.</li>
+      {% endif %}
+      {% if modules.module_c_memory and modules.module_c_memory.status in ["ok", "partial"] %}
+      <li><strong>Memory (Module C).</strong> Printable ASCII and UTF-16 strings were extracted from the memory image and matched against fixed patterns for URLs, cookies, credentials, form submissions, page titles, searches and downloads. On a whole-memory image a match counts as a finding only when tied to the target onion address or host given for the case; every other match is kept as an observation in findings.json.{% if memory and memory.volatility3 and memory.volatility3.status == "ok" %} Process and network structures were read with Volatility 3.{% endif %}</li>
+      {% endif %}
+      <li>Every rule is deterministic: the same inputs and the same TRANCE version give the same findings. No machine-learning or generative model is used.</li>
+    </ul>
+  </section>
+
   {% if registry %}
   <div class="band">
     <div class="eyebrow">Module A</div>
@@ -271,7 +305,7 @@
 
   <section>
     <div class="keyfinding">
-      <span class="eyebrow">Key finding</span>
+      <span class="eyebrow">Key finding</span><span class="chip interp">Interpretation</span>
       <p>{{ registry.narrative.key_finding }}</p>
     </div>
     {% if not registry.narrative.empty %}
@@ -284,7 +318,7 @@
 
   {% if registry.narrative.device_story %}
   <section>
-    <div class="section-head"><h2>Where Tor Browser ran from</h2></div>
+    <div class="section-head"><h2>Where Tor Browser ran from<span class="chip interp">Interpretation</span></h2></div>
     <ul class="narrative-list">
       {% for line in registry.narrative.device_story %}
       <li>{{ line }}</li>
@@ -296,7 +330,7 @@
   {% if registry.network_context and (registry.network_context.profiles or registry.network_context.interfaces) %}
   {% set net = registry.network_context %}
   <section>
-    <div class="section-head"><h2>Network context at time of use</h2></div>
+    <div class="section-head"><h2>Network context at time of use<span class="chip interp">Interpretation</span></h2></div>
     {% if net.narrative.correlation %}
     <ul class="narrative-list">
       {% for line in net.narrative.correlation %}
@@ -421,7 +455,7 @@
   {% endif %}
 
   <section>
-    <div class="section-head"><h2>What happened</h2><span class="count">Plain-English summary — rule-based, not an AI-generated guess</span></div>
+    <div class="section-head"><h2>What happened<span class="chip interp">Interpretation</span></h2><span class="count">Plain-English summary — rule-based, not an AI-generated guess</span></div>
     {% if registry.narrative.empty %}
     {% for line in registry.narrative.empty %}
     <p class="note">{{ line }}</p>
@@ -437,7 +471,7 @@
 
   {% if not registry.narrative.empty %}
   <section>
-    <div class="section-head"><h2>How reliable is this?</h2></div>
+    <div class="section-head"><h2>How reliable is this?<span class="chip interp">Interpretation</span></h2></div>
     {% for line in registry.narrative.reliability %}
     <p class="note">{{ line }}</p>
     {% endfor %}
@@ -1377,8 +1411,43 @@
   {% endfor %}
 
   <div class="band">
+    <div class="eyebrow">Reliability</div>
+    <h2>Limitations and tool validation</h2>
+  </div>
+  <section>
+    <div class="section-head"><h2>Limitations of this examination</h2><span class="count">what this run could not establish or check</span></div>
+    {% if limitations %}
+    <ul class="narrative-list">
+      {% for line in limitations %}<li>{{ line }}</li>{% endfor %}
+    </ul>
+    {% else %}
+    <p class="note">No limitations were recorded for this run.</p>
+    {% endif %}
+    {% if registry and registry.narrative.not_determined %}
+    <p class="note" style="margin-top:8px;">See also "What we could not determine" in the registry section.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Tool validation</h2><span class="count">how well TRANCE recovered a known, scripted Tor Browser session</span></div>
+    <p class="note">A scripted session on a control onion site (37 recorded actions, 12 decoys that were never touched) was run on a clean Windows 10 virtual machine and captured four ways. The table gives how many of the 37 actions TRANCE recovered, beside how many were present in the evidence at all (found by a plain text search of the same files).</p>
+    <div class="table-scroll">
+      <table class="evidence-table">
+        <thead><tr><th>Capture</th><th>Present in evidence</th><th>Recovered by TRANCE</th></tr></thead>
+        <tbody>
+          <tr><td>Powered off, disk only</td><td>7 of 37</td><td>6 of 37</td></tr>
+          <tr><td>Running, browser closed</td><td>8 of 37</td><td>7 of 37</td></tr>
+          <tr><td>Running, browser open</td><td>37 of 37</td><td>37 of 37</td></tr>
+          <tr><td>Negative control (no browsing)</td><td>0 of 37</td><td>no false findings of the session</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note" style="margin-top:10px;">Limits of this validation: one run per condition, so no measure of variation; the memory extractors were refined on the same browser-open capture they are scored on, so 37 of 37 is not an independent result; and the runs used a test site, not real-world services. Scored with TRANCE's analysis code as of commit 65eb932 using <span class="mono">scripts/score_run.py</span>. A result absent from this report is not proof the activity did not happen.</p>
+  </section>
+
+  <div class="band">
     <div class="eyebrow">Next steps</div>
-    <h2>Recommendations</h2>
+    <h2>Recommendations<span class="chip interp">Interpretation</span></h2>
   </div>
   <section>
     <ul class="reco-list">
@@ -1659,6 +1728,22 @@
     {% endif %}
   </section>
   {% endif %}
+
+  <section class="declaration">
+    <div class="band" style="break-before: page;">
+      <div class="eyebrow">Declaration</div>
+      <h2>Examiner's declaration</h2>
+    </div>
+    <p class="note">I confirm that I examined the evidence listed in "Evidence examined" using the tool and method described in this report; that the evidence verified as stated there; that the facts in this report are, to the best of my knowledge, true and complete; and that the sections marked as interpretation are opinions I have reviewed and accept, within the limitations stated.</p>
+    <dl class="sign-grid">
+      <dt>Name</dt><dd></dd>
+      <dt>Position / organisation</dt><dd></dd>
+      <dt>Case reference</dt><dd></dd>
+      <dt>Signature</dt><dd></dd>
+      <dt>Date</dt><dd></dd>
+    </dl>
+    <p class="note" style="margin-top:14px;">Report produced from findings.json{% if findings_sha256 %} with SHA-256 <span class="mono">{{ findings_sha256 }}</span>{% endif %}.</p>
+  </section>
 
   <footer>
     <span>TRANCE{% if provenance %} {{ provenance.tool.version }}{% endif %} · findings.json schema v{{ findings.schema_version }}</span>

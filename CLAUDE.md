@@ -146,10 +146,15 @@ SHA-256 in the footer and on every printed page. Print/PDF: `@page` A4 with marg
 (case, page X of Y, findings hash), a light palette and all `<details>` opened. The GUI
 Report tab's "Save as PDF…" (`gui/pdf_export.py`) appends an `exported_pdf` entry to
 `custody.json`. Qt's `printToPdf` margins override the CSS ones, so keep the two equal.
-Remaining plan: case metadata (examiner/case no./exhibits), report restructure
-(Scope/Method/Findings/Interpretation/Limitations/Declaration, replacing the
-"Authorized security exercise" stamp), reproducibility test, and a Sri Lanka Evidence
-(Special Provisions) Act certificate template (needs legal check of wording).
+Report structure (2026-10-13): a "How to read this report" note; narrative sections carry an
+`Interpretation` chip (opinion, not fact); Methodology (per module that ran); Limitations
+(`report._limitations()`: failed/skipped steps, warnings, unverified evidence, no-target
+memory, dirty checkout, plus `METHOD_LIMITS`); Tool validation (the §10 numbers, hardcoded
+in the template -- update them when the evaluation is re-run); and a blank examiner
+declaration/signature block as the last page. The stamp reads "Forensic examination report /
+Not valid unless signed". Remaining plan: case metadata (examiner/case no./exhibits, to
+pre-fill the declaration), reproducibility test, and a Sri Lanka Evidence (Special
+Provisions) Act certificate template (needs legal check of wording).
 
 ---
 

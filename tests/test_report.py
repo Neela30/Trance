@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import report
 from core.config import TranceConfig
 from core.schema import ModuleResult
 from findings import build_findings
@@ -263,3 +264,61 @@ def test_no_notes_without_both_modules():
 
     assert _relate_processes_to_registry(None, {"volatility3": {}}) == []
     assert _relate_processes_to_registry({"component_timeline": []}, None) == []
+
+
+def _court_findings(**modules):
+    return {
+        "schema_version": 1,
+        "case": {"name": "c1", "output_dir": "out", "evidence_dir": None},
+        "generated_at": "2026-10-13T00:00:00+00:00",
+        "modules": modules,
+        "artifacts": [],
+    }
+
+
+def test_limitations_name_failed_steps_unverified_evidence_and_method_limits():
+    findings = _court_findings(
+        module_a_registry={
+            "status": "partial",
+            "message": None,
+            "details": {},
+            "warnings": [{"artifact_type": "ShellBags", "source": "UsrClass", "reason": "boom"}],
+        },
+        module_b_disk={"status": "skipped", "message": "no disk evidence supplied", "details": {}},
+        module_c_memory={
+            "status": "ok",
+            "message": None,
+            "details": {"host_anchoring": {"no_target": True}},
+        },
+    )
+    findings["provenance"] = {
+        "tool": {"git_dirty": True},
+        "acquisition": None,
+        "evidence_items": [
+            {"label": "SYSTEM registry hive", "path": "S", "status": "unrecorded"},
+            {"label": "Memory image", "path": "M", "status": "MISMATCH"},
+        ],
+    }
+    notes = " ".join(report._limitations(findings))
+    assert "ShellBags could not be read (UsrClass): boom" in notes
+    assert "module_b_disk was not run (no disk evidence supplied)" in notes
+    assert "without a target onion address" in notes
+    assert "Memory image (M) did not verify: MISMATCH" in notes
+    assert "no hash recorded at acquisition" in notes
+    assert "No acquisition manifest" in notes
+    assert "uncommitted changes" in notes
+    assert report.METHOD_LIMITS["module_c_memory"][0] in notes
+    assert report.METHOD_LIMITS["module_b_disk"][0] not in notes  # B did not run
+
+
+def test_report_has_method_limits_validation_and_declaration_sections():
+    html = report.render_report(_court_findings())
+    for heading in (
+        "How to read this report",
+        "Methodology",
+        "Limitations of this examination",
+        "Tool validation",
+        "Examiner's declaration",
+    ):
+        assert heading in html
+    assert "Authorized security exercise" not in html

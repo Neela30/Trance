@@ -161,6 +161,83 @@ def _format_bytes(value: int | None) -> str:
     return f"{value:,} bytes"
 
 
+# Known limits of each analysis method, stated whenever that module contributed.
+METHOD_LIMITS = {
+    "module_a_registry": (
+        (
+            "Registry evidence records that programs ran and folders were opened, not what was "
+            "done inside Tor Browser. Several registry timestamps are the last write of a key "
+            "shared by many entries, not the time of one event; the report says so where it applies."
+        ),
+    ),
+    "module_b_disk": (
+        (
+            "Tor Browser keeps no browsing history by design, so an empty profile is expected and "
+            "is not evidence that the browser was unused."
+        ),
+        (
+            "A file's internet-origin mark (Zone.Identifier) shows it was downloaded, not from which "
+            "site; placing it inside the Tor session window is a timing correlation, not attribution."
+        ),
+    ),
+    "module_c_memory": (
+        (
+            "Memory strings show what was held in memory at capture time. A link present on a page "
+            "and a link that was actually visited cannot always be told apart."
+        ),
+        "The order of memory events follows their position in memory, not time.",
+    ),
+}
+
+
+def _limitations(findings: dict) -> list[str]:
+    """What this run could not establish or could not check, from what it recorded."""
+    notes = []
+    for name, module in findings["modules"].items():
+        if module["status"] in ("skipped", "not_implemented"):
+            notes.append(f"{name} was not run ({module.get('message') or module['status']}).")
+        elif module["status"] == "error":
+            notes.append(
+                f"{name} failed and its findings are not relied on: {module.get('message')}."
+            )
+        for w in module.get("warnings", []):
+            notes.append(
+                f"{name}: {w.get('artifact_type')} could not be read"
+                f"{' (' + str(w['source']) + ')' if w.get('source') else ''}: {w.get('reason')}."
+            )
+        if module["status"] in ("ok", "partial"):
+            notes.extend(METHOD_LIMITS.get(name, ()))
+    memory = findings["modules"].get("module_c_memory", {}).get("details", {})
+    if memory.get("host_anchoring", {}).get("no_target"):
+        notes.append(
+            "The memory image was analysed without a target onion address or host, so nothing "
+            "in memory is attributed to Tor Browser; memory matches are observations only."
+        )
+    provenance = findings.get("provenance") or {}
+    for item in provenance.get("evidence_items", []):
+        if item["status"] in ("MISMATCH", "missing"):
+            notes.append(f"{item['label']} ({item['path']}) did not verify: {item['status']}.")
+        elif item["status"] == "unrecorded":
+            notes.append(
+                f"{item['label']} ({item['path']}) has no hash recorded at acquisition, so it "
+                "cannot be shown to be unchanged since then."
+            )
+        elif item["status"] == "not_hashed":
+            notes.append(f"{item['label']} ({item['path']}): {item.get('note', 'not hashed')}.")
+    if provenance and not provenance.get("acquisition"):
+        notes.append(
+            "No acquisition manifest accompanied the evidence; when and how it was acquired is "
+            "not recorded in this report."
+        )
+    tool = provenance.get("tool", {})
+    if tool.get("git_dirty"):
+        notes.append(
+            "TRANCE ran from source with uncommitted changes; the exact code cannot be "
+            "recovered from the recorded commit alone."
+        )
+    return notes
+
+
 def render_report(
     findings: dict, local_tz: str | None = None, findings_sha256: str | None = None
 ) -> str:
@@ -225,6 +302,7 @@ def render_report(
         generic_modules=generic,
         glossary=sorted(glossary.items()),
         provenance=findings.get("provenance"),
+        limitations=_limitations(findings),
         findings_sha256=findings_sha256,
     )
 
@@ -237,7 +315,7 @@ def write_report(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / REPORT_FILENAME
-    text = render_report(findings, local_tz)
+    text = render_report(findings, local_tz, findings_sha256)
     fd, tmp = tempfile.mkstemp(dir=output_dir, prefix=".report-")
     try:
         os.write(fd, text.encode())
