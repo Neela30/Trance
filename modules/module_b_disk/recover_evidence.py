@@ -25,9 +25,11 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from core.custody_log import CustodyEntry, CustodyLog
+try:
+    from core.custody_log import CustodyEntry, CustodyLog
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from core.custody_log import CustodyEntry, CustodyLog
 from core.exceptions import IntegrityError
 from core.hashing import hash_file
 from modules.module_b_disk.evidence import external_output, working_copy

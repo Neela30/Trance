@@ -64,8 +64,10 @@ output/                   local case outputs (gitignored) — some are STALE, se
 ```
 
 Requirements are split on purpose:
-- `requirements.txt` — analysis deps (`regipy`, `jinja2`, `lz4`, `psutil`, `click`, plus
-  `volatility3` and `yara-python`, see §8 on those two).
+- `requirements.txt` — analysis deps (`regipy[full]` — the extra pulls `pyfwps`/`pyfwsi` for
+  ShellBags, `jinja2`, `lz4`, `psutil`, `click`, `tzlocal`/`tzdata` for the report time zone, plus
+  `volatility3`, only used as the external `vol` CLI). `yara-python` was removed deliberately
+  (unused, needs a C toolchain) — don't re-add it when resolving merges.
 - `requirements-dev.txt` — pytest, pytest-cov, mypy, ruff, black.
 - `requirements-gui.txt` — `PySide6` only. Kept separate so the CLI exes stay lean.
 
@@ -923,11 +925,19 @@ workflow on large changes):
 
 ### P2 — smaller cleanups
 
-- `README.md` stale bits: says Module A returns `not_implemented`, and says WinPMEM/full-RAM
-  capture is "future work". `context.md` says Modules A/B are stubs.
+- **Merge hygiene (learned 2026-10-13).** The `Merge branch 'main' into dev` commit (`cfdcee5`)
+  auto-resolved wrongly and landed three syntactically invalid files plus duplicate
+  `cookie_names` plumbing, which turned CI red. Fixed by taking main's side where both branches
+  had built the same feature (cookie names, hash-once, `partial` status). After any merge of
+  `main`/`sahe` into `dev`, run `ruff check . && black --check . && pytest -q` *before*
+  pushing. Module B's status rule is main's: `error` only for an integrity (hash) failure,
+  `partial` for any other sub-step failure — tests assert it.
+
+- `context.md` is stale (says Modules A/B are stubs). `README.md` was brought up to date by
+  the `sahe` work and is now accurate on Module A and WinPMEM.
 - CI's `compileall` step skips `gui/`, `acquire_all.py`, `analyze_evidence.py`, `gui_main.py`.
-- `yara-python` is in requirements but unused; `volatility3` is only needed as the external
-  `vol` CLI; `click` is only used by `modules/module_a_registry/cli.py`.
+- `volatility3` is only needed as the external `vol` CLI; `click` is only used by
+  `modules/module_a_registry/cli.py`.
 - GUI: Recent Cases shows raw ISO timestamps (History uses relative time); case-name and
   output checks exist in both `main.py` and `gui/analysis_request.validate()`. The in-app
   mount needs pkexec + a polkit agent; it has only been run on GNOME (other desktops need

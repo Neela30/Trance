@@ -34,9 +34,11 @@ import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from core.custody_log import CustodyEntry, CustodyLog
+try:
+    from core.custody_log import CustodyEntry, CustodyLog
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from core.custody_log import CustodyEntry, CustodyLog
 from core.hashing import hash_file
 from modules.module_b_disk.evidence import working_copy
 
@@ -178,7 +180,7 @@ def parse_onion_auth(auth_dir: Path, metadata: dict | None = None) -> dict:
             "mtime_utc": _utc(f, file_metadata),
             "sha256": hash_file(f),
             "onion_address": (m.group(1) + ".onion") if m else None,
-            "x25519_private_key": m.group(2) if m else None,
+            "key_present": m is not None,
         }
         # tor only loads files ending exactly in ".auth_private"; anything else
         # in this directory was placed by a user and was never read by tor.

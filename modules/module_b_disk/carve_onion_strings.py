@@ -25,9 +25,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from core.custody_log import CustodyEntry, CustodyLog
+try:
+    from core.custody_log import CustodyEntry, CustodyLog
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from core.custody_log import CustodyEntry, CustodyLog
 
 CHUNK = 64 * 1024 * 1024
 # Longest thing we search for is a v3 onion host plus a little context, so an
@@ -191,7 +193,7 @@ def scan(image: Path, extra: list[re.Pattern]) -> dict:
         "client_auth_credentials": [
             {
                 "onion_address": addr.decode() + ".onion",
-                "x25519_private_key": key.decode(),
+                "key_present": True,
                 "occurrences": auth_counts[(addr, key)],
                 "first_offsets": offs,
             }
@@ -242,7 +244,7 @@ def main() -> int:
     print(f"\n*** Tor client-auth credentials recovered: {len(creds)} ***")
     for c in creds:
         print(f"  hidden service : {c['onion_address']}")
-        print(f"  x25519 privkey : {c['x25519_private_key']}")
+        print("  x25519 privkey : [present — redacted from output]")
         print(
             f"  found at       : x{c['occurrences']}, "
             f"{', '.join(f'0x{o:x}' for o in c['first_offsets'][:6])}"

@@ -102,7 +102,11 @@ def working_copy(evidence_dir: Path):
             raise IntegrityError("Evidence changed while creating the working copy")
         try:
             yield copy, before, verification
-        finally:
+        except Exception as _exc:
+            if inventory(root) != before:
+                raise IntegrityError("Source evidence changed during analysis") from _exc
+            raise
+        else:
             if inventory(root) != before:
                 raise IntegrityError("Source evidence changed during analysis")
 
