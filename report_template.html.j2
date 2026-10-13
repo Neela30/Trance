@@ -301,16 +301,8 @@
       {% if registry.hives_missing %}
       <dt>Hives not provided</dt><dd>{{ registry.hives_missing|join(", ") }}</dd>
       {% endif %}
-      <dt>Summary</dt><dd>{{ registry.summary }}</dd>
     </dl>
   </div>
-
-  <section>
-    <div class="keyfinding">
-      <span class="eyebrow">Key finding</span><span class="chip interp">Interpretation</span>
-      <p>{{ registry.narrative.key_finding }}</p>
-    </div>
-  </section>
 
   {% if registry.narrative.device_story %}
   <section>
@@ -586,62 +578,6 @@
     </div>
   </section>
   {% endif %}
-
-  <section>
-    <div class="section-head"><h2>Summary</h2></div>
-    <div class="tiles">
-      {% if disk.daemon %}
-      <div class="tile{{ '' if disk.daemon.daemon_start else ' gap' }}">
-        <h3>Tor daemon session</h3>
-        {% if disk.daemon.daemon_start %}
-        <p>Daemon running from <span class="mono">{{ disk.daemon.daemon_start }}</span> to at least <span class="mono">{{ disk.daemon.state_written or disk.daemon.daemon_start }}</span>. {{ disk.daemon.guards_used|length }} guard{{ "s" if disk.daemon.guards_used|length != 1 }} actually routed traffic; {{ disk.daemon.circuits_built or "?" }} circuits built over the daemon's life.</p>
-        {% else %}
-        <p>No <span class="mono">lock</span> file — daemon start time unknown.</p>
-        {% endif %}
-      </div>
-      {% endif %}
-      {% if disk.downloads %}
-      <div class="tile{{ '' if disk.downloads.inside else ' gap' }}">
-        <h3>Internet-origin files</h3>
-        <p>{{ disk.downloads.total }} file{{ "s" if disk.downloads.total != 1 }} carrying a <span class="mono">Zone.Identifier</span> stream found {{ disk.downloads.scope }}{% if disk.downloads.window %}; {{ disk.downloads.inside }} created while the Tor daemon was running, {{ disk.downloads.outside }} outside that window{% else %}; no daemon window to correlate against{% endif %}.</p>
-      </div>
-      {% endif %}
-      {% if disk.residue %}
-      <div class="tile{{ '' if disk.residue.any_hits else ' gap' }}">
-        <h3>Memory residue on disk</h3>
-        {% if disk.residue.any_hits %}
-        <p>{{ disk.residue.addresses|length }} onion address{{ "es" if disk.residue.addresses|length != 1 }} recovered from paged/hibernated memory — the only disk source that can name a public service.</p>
-        {% for a in disk.residue.addresses %}<span class="tile-value">{{ a.address }}</span>{% endfor %}
-        {% else %}
-        <p>{{ disk.residue.files|length }} memory file{{ "s" if disk.residue.files|length != 1 }} carved, no onion address. Visited public services are not recoverable from this disk.</p>
-        {% endif %}
-      </div>
-      {% endif %}
-      {% if disk.ntfs and disk.ntfs.addresses %}
-      <div class="tile">
-        <h3>Filesystem metadata</h3>
-        <p>{{ disk.ntfs.addresses|length }} onion address{{ "es" if disk.ntfs.addresses|length != 1 }} recorded by NTFS{% if disk.ntfs.addresses|selectattr("deleted")|list %}, {{ disk.ntfs.addresses|selectattr("deleted")|list|length }} for files since deleted{% endif %}{% if disk.ntfs.deleted_downloads %}; {{ disk.ntfs.deleted_downloads|length }} deleted download{{ "s" if disk.ntfs.deleted_downloads|length != 1 }} still marked internet-origin{% endif %}.</p>
-      </div>
-      {% endif %}
-      {% if disk.profile %}
-      <div class="tile{{ ' gap' if disk.profile.inert }}">
-        <h3>Browser profile</h3>
-        {% if disk.profile.inert %}
-        <p>No history, cookies or bookmarks beyond Tor Browser's {{ disk.profile.default_entries }} shipped defaults. Expected: permanent private browsing never writes them. This is not evidence of no activity.</p>
-        {% else %}
-        <p>{{ disk.profile.history|length }} visited page{{ "s" if disk.profile.history|length != 1 }}, {{ disk.profile.cookies|length }} cookie{{ "s" if disk.profile.cookies|length != 1 }}, {{ disk.profile.bookmarks|length }} user bookmark{{ "s" if disk.profile.bookmarks|length != 1 }} — unusual for Tor Browser; check whether private browsing was disabled.</p>
-        {% endif %}
-      </div>
-      {% endif %}
-      {% if disk.daemon and disk.daemon.credentials %}
-      <div class="tile">
-        <h3>Configured hidden services</h3>
-        <p>{{ disk.daemon.credentials|length }} client-auth credential{{ "s" if disk.daemon.credentials|length != 1 }} name{{ "s" if disk.daemon.credentials|length == 1 }} a specific onion service in plaintext.</p>
-        {% for c in disk.daemon.credentials %}<span class="tile-value">{{ c.onion_address }}</span>{% endfor %}
-      </div>
-      {% endif %}
-    </div>
-  </section>
 
   {% if disk.daemon %}
   <section>
@@ -1041,50 +977,6 @@
   </section>
   {% endif %}
 
-  {% set mem_empty = [] %}
-  {% for label, value in [("session cookies", memory.session_cookies), ("credentials", d.key_findings.credentials), ("site map", memory.site_map), ("downloads from the target site", memory.downloads.matched), ("search terms", memory.search_terms), ("activity sequence", memory.events)] if not value %}{% set _ = mem_empty.append(label) %}{% endfor %}
-  {% if mem_empty|length < 6 %}
-  <section>
-    <div class="section-head"><h2>Summary</h2></div>
-    <div class="tiles">
-      <div class="tile">
-        <h3>Session &amp; cookie evidence</h3>
-        <p>{{ memory.session_cookies|length }} high-confidence value{{ "s" if memory.session_cookies|length != 1 }} recovered from the cookie jar.</p>
-        {% for c in memory.session_cookies %}{% if c.decoded_payload %}<span class="tile-value">{{ c.decoded_payload }}</span>{% endif %}{% endfor %}
-      </div>
-      <div class="tile">
-        <h3>Site map</h3>
-        <p>{{ memory.site_map|length }} distinct path{{ "s" if memory.site_map|length != 1 }} recovered on the target.
-        {% if memory.near_duplicates %}{{ memory.near_duplicates|length }} look like possible typos/probes.{% endif %}</p>
-      </div>
-      <div class="tile{{ '' if memory.downloads.matched else ' gap' }}">
-        <h3>Local downloads</h3>
-        {% if memory.downloads.matched %}
-        <p>{{ memory.downloads.matched|length }} file{{ "s" if memory.downloads.matched|length != 1 }} confirmed under a real <span class="mono">Downloads</span> folder, matched to a target-site path.</p>
-        {% else %}
-        <p>No downloads correlate to a target-site path in this dump.</p>
-        {% endif %}
-        {% if memory.downloads.unmatched %}
-        <p class="note">+ {{ memory.downloads.unmatched|length }} other download{{ "s" if memory.downloads.unmatched|length != 1 }} seen on this machine, not correlated to the target site — see below.</p>
-        {% endif %}
-      </div>
-      <div class="tile{{ '' if d.key_findings.credentials else ' gap' }}">
-        <h3>Credentials</h3>
-        {% if d.key_findings.credentials %}
-        <p>{{ d.key_findings.credentials|length }} high-confidence submission{{ "s" if d.key_findings.credentials|length != 1 }} recovered.</p>
-        {% else %}
-        <p>No plaintext <span class="mono">field=value</span> or JSON-shaped login submission found in memory. Not proof no login happened — session cookie evidence already establishes that independently; this data type just wasn't in a text-matchable shape (or was overwritten) by capture time.</p>
-        {% endif %}
-      </div>
-    </div>
-  </section>
-  {% endif %}
-  {% if mem_empty %}
-  <section>
-    <p class="note">Nothing recovered from memory for: {{ mem_empty|join(", ") }}.</p>
-  </section>
-  {% endif %}
-
   {% if memory.session_cookies %}
   <section>
     <div class="section-head"><h2>Session &amp; cookies</h2><span class="count">{{ memory.session_cookies|length }} unique, high-confidence</span></div>
@@ -1446,6 +1338,70 @@
       <li><span class="mono">{{ g.name }}</span> did not contribute ({{ g.status.replace('_', ' ') }}){% if g.message %}: {{ g.message }}{% endif %}. Cross-layer correlation is incomplete until it does.</li>
       {% endfor %}
     </ul>
+  </section>
+
+  <div class="band">
+    <div class="eyebrow">Summary</div>
+    <h2>Summary of findings<span class="chip interp">Interpretation</span></h2>
+    <p class="band-subtitle">One short account per layer of evidence; the sections above hold the detail.</p>
+  </div>
+  <section>
+    {% for g in generic_modules if g.status != 'ok' %}
+    <p class="note"><span class="mono">{{ g.name }}</span>: {{ g.status.replace('_', ' ') }}{% if g.message %} — {{ g.message }}{% endif %}.</p>
+    {% endfor %}
+    {% if registry %}
+    <h3 style="font-size:15px; font-weight:600; margin-top:14px;">Registry</h3>
+    <p>{{ registry.narrative.key_finding }}</p>
+    {% endif %}
+    {% if disk %}
+    <h3 style="font-size:15px; font-weight:600; margin-top:14px;">Disk</h3>
+    <ul class="reco-list">
+      {% if disk.daemon %}
+      {% if disk.daemon.daemon_start %}
+      <li>The Tor daemon ran from {{ disk.daemon.daemon_start }} to at least {{ disk.daemon.state_written or disk.daemon.daemon_start }}; {{ disk.daemon.guards_used|length }} entry guard{{ "s" if disk.daemon.guards_used|length != 1 }} carried traffic and {{ disk.daemon.circuits_built or "an unknown number of" }} circuits were built.</li>
+      {% else %}
+      <li>Tor's data folder was examined, but there is no <span class="mono">lock</span> file, so when the daemon started is unknown.</li>
+      {% endif %}
+      {% if disk.daemon.credentials %}
+      <li>{{ disk.daemon.credentials|length }} client-auth credential{{ "s" if disk.daemon.credentials|length != 1 }} name{{ "s" if disk.daemon.credentials|length == 1 }} a specific onion service: {{ disk.daemon.credentials|map(attribute="onion_address")|join(", ") }}.</li>
+      {% endif %}
+      {% endif %}
+      {% if disk.downloads %}
+      <li>{% if disk.downloads.total %}{{ disk.downloads.total }} internet-origin file{{ "s" if disk.downloads.total != 1 }} found {{ disk.downloads.scope }}{% if disk.downloads.window %}, {{ disk.downloads.inside }} created while Tor was running{% endif %}{% else %}No internet-origin file found {{ disk.downloads.scope }}{% endif %}.</li>
+      {% endif %}
+      {% if disk.residue %}
+      <li>{% if disk.residue.any_hits %}{{ disk.residue.addresses|length }} onion address{{ "es" if disk.residue.addresses|length != 1 }} recovered from memory residue on disk: {{ disk.residue.addresses|map(attribute="address")|join(", ") }}.{% else %}No onion address in the memory residue on disk.{% endif %}</li>
+      {% endif %}
+      {% if disk.ntfs %}
+      <li>{% if disk.ntfs.addresses %}{{ disk.ntfs.addresses|length }} onion address{{ "es" if disk.ntfs.addresses|length != 1 }} in filesystem metadata; {% endif %}{{ disk.ntfs.event_files|length }} Tor file{{ "s" if disk.ntfs.event_files|length != 1 }} changed in the journal, {{ disk.ntfs.deleted_tor_files|length }} deleted.</li>
+      {% endif %}
+      {% if disk.profile %}
+      <li>{% if disk.profile.inert %}The browser profile holds no history, cookies or bookmarks beyond the shipped defaults, as expected with permanent private browsing.{% else %}The browser profile holds {{ disk.profile.history|length }} visited page{{ "s" if disk.profile.history|length != 1 }}, {{ disk.profile.cookies|length }} cookie{{ "s" if disk.profile.cookies|length != 1 }} and {{ disk.profile.bookmarks|length }} user bookmark{{ "s" if disk.profile.bookmarks|length != 1 }}; unusual for Tor Browser.{% endif %}</li>
+      {% endif %}
+    </ul>
+    {% endif %}
+    {% if memory %}
+    {% set d = memory.details %}
+    <h3 style="font-size:15px; font-weight:600; margin-top:14px;">Memory</h3>
+    <ul class="reco-list">
+      {% if d.host_anchoring.no_target %}
+      <li>No target was given, so nothing in memory is attributed to Tor Browser{% if d.targeting_suggestions %}; the onion address seen most often is {{ d.targeting_suggestions[0].onion }}{% endif %}.</li>
+      {% endif %}
+      {% set pa = memory.volatility3.process_activity %}
+      {% if pa and pa.groups %}
+      <li>{{ pa.process_count }} Tor Browser process{{ "es" if pa.process_count != 1 }} ran from {{ pa.first_start|fmt_ts }}{% if pa.still_running %}, some still running at capture{% else %} to {{ pa.last_exit|fmt_ts }}{% endif %}.</li>
+      {% endif %}
+      {% set mem_found = [] %}
+      {% set mem_empty = [] %}
+      {% for one, many, none_label, value in [("session cookie", "session cookies", "session cookies", memory.session_cookies), ("credential", "credentials", "credentials", d.key_findings.credentials), ("site-map path", "site-map paths", "site map", memory.site_map), ("download from the target site", "downloads from the target site", "downloads from the target site", memory.downloads.matched), ("search term", "search terms", "search terms", memory.search_terms), ("activity-sequence event", "activity-sequence events", "activity sequence", memory.events)] %}{% set _ = (mem_found if value else mem_empty).append((one if value|length == 1 else many, none_label, value|length)) %}{% endfor %}
+      {% if mem_found %}
+      <li>Recovered: {% for label, _, n in mem_found %}{{ n }} {{ label }}{{ ", " if not loop.last }}{% endfor %}.</li>
+      {% endif %}
+      {% if mem_empty %}
+      <li>Nothing recovered for: {% for _, label, n in mem_empty %}{{ label }}{{ ", " if not loop.last }}{% endfor %}.</li>
+      {% endif %}
+    </ul>
+    {% endif %}
   </section>
 
   {% if glossary %}

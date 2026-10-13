@@ -159,7 +159,9 @@ hivelist is not printed (`module_c_memory/report._tor_rows`); empty memory secti
 to one line; NTFS journal events are grouped per file (`module_b_disk/report._group_events`);
 verified evidence folders are one row (`report._evidence_rows`); the glossary lists only
 terms the report uses; no "Filtered as noise" or device/profile appendices; Module A drops
-the network/interface tables and the technical lines that repeat "What happened". nc-01:
+the network/interface tables and the technical lines that repeat "What happened". Per-module summaries
+(Module A's key finding, B/C summary tiles) are folded into one "Summary of findings" after
+Recommendations. nc-01:
 40 -> 16 pages, c3: 35 -> 20, c4: 38 -> 23. Remaining plan: case metadata (examiner/case no./exhibits, to
 pre-fill the declaration), reproducibility test, and a Sri Lanka Evidence (Special
 Provisions) Act certificate template (needs legal check of wording).

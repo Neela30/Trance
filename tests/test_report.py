@@ -110,6 +110,19 @@ def test_render_report_includes_glossary_for_a_module_a_case(tmp_path):
     assert "NTUSER.DAT" in html
 
 
+def test_key_finding_is_only_in_the_closing_summary(tmp_path):
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    findings = build_findings(config, [_module_a_result_with_one_launch()])
+
+    html = render_report(findings, local_tz="Asia/Colombo")
+
+    key = "The evidence shows Tor Browser was installed"
+    assert html.count(key) == 1
+    assert (
+        html.index("Summary of findings") < html.index(key) < html.index("Examiner's declaration")
+    )
+
+
 def test_render_report_narrative_uses_the_given_timezone(tmp_path):
     config = TranceConfig(case_name="case", output_dir=tmp_path)
     findings = build_findings(config, [_module_a_result_with_one_launch()])
