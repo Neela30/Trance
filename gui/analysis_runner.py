@@ -25,6 +25,12 @@ class RunSummary:
     report_path: Path
     findings_path: Path
     has_error: bool
+    integrity_status: str | None = None  # core.evidence_integrity STATUS_* value
+    integrity_message: str = ""
+
+    @property
+    def integrity_failed(self) -> bool:
+        return self.integrity_status == "failed"
 
 
 def runner_command(request_path: Path) -> list[str]:
@@ -53,6 +59,8 @@ def summary_from(payload: dict) -> RunSummary:
         report_path=Path(payload["report_path"]),
         findings_path=Path(payload["findings_path"]),
         has_error=bool(payload["has_error"]),
+        integrity_status=payload.get("integrity_status"),
+        integrity_message=payload.get("integrity_message", ""),
     )
 
 
@@ -60,12 +68,18 @@ def run(request_path: Path) -> int:
     # Imported here: the GUI process only needs the module for runner_command/parse_line.
     import main
     from core.config import TranceConfig
+    from core.safety import apply_resource_limits, refuse_root
     from gui.analysis_request import AnalysisRequest, effective_inputs
     from gui.pipeline_inputs import module_kwargs_from_resolved
 
     sys.stdout.reconfigure(line_buffering=True)
     try:
+        refuse_root()
         request = AnalysisRequest.from_json(Path(request_path).read_text(encoding="utf-8"))
+        # Before anything reads the evidence; inherited by the memory scan's workers.
+        memory_mb, cpu_seconds = request.resource_limits()
+        for note in apply_resource_limits(memory_mb, cpu_seconds):
+            print(f"[*] resource limit: {note}")
         inputs = effective_inputs(request)
         for note in inputs.get("volume_notes", []):
             print(f"[*] {note}")
@@ -95,6 +109,8 @@ def run(request_path: Path) -> int:
             "report_path": str(result.report_path),
             "findings_path": str(result.findings_path),
             "has_error": result.has_error,
+            "integrity_status": (result.integrity or {}).get("status"),
+            "integrity_message": (result.integrity or {}).get("message", ""),
         }
     )
     return 0

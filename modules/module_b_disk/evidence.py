@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
@@ -98,6 +99,9 @@ def working_copy(evidence_dir: Path):
     with tempfile.TemporaryDirectory(prefix="trance-profile-") as directory:
         copy = Path(directory) / "profile"
         shutil.copytree(root, copy, symlinks=True)
+        # copytree carries permissions over: evidence imported by the GUI is read-only,
+        # and sqlite needs a writable copy (and -wal/-shm) to open the databases.
+        _make_writable(copy)
         if inventory(copy) != before or inventory(root) != before:
             raise IntegrityError("Evidence changed while creating the working copy")
         try:
@@ -109,6 +113,14 @@ def working_copy(evidence_dir: Path):
         else:
             if inventory(root) != before:
                 raise IntegrityError("Source evidence changed during analysis")
+
+
+def _make_writable(root: Path) -> None:
+    """Owner-writable throughout -- only ever called on the disposable working copy."""
+    for path in [root, *root.rglob("*")]:
+        if path.is_symlink():
+            continue
+        path.chmod(path.stat().st_mode | stat.S_IWUSR | (stat.S_IXUSR if path.is_dir() else 0))
 
 
 def external_output(path: Path, evidence_dir: Path) -> Path:

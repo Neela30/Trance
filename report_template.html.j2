@@ -2,6 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+{# Strict CSP: the report is static HTML + inline CSS and needs no script, network, frame or
+   form. Evidence text is autoescaped (report.py); this is the second layer if anything ever
+   slips through -- no script runs, nothing loads from anywhere. Keep it the first thing in
+   <head> after the charset, before any evidence-derived text (the <title>). #}
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; font-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TRANCE — {{ findings.case.name }}</title>
 <style>
@@ -128,6 +134,21 @@
       {% if findings.case.evidence_dir %}<dt>Evidence dir</dt><dd>{{ findings.case.evidence_dir|wrap_path }}</dd>{% endif %}
     </dl>
   </div>
+
+  {% set integrity = findings.evidence_integrity %}
+  {% if integrity and integrity.status == 'failed' %}
+  <div class="callout" style="border-left-color: var(--accent); border-left-width: 5px; font-size: 14px;">
+    <strong>Evidence integrity check failed — nothing was analysed.</strong> {{ integrity.message }}
+    {% if integrity.mismatched %}<br>Changed since acquisition: {% for m in integrity.mismatched[:20] %}<span class="mono">{{ m.path }}</span>{{ ", " if not loop.last }}{% endfor %}{% if integrity.mismatched|length > 20 %} (+{{ integrity.mismatched|length - 20 }} more){% endif %}.{% endif %}
+    {% if integrity.invalid %}<br>Unsafe or unreadable: {% for i in integrity.invalid[:20] %}<span class="mono">{{ i.record }}</span> ({{ i.reason }}){{ "; " if not loop.last }}{% endfor %}.{% endif %}
+    <br>Re-copy the evidence from the original acquisition media and run the analysis again.
+  </div>
+  {% elif integrity and integrity.status in ['verified', 'unverified'] %}
+  <div class="callout" style="border-left-color: {{ 'var(--confirm)' if integrity.status == 'verified' and not integrity.missing else 'var(--noise)' }};">
+    <strong>Evidence integrity:</strong> {{ integrity.message }}
+    {% if integrity.missing %}<br>Missing: {% for m in integrity.missing[:10] %}<span class="mono">{{ m.path }}</span>{{ ", " if not loop.last }}{% endfor %}{% if integrity.missing|length > 10 %} (+{{ integrity.missing|length - 10 }} more){% endif %}.{% endif %}
+  </div>
+  {% endif %}
 
   <section>
     <div class="section-head"><h2>Module status</h2></div>

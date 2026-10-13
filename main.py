@@ -26,7 +26,9 @@ from pathlib import Path, PureWindowsPath
 
 from core.config import TranceConfig
 from core.custody_log import CustodyEntry, CustodyLog
+from core.evidence_integrity import STATUS_FAILED, evidence_inputs, verify_evidence
 from core.hashing import hash_file
+from core.safety import UnsafeEnvironmentError, refuse_root
 from core.schema import ModuleResult
 from findings import build_findings, write_findings
 from report import write_report
@@ -66,10 +68,15 @@ class PipelineResult:
     findings_path: Path
     report_path: Path
     custody_path: Path
+    integrity: dict | None = None
+
+    @property
+    def integrity_failed(self) -> bool:
+        return bool(self.integrity) and self.integrity.get("status") == STATUS_FAILED
 
     @property
     def has_error(self) -> bool:
-        return any(r.status == "error" for r in self.results)
+        return self.integrity_failed or any(r.status == "error" for r in self.results)
 
 
 def no_target_warning(source_type: str | None) -> str:
@@ -131,11 +138,36 @@ def run_pipeline(
     Shared by main()'s CLI and the GUI (modules/... callers already resolve their own
     module_kwargs). progress_cb, if given, is called (step_name, step, total_steps) after
     each module and once more after writing outputs -- total_steps is len(MODULES) + 1.
-    """
-    total_steps = len(MODULES) + 1
-    results = _run_modules(config, module_kwargs, progress_cb, total_steps)
 
-    findings = build_findings(config, results)
+    Before any module runs, every hash record in the evidence folder (and next to each
+    input outside it) is re-checked (core.evidence_integrity). If anything fails, no
+    module parses the evidence: each is recorded as an error, and findings.json/report.html
+    carry the integrity failure instead. Refuses to run at all as root (core.safety).
+    """
+    refuse_root()
+    total_steps = len(MODULES) + 1
+    integrity = verify_evidence(config.evidence_dir, evidence_inputs(module_kwargs))
+    print(f"[*] evidence integrity: {integrity['status']} — {integrity['message']}")
+    if integrity["status"] == STATUS_FAILED:
+        for item in integrity["mismatched"]:
+            print(f"[!] hash mismatch: {item['path']}", file=sys.stderr)
+        for item in integrity["invalid"]:
+            print(f"[!] unsafe evidence: {item['record']}: {item['reason']}", file=sys.stderr)
+        results = [
+            ModuleResult(
+                module=name,
+                status="error",
+                message="not run: the evidence integrity check failed (see evidence_integrity)",
+            )
+            for name in MODULES
+        ]
+        if progress_cb:
+            for step, name in enumerate(MODULES, start=1):
+                progress_cb(name, step, total_steps)
+    else:
+        results = _run_modules(config, module_kwargs, progress_cb, total_steps)
+
+    findings = build_findings(config, results, integrity=integrity)
     findings_path = write_findings(findings, config.output_dir)
     report_path = write_report(findings, config.output_dir, config.report_timezone)
 
@@ -217,6 +249,7 @@ def run_pipeline(
         findings_path=findings_path,
         report_path=report_path,
         custody_path=custody.log_path,
+        integrity=integrity,
     )
 
 
@@ -343,6 +376,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    try:
+        refuse_root()
+    except UnsafeEnvironmentError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+
     if (
         args.case in (".", "..")
         or Path(args.case).name != args.case
@@ -400,7 +439,11 @@ def main(argv: list[str] | None = None) -> int:
         },
     }
 
-    pipeline = run_pipeline(config, module_kwargs)
+    try:
+        pipeline = run_pipeline(config, module_kwargs)
+    except UnsafeEnvironmentError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
 
     memory_result = next(
         (r for r in pipeline.results if r.module == "module_c_memory" and r.status == "ok"), None
@@ -414,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n[*] findings: {pipeline.findings_path}")
     print(f"[*] report:   {pipeline.report_path}")
     print(f"[*] custody:  {pipeline.custody_path}")
+    if pipeline.integrity_failed:
+        print(f"[!] {pipeline.integrity['message']}", file=sys.stderr)
     return 2 if pipeline.has_error else 0
 
 
