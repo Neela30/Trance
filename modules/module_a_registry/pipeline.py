@@ -388,18 +388,20 @@ def _update_stats(
         if run_counter and path and not is_tor_installer(path):
             existing = stats["userassist_run_counts"].get(path, 0)
             stats["userassist_run_counts"][path] = max(existing, run_counter)
-        if clean_timestamp and (
-            stats["last_executed"] is None or clean_timestamp > stats["last_executed"]
+        # "Last opened" is the UserAssist launch, as in the narrative's key finding.
+        if (
+            clean_timestamp
+            and not (path and is_tor_installer(path))
+            and (stats["last_opened"] is None or clean_timestamp > stats["last_opened"])
         ):
-            stats["last_executed"] = clean_timestamp
+            stats["last_opened"] = clean_timestamp
     elif artifact_type == ARTIFACT_TYPE_BAM:
-        # BAM carries no run-count, only a last-execution timestamp -- it can extend
-        # last_executed (an independent subsystem corroborating "still running this
-        # recently") but never affects the launch-count number itself.
+        # BAM is usually written when the program stops: reported separately, never as a
+        # launch time and never in the launch count.
         if clean_timestamp and (
-            stats["last_executed"] is None or clean_timestamp > stats["last_executed"]
+            stats["last_running"] is None or clean_timestamp > stats["last_running"]
         ):
-            stats["last_executed"] = clean_timestamp
+            stats["last_running"] = clean_timestamp
 
 
 def _format_summary_timestamp(value: str | None) -> str | None:
@@ -430,8 +432,12 @@ def _build_summary(
     launch_count = max(stats["userassist_run_counts"].values(), default=0)
     if launch_count:
         parts.append(f"launched {launch_count} time{'s' if launch_count != 1 else ''}")
-    if stats["last_executed"]:
-        parts.append(f"last run {_format_summary_timestamp(stats['last_executed'])}")
+    if stats["last_opened"]:
+        parts.append(f"last opened {_format_summary_timestamp(stats['last_opened'])}")
+    if stats["last_running"] and (
+        not stats["last_opened"] or stats["last_running"] > stats["last_opened"]
+    ):
+        parts.append(f"last recorded running {_format_summary_timestamp(stats['last_running'])}")
 
     if parts:
         summary = ", ".join(parts) + "."
@@ -487,7 +493,12 @@ def run_module_a(
     context_findings: list[Artifact] = []
     errors: list[str] = []
     warnings: list[dict] = []
-    stats = {"install_timestamp": None, "userassist_run_counts": {}, "last_executed": None}
+    stats = {
+        "install_timestamp": None,
+        "userassist_run_counts": {},
+        "last_opened": None,
+        "last_running": None,
+    }
     hives_provided = {
         "ntuser": ntuser is not None,
         "system": system is not None,

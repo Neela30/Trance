@@ -27,61 +27,67 @@ def test_error_status_and_message_passed_through(tmp_path):
     assert ctx["volatility3"]["message"] == "vol binary not found"
 
 
-def test_plugin_views_labeled_capped_and_ordered(tmp_path):
+def test_plugin_views_labeled_capped_ordered_and_tor_only(tmp_path):
     details = base_details(tmp_path)
-    many_rows = [
-        {"source": "volatility3:windows.filescan.FileScan", "Offset": hex(i), "Name": f"f{i}"}
+    tor_files = [
+        {"source": "s", "Offset": hex(i), "Name": f"\\Users\\a\\Desktop\\Tor Browser\\f{i}"}
         for i in range(150)
     ]
+    other_files = [{"source": "s", "Offset": "0x1", "Name": "\\Windows\\notepad.exe"}]
     details["volatility3"] = {
         "status": "ok",
         "message": None,
         "vol_bin": "vol",
         "plugins": {
             "windows.registry.hivelist.HiveList": {
-                "status": "error",
-                "message": "no symbols",
-                "row_count": 0,
-                "rows": [],
+                "status": "ok",
+                "message": None,
+                "row_count": 1,
+                "rows": [{"source": "s", "FileFullPath": "\\SystemRoot\\SYSTEM"}],
+            },
+            "windows.netscan.NetScan": {
+                "status": "ok",
+                "message": None,
+                "row_count": 2,
+                "rows": [
+                    {"source": "s", "PID": 7, "Owner": "tor.exe", "ForeignAddr": "1.2.3.4"},
+                    {"source": "s", "PID": 9, "Owner": "svchost.exe", "ForeignAddr": "5.6.7.8"},
+                ],
             },
             "windows.psscan.PsScan": {
                 "status": "ok",
                 "message": None,
-                "row_count": 1,
+                "row_count": 2,
                 "rows": [
-                    {
-                        "source": "volatility3:windows.psscan.PsScan",
-                        "PID": 1,
-                        "ImageFileName": "firefox.exe",
-                    }
+                    {"source": "s", "PID": 7, "ImageFileName": "tor.exe"},
+                    {"source": "s", "PID": 9, "ImageFileName": "svchost.exe"},
                 ],
             },
             "windows.filescan.FileScan": {
                 "status": "ok",
                 "message": None,
-                "row_count": 150,
-                "rows": many_rows,
+                "row_count": 151,
+                "rows": tor_files + other_files,
             },
         },
     }
     ctx = build_context(details)
-    plugins = ctx["volatility3"]["plugins"]
-    # Known plugins render in the fixed VOL3_PLUGIN_LABELS order, not dict insertion order.
-    names = [p["name"] for p in plugins]
-    assert names.index("windows.psscan.PsScan") < names.index("windows.filescan.FileScan")
-    assert names.index("windows.filescan.FileScan") < names.index(
-        "windows.registry.hivelist.HiveList"
-    )
+    plugins = {p["name"]: p for p in ctx["volatility3"]["plugins"]}
+    # Known plugins render in the fixed VOL3_PLUGIN_LABELS order; hivelist is never printed.
+    assert list(plugins) == [
+        "windows.psscan.PsScan",
+        "windows.netscan.NetScan",
+        "windows.filescan.FileScan",
+    ]
+    assert [r["PID"] for r in plugins["windows.psscan.PsScan"]["rows"]] == [7]
+    assert [r["ForeignAddr"] for r in plugins["windows.netscan.NetScan"]["rows"]] == ["1.2.3.4"]
 
-    filescan = next(p for p in plugins if p["name"] == "windows.filescan.FileScan")
+    filescan = plugins["windows.filescan.FileScan"]
     assert filescan["label"] == "Open files (filescan)"
-    assert filescan["total_rows"] == 150
-    assert len(filescan["rows"]) == 100  # VOL3_TABLE_CAP
+    assert filescan["total_rows"] == 151  # all rows, as recorded
+    assert len(filescan["rows"]) == 100  # VOL3_TABLE_CAP, Tor rows only
     assert filescan["truncated"] is True
-
-    hivelist = next(p for p in plugins if p["name"] == "windows.registry.hivelist.HiveList")
-    assert hivelist["status"] == "error"
-    assert hivelist["message"] == "no symbols"
+    assert all("Tor Browser" in r["Name"] for r in filescan["rows"])
 
 
 def test_psscan_corroboration_flags_firefox_process(tmp_path):
@@ -120,6 +126,27 @@ def test_psscan_corroboration_flags_firefox_process(tmp_path):
     assert "PID 111" in notes[0]
     assert "exited t2" in notes[0]
     assert "explorer" not in notes[0]
+
+
+def test_psscan_corroboration_is_one_note_with_unique_pids(tmp_path):
+    details = base_details(tmp_path)
+    row = {"source": "s", "ImageFileName": "firefox.exe", "CreateTime": "t", "ExitTime": None}
+    details["volatility3"] = {
+        "status": "ok",
+        "message": None,
+        "vol_bin": "vol",
+        "plugins": {
+            "windows.psscan.PsScan": {
+                "status": "ok",
+                "message": None,
+                "rows": [{**row, "PID": 1}, {**row, "PID": 2}, {**row, "PID": 1}],
+            }
+        },
+    }
+    notes = build_context(details)["volatility3"]["corroboration"]
+    assert len(notes) == 1
+    assert "2 firefox.exe processes" in notes[0]
+    assert notes[0].count("PID 1,") == 1
 
 
 def test_netscan_corroboration_requires_host_and_port_match(tmp_path):

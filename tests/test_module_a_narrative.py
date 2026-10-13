@@ -725,9 +725,9 @@ class TestDescribeNotDetermined:
         bullets = describe_not_determined(None, multiple_launches=True)
         assert any("dates of earlier uses" in b for b in bullets)
 
-    def test_always_points_to_modules_b_and_c_for_browsing_content(self):
-        bullets = describe_not_determined("2026-09-01T00:00:00+00:00", multiple_launches=False)
-        assert any("disk and memory sections" in b for b in bullets)
+    def test_nothing_unknown_gives_no_bullets(self):
+        # Browsing content is covered once in the report's Limitations, not repeated here.
+        assert describe_not_determined("2026-09-01T00:00:00+00:00", multiple_launches=False) == []
 
 
 class TestBuildKeyFinding:

@@ -152,7 +152,15 @@ Report structure (2026-10-13): a "How to read this report" note; narrative secti
 memory, dirty checkout, plus `METHOD_LIMITS`); Tool validation (the §10 numbers, hardcoded
 in the template -- update them when the evaluation is re-run); and a blank examiner
 declaration/signature block as the last page. The stamp reads "Forensic examination report /
-Not valid unless signed". Remaining plan: case metadata (examiner/case no./exhibits, to
+Not valid unless signed". **Tor-only printing** (2026-10-13): the report prints only
+Tor-related data; findings.json keeps everything. Volatility tables show only firefox.exe/
+tor.exe PIDs (psscan/netscan/cmdline) and distinct files in `TorBrowser\Data` (filescan),
+hivelist is not printed (`module_c_memory/report._tor_rows`); empty memory sections collapse
+to one line; NTFS journal events are grouped per file (`module_b_disk/report._group_events`);
+verified evidence folders are one row (`report._evidence_rows`); the glossary lists only
+terms the report uses; no "Filtered as noise" or device/profile appendices; Module A drops
+the network/interface tables and the technical lines that repeat "What happened". nc-01:
+40 -> 16 pages, c3: 35 -> 20, c4: 38 -> 23. Remaining plan: case metadata (examiner/case no./exhibits, to
 pre-fill the declaration), reproducibility test, and a Sri Lanka Evidence (Special
 Provisions) Act certificate template (needs legal check of wording).
 

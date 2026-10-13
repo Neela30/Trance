@@ -505,11 +505,7 @@ def describe_not_determined(
             "registry only records when each network was first and last connected, not a "
             "connection history."
         )
-    bullets.append(
-        "What websites were visited or what was done inside Tor Browser — this comes "
-        "only from the computer's registry; see this report's disk and memory sections "
-        "for that."
-    )
+    # "What was done inside Tor Browser" is stated once, in the report's Limitations.
     return bullets
 
 
@@ -781,14 +777,13 @@ def build_network_narrative(
     correlation: list[str] = []
     caveats: list[str] = []
 
-    if profiles_utc:
-        caveats.append(_NETWORK_HISTORY_CAVEAT)
-    if bias_minutes is None and profiles_utc:
-        caveats.append(_TIMEZONE_UNKNOWN_CAVEAT)
-
     closest = describe_closest_network_before_launch(profiles_utc, latest_tor_use_iso)
     if closest:
         correlation.append(closest)
+        # Qualifies the "closest connection" sentence only; nothing to qualify without it.
+        caveats.append(_NETWORK_HISTORY_CAVEAT)
+    if bias_minutes is None and profiles_utc:
+        caveats.append(_TIMEZONE_UNKNOWN_CAVEAT)
     correlation.extend(
         describe_networks_created_same_day_as_launch(profiles_utc, latest_tor_use_iso)
     )

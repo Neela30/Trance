@@ -386,6 +386,7 @@ def _ntfs_context(ntfs: dict) -> dict:
             }
             for e in usn.get("tor_events", [])
         ],
+        "event_files": _group_events(usn.get("tor_events", [])),
         "downloads": [
             {
                 "path": d["path"],
@@ -410,6 +411,27 @@ SECTIONS = (
     ("memory_residue", _residue_context),
     ("ntfs", _ntfs_context),
 )
+
+
+def _group_events(events: list[dict]) -> list[dict]:
+    """One row per file: the journal logs every write separately (Firefox's telemetry
+    file alone makes dozens), which buries the files themselves."""
+    by_path: dict[str, dict] = {}
+    for e in events:
+        row = by_path.setdefault(
+            e["path"], {"path": e["path"], "count": 0, "first": None, "last": None, "actions": []}
+        )
+        row["count"] += 1
+        t = _iso(e.get("time_utc"))
+        if t and (row["first"] is None or t < row["first"]):
+            row["first"] = t
+        if t and (row["last"] is None or t > row["last"]):
+            row["last"] = t
+        for r in e["reasons"]:
+            action = r.replace("_", " ").lower()
+            if action not in row["actions"]:
+                row["actions"].append(action)
+    return list(by_path.values())
 
 
 def build_context(details: dict, local_tz: str | None = None) -> dict:

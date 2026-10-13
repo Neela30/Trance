@@ -117,7 +117,8 @@ def test_render_report_narrative_uses_the_given_timezone(tmp_path):
     html = render_report(findings, local_tz="Asia/Colombo")
 
     assert "What happened" in html
-    assert "10:11 AM Asia/Colombo" in html
+    # Plain-English timeline: local time first, UTC in brackets.
+    assert "10:11 AM (04:41 UTC)" in html
 
 
 def _module_a_result_partial_status() -> ModuleResult:
@@ -322,3 +323,31 @@ def test_report_has_method_limits_validation_and_declaration_sections():
     ):
         assert heading in html
     assert "Authorized security exercise" not in html
+
+
+def test_evidence_rows_fold_verified_folders_but_list_failures():
+    def item(path, status):
+        return {"label": "Tor Browser profile", "path": path, "size_bytes": 10, "status": status}
+
+    rows = report._evidence_rows(
+        [
+            item("/e/disk/profile/a", "verified"),
+            item("/e/disk/profile/b", "verified"),
+            item("/e/disk/profile/c", "MISMATCH"),
+            {"label": "Memory image", "path": "/e/m.raw", "size_bytes": 5, "status": "verified"},
+        ]
+    )
+    assert [(r["path"], r["status"]) for r in rows] == [
+        ("/e/disk/profile", "verified"),
+        ("/e/disk/profile/c", "MISMATCH"),
+        ("/e/m.raw", "verified"),
+    ]
+    assert rows[0]["size_bytes"] == 20 and "2 files" in rows[0]["note"]
+
+
+def test_glossary_lists_only_terms_the_report_uses(tmp_path):
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    html = render_report(build_findings(config, [_module_a_result_with_one_launch()]))
+    glossary = html[html.index("<h2>Glossary</h2>") :]
+    assert "<dt>UserAssist</dt>" in glossary
+    assert "<dt>SSID</dt>" not in glossary  # no network section in this report

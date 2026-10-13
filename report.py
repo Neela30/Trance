@@ -238,6 +238,40 @@ def _limitations(findings: dict) -> list[str]:
     return notes
 
 
+def _glossary_needle(term: str) -> str:
+    """What to look for in the report: "\\Device\\HarddiskVolumeN" appears with a number."""
+    return term.removesuffix("N") if term.endswith("VolumeN") else term
+
+
+def _evidence_rows(items: list[dict]) -> list[dict]:
+    """The "Evidence examined" table: a folder whose files all verified becomes one row
+    (its per-file hashes stay in findings.json); a file that did not verify is always
+    listed on its own."""
+    by_label: dict[str, list[dict]] = {}
+    for item in items:
+        by_label.setdefault(item["label"], []).append(item)
+    rows = []
+    for label, group in by_label.items():
+        verified = [i for i in group if i["status"] == "verified"]
+        if len(verified) > 1:
+            folder = os.path.commonpath([i["path"] for i in verified])
+            rows.append(
+                {
+                    "label": label,
+                    "path": folder,
+                    "kind": "folder",
+                    "size_bytes": sum(i.get("size_bytes") or 0 for i in verified),
+                    "sha256": None,
+                    "status": "verified",
+                    "note": f"{len(verified)} files, each SHA-256 matches acquisition; "
+                    "per-file hashes are in findings.json",
+                }
+            )
+            group = [i for i in group if i["status"] != "verified"]
+        rows.extend(group)
+    return rows
+
+
 def render_report(
     findings: dict, local_tz: str | None = None, findings_sha256: str | None = None
 ) -> str:
@@ -294,17 +328,30 @@ def render_report(
     for context in presented.values():
         glossary.update(context.get("glossary", {}))
 
-    return template.render(
-        findings=findings,
-        registry=presented.get("module_a_registry"),
-        disk=presented.get("module_b_disk"),
-        memory=presented.get("module_c_memory"),
-        generic_modules=generic,
-        glossary=sorted(glossary.items()),
-        provenance=findings.get("provenance"),
-        limitations=_limitations(findings),
-        findings_sha256=findings_sha256,
-    )
+    provenance = findings.get("provenance")
+
+    def render(terms: list[tuple[str, str]]) -> str:
+        return template.render(
+            findings=findings,
+            registry=presented.get("module_a_registry"),
+            disk=presented.get("module_b_disk"),
+            memory=presented.get("module_c_memory"),
+            generic_modules=generic,
+            glossary=terms,
+            provenance=provenance,
+            evidence_rows=_evidence_rows(provenance["evidence_items"]) if provenance else [],
+            limitations=_limitations(findings),
+            findings_sha256=findings_sha256,
+        )
+
+    # Only define terms the printed report actually uses (whole words, outside tags).
+    text = re.sub(r"<[^>]+>", " ", render([]))
+    used = [
+        (term, definition)
+        for term, definition in sorted(glossary.items())
+        if re.search(r"(?<!\w)" + re.escape(_glossary_needle(term)), text)
+    ]
+    return render(used)
 
 
 def write_report(

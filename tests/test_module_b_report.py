@@ -396,3 +396,22 @@ def test_report_renders_residue_and_ntfs_sections(tmp_path):
         )
     )
     assert "Not analyzed" in html and "Remount the volume" in html
+
+
+def test_journal_events_grouped_one_row_per_file():
+    from modules.module_b_disk.report import _group_events
+
+    rows = _group_events(
+        [
+            {
+                "time_utc": "2026-10-09T13:32:35+00:00",
+                "path": "C:\\t\\a",
+                "reasons": ["FILE_CREATE"],
+            },
+            {"time_utc": "2026-10-09T13:34:36+00:00", "path": "C:\\t\\a", "reasons": ["CLOSE"]},
+            {"time_utc": "2026-10-09T13:33:00+00:00", "path": "C:\\t\\b", "reasons": ["CLOSE"]},
+        ]
+    )
+    assert [(r["path"], r["count"]) for r in rows] == [("C:\\t\\a", 2), ("C:\\t\\b", 1)]
+    assert rows[0]["actions"] == ["file create", "close"]
+    assert rows[0]["first"] < rows[0]["last"]
