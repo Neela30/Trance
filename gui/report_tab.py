@@ -1,6 +1,10 @@
 """Report tab: just displays report.html -- module-wise sections plus the summary are
 already exactly what report.py + report_template.html.j2 render, so this is a viewer,
-not a second implementation of the presentation logic."""
+not a second implementation of the presentation logic.
+
+The report is built from untrusted evidence, so the view is locked down (gui.report_policy):
+JavaScript off, no network or other-file access from the local page, the default
+off-the-record profile with downloads refused, and navigation limited to the report itself."""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QMarginsF, Qt, QUrl
 from PySide6.QtGui import QPageLayout, QPageSize
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -25,13 +30,36 @@ from gui.pdf_export import (
     default_pdf_path,
     record_pdf_export,
 )
+from gui.report_policy import WEB_ATTRIBUTES, navigation_allowed
 from gui.theme import apply_eyebrow_style, apply_heading_style
+
+
+class _ReportPage(QWebEnginePage):
+    """Only ever shows the one report it was given; every other navigation is refused."""
+
+    def __init__(self, parent=None):
+        # Qt 6's default profile is off-the-record: nothing is written to disk.
+        profile = QWebEngineProfile.defaultProfile()
+        super().__init__(profile, parent)
+        profile.downloadRequested.connect(lambda item: item.cancel())
+        settings = self.settings()
+        for name, value in WEB_ATTRIBUTES.items():
+            settings.setAttribute(getattr(QWebEngineSettings.WebAttribute, name), value)
+        self.report_path: Path | None = None
+
+    def acceptNavigationRequest(self, url, _type, _is_main_frame) -> bool:
+        return navigation_allowed(url.toString(), self.report_path)
+
+    def createWindow(self, _type):
+        return None  # no pop-ups or "open in new window"
 
 
 class ReportTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._view = QWebEngineView(self)
+        self._page = _ReportPage(self._view)
+        self._view.setPage(self._page)
 
         placeholder_eyebrow = QLabel("Trance · Case Report", self)
         apply_eyebrow_style(placeholder_eyebrow)
@@ -84,6 +112,7 @@ class ReportTab(QWidget):
         # --output-dir was given as one (e.g. the "output" default), which otherwise
         # produces a malformed file:// URL and ERR_FILE_NOT_FOUND.
         self._current_report_path = Path(report_path).resolve()
+        self._page.report_path = self._current_report_path
         self._pdf_button.setEnabled(False)
         self._pdf_status.setText("")
         self._view.load(QUrl.fromLocalFile(str(self._current_report_path)))

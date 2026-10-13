@@ -12,6 +12,8 @@ from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from analyze_evidence import resolve_evidence, with_volume_inputs
+from core.safety import default_limits, limits_supported, running_as_root
+from gui.evidence_import import IMPORT_DIRNAME
 from main import CUSTODY_FILENAME, no_target_warning
 
 SOURCE_TYPES = ("process", "full-memory")
@@ -58,10 +60,22 @@ class AnalysisRequest:
     vol3_path: str | None = None
     vol3_extract_process: str | None = None
     vol3_extract_pid: int | None = None
+    # Linux-only limits on the analysis child (core.safety); None = the default
+    # (TRANCE_LIMIT_MEMORY_MB / TRANCE_LIMIT_CPU_SECONDS, else built in), 0 = no limit.
+    memory_limit_mb: int | None = None
+    cpu_limit_seconds: int | None = None
 
     @property
     def case_dir(self) -> Path:
         return Path(self.output_dir) / self.case_name
+
+    def resource_limits(self) -> tuple[int, int]:
+        """(memory MB, CPU seconds) the analysis child applies to itself; 0 = no limit."""
+        default_memory, default_cpu = default_limits()
+        return (
+            default_memory if self.memory_limit_mb is None else self.memory_limit_mb,
+            default_cpu if self.cpu_limit_seconds is None else self.cpu_limit_seconds,
+        )
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -139,8 +153,24 @@ def validate(request: AnalysisRequest, inputs: dict) -> Issues:
     issues = Issues()
     errors, warnings = issues.errors, issues.warnings
 
+    if running_as_root():
+        errors.append(
+            "TRANCE is running as root. Restart it as an ordinary user: evidence from a "
+            "possibly compromised machine must not be parsed with root rights."
+        )
+    for label, value in (
+        ("Memory limit", request.memory_limit_mb),
+        ("CPU time limit", request.cpu_limit_seconds),
+    ):
+        if value is not None and value < 0:
+            errors.append(f"{label} must be 0 (no limit) or a positive number.")
+    if (request.memory_limit_mb or request.cpu_limit_seconds) and not limits_supported():
+        warnings.append("Resource limits only apply on Linux; this run is not limited.")
+
     if not _is_single_component(request.case_name.strip()):
         errors.append("Case name must be a single folder name, without path separators.")
+    elif request.case_name.strip().casefold() == IMPORT_DIRNAME:
+        errors.append(f"'{IMPORT_DIRNAME}' is where imported evidence is kept; pick another name.")
     elif any((request.case_dir / name).exists() for name in OUTPUT_FILES):
         errors.append(
             f"This case already has outputs; choose a new case name ({request.case_dir})."

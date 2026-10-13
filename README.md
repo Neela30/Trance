@@ -325,34 +325,41 @@ framework. Same AV-allowlisting note as the other `--onefile` exes.
 
 ### Building the acquisition EXE from the GUI
 
-The desktop app's **Build EXE** tab automates the manual
+The desktop app's **Build tool** tab automates the manual
 `pyinstaller --onefile --name trance-acquire acquire_all.py` step from
 above, so you don't need a terminal to produce the file you carry to the
 target machine:
 
-1. Open the GUI (`python gui_main.py`) and switch to the **Build EXE** tab.
-2. Click **Generate acquisition EXE**. If PyInstaller isn't installed, or
-   the interpreter running the GUI isn't 64-bit, you'll get a clear message
-   instead of a broken build — install it with
-   `pip install -r requirements-dev.txt` and retry.
-3. Choose where to save the resulting `.exe` in the save dialog.
-4. Watch the live build log; **Cancel** stops the build at any point.
-5. On success, the tab shows the saved path and an **Open folder** button.
+1. Open the GUI from a source checkout (`python gui_main.py`) **on Windows**
+   and switch to the **Build tool** tab. PyInstaller can't cross-compile, so
+   on Linux/macOS the button is disabled with that explanation.
+2. Pick **Save to** (default `~/trance-builds`). Each build goes into a new
+   `trance-acquire-<UTC time>/` folder; nothing existing is overwritten.
+3. Optionally pick **Also copy to (tools drive)** and a **WinPMEM binary**.
+4. Click **Build trance-acquire.exe**. If PyInstaller is missing or the
+   interpreter isn't 64-bit you get a clear message instead of a broken build
+   (`pip install -r requirements-dev.txt`). If the app is running elevated you
+   are warned first: PyInstaller warns about elevated builds and newer
+   versions refuse them.
+5. Watch the live build log; **Cancel** stops PyInstaller and keeps nothing.
 
-The build runs entirely inside a temporary directory (never inside the
-repo) and embeds a UAC manifest (`--uac-admin`), so the exe itself
-prompts for Administrator elevation when launched on the target — no
-manual "Run as Administrator" step is required. Copy the single `.exe` to
-the target machine (USB stick, network share) and run it there, e.g.:
+The result is a folder holding `trance-acquire.exe`, `trance-acquire.exe.sha256`
+(`sha256sum` format) and, if picked, the WinPMEM binary with its own `.sha256`.
+With a copy destination, the same folder is written there and every file is
+re-hashed against the original. `trance-acquire` uses a WinPMEM that sits next
+to it before scanning the drives for one.
+
+PyInstaller runs as a child process inside a temporary directory (never the
+repo) and embeds a UAC manifest (`--uac-admin`), so the exe prompts for
+elevation by itself on the target. Run it there with the output on a separate
+evidence drive, e.g.:
 
 ```powershell
-E:\trance-acquire.exe --output-dir E:\evidence
+E:\trance-acquire-20261013T093000Z\trance-acquire.exe --output-dir F:\evidence-case01
 ```
 
-WinPMEM is **not** bundled into the exe — it's deliberately kept
-examiner-supplied, same as a manually built `trance-acquire.exe`: pass
-`--winpmem-path`, or let `winpmem_acquire.py`'s auto-discovery find a
-`*winpmem*.exe` already on the target machine.
+WinPMEM is never downloaded or vendored: you supply the binary (check its
+licence before redistributing it).
 
 ### Limitation: process memory dies with the process
 
@@ -365,6 +372,72 @@ with `--source-type full-memory`; Volatility 3 (`--vol3-path`) can narrow
 that image to one process. A full image taken *after* the browser closed still
 held part of the session, but far less than one taken while it was open --
 see *Evaluating the tool*.
+
+## Examiner safety
+
+The evidence comes off a machine that may be compromised, on drives that travel
+between it and your analysis laptop. TRANCE treats both as hostile.
+
+### Two-drive workflow (recommended)
+
+1. **Tools drive** — `trance-acquire.exe` + its `.sha256` (+ WinPMEM), built with
+   the Build tool tab **on a clean Windows machine**, never on the suspect one
+   (PyInstaller can't cross-compile, and installing Python on the target is
+   itself contamination). Write-protect the drive (hardware switch, or a
+   read-only filesystem) before it touches the target. Check the exe against its
+   `.sha256` before use; `acquire_manifest.json` records the SHA-256 of the exe
+   that actually ran (`"tool"`), so it can be matched afterwards too.
+2. **Evidence drive** — a separate drive, wiped before each case, used only as
+   `--output-dir`. `trance-acquire` refuses an output folder that already exists
+   and isn't empty, and warns (never blocks) when the output folder is on the
+   target's system volume (overwrites free space that may hold deleted
+   evidence) or on the same drive as the tool.
+
+**One drive still works** — tools and evidence on the same stick — but it is less
+safe: the drive can't be write-protected while the tool is on it, so the
+suspect machine can tamper with the tool you will reuse, and you carry a drive
+the target wrote to back to wherever you build your tools.
+
+### On the analysis machine
+
+- **Import from drive…** (Analyse tab) copies the evidence folder into
+  `<output-dir>/imported-evidence/<folder>_<UTC time>/evidence/`, checks every
+  file against the acquisition hashes, makes the copy read-only and then tells
+  you it is safe to unplug. The drive is only ever read: nothing on it is
+  created, changed or deleted, and symbolic links on it are not followed. The
+  analysis then runs from the copy with the drive gone.
+- **Hash check before parsing.** Every run first re-checks every hash record in
+  the evidence folder (the `<file>.sha256` sidecars, each `hashes.sha256`, and
+  `acquire_manifest.json.sha256`) and the sidecars of inputs outside it. Any
+  mismatch, unsafe record or symbolic link stops the run before any module
+  opens the evidence: `findings.json` gets `"evidence_integrity": {"status":
+  "failed", ...}`, the report opens with the list of changed files, the GUI
+  shows an error dialog and the CLI exits with 2. Missing or unhashed files are
+  reported but don't block.
+- **Never as root.** `main.py`, `analyze_evidence.py`, the GUI's analysis child
+  and the GUI form all refuse to run as root (the disk-image mount asks for
+  root separately, only for the mount itself).
+- **Resource limits** (Linux). The GUI's analysis child process caps its own
+  address space and CPU time before it reads any evidence (More options →
+  Limits; defaults 16 GB / 240 min, `0` = no limit; or
+  `TRANCE_LIMIT_MEMORY_MB` / `TRANCE_LIMIT_CPU_SECONDS`). Not applied on
+  Windows.
+- **The report is inert.** Evidence text is HTML-escaped (Jinja2 autoescape;
+  nothing evidence-derived is marked safe), `report.html` carries a strict
+  Content-Security-Policy (no script, no network, no frames or forms; inline CSS
+  only), and the GUI's report view runs with JavaScript off, no remote or
+  other-file access from the page, downloads refused and navigation limited to
+  the report itself.
+- **No automount, USB allow-list.** `scripts/examiner-setup.sh` (Linux, run it
+  yourself with `sudo bash scripts/examiner-setup.sh`, or `--dry-run` first)
+  turns off GNOME's removable-media automount/autorun system-wide and installs
+  USBGuard with an allow-list of the devices plugged in when it runs. Unplug
+  every USB drive before running it. Afterwards allow a drive for one session
+  with `sudo usbguard allow-device <id>`.
+- **Shadow copies.** Acquisition deletes only the one Volume Shadow Copy it
+  created, by its GUID (`vssadmin delete shadows /shadow={id}`), never `/all`,
+  `/oldest` or `/for=`; an ID that isn't a single GUID is refused without
+  running vssadmin.
 
 ## Evaluating the tool
 

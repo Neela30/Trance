@@ -356,3 +356,68 @@ def test_cli_skip_usrclass_flag_is_parsed(monkeypatch, tmp_path):
     acquire.main()
 
     assert captured["include_usrclass"] is False
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "",
+        "/all",
+        "/oldest",
+        "{12345678-1234-1234-1234-1234567890ab} /all",
+        "12345678-1234-1234-1234-1234567890ab /oldest",
+        "/for=C:",
+        "*",
+        "{12345678-1234-1234-1234-1234567890ab",
+        "not-a-guid",
+    ],
+)
+def test_delete_shadow_copy_never_runs_vssadmin_for_anything_but_one_guid(monkeypatch, bad_id):
+    """TRANCE only ever deletes the one shadow copy it created: an ID that isn't exactly one
+    GUID must never reach vssadmin, so it can't become /all, /oldest or a whole volume."""
+    monkeypatch.setattr(
+        acquire.subprocess, "run", lambda *a, **k: pytest.fail(f"vssadmin ran for {bad_id!r}")
+    )
+    acquire._delete_shadow_copy(bad_id)
+
+
+def test_every_shadow_deletion_targets_exactly_the_created_id(tmp_path, monkeypatch):
+    """End to end through _copy_via_shadow: the delete command names the ID the create
+    returned, once, and carries no bulk-delete switch."""
+    created_id = "{AAAAAAAA-1111-2222-3333-444444444444}"
+    commands = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        commands.append(cmd)
+        if cmd[0] == "powershell":
+            stdout = f"ShadowID={created_id}\nDeviceObject={tmp_path}\n"
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(acquire.subprocess, "run", fake_run)
+    (tmp_path / "file.bin").write_bytes(b"x")
+    acquire._copy_via_shadow("file.bin", tmp_path / "out.bin")
+
+    deletes = [c for c in commands if c[0] == "vssadmin"]
+    assert deletes == [["vssadmin", "delete", "shadows", f"/shadow={created_id}", "/quiet"]]
+    flat = " ".join(" ".join(c) for c in commands).lower()
+    for bulk in ("/all", "/oldest", "/for="):
+        assert bulk not in flat
+
+
+def test_create_shadow_copy_rejects_a_non_guid_id(monkeypatch):
+    def fake_run(cmd, capture_output, text, timeout):
+        stdout = "ShadowID=/all\nDeviceObject=C:\\shadow\n"
+        return subprocess.CompletedProcess(cmd, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(acquire.subprocess, "run", fake_run)
+    with pytest.raises(AcquisitionError, match="didn't contain a recognizable"):
+        acquire._create_shadow_copy()
+
+
+def test_delete_shadow_copy_never_raises_when_vssadmin_is_missing(monkeypatch):
+    def missing(*_a, **_k):
+        raise FileNotFoundError("vssadmin")
+
+    monkeypatch.setattr(acquire.subprocess, "run", missing)
+    acquire._delete_shadow_copy("{12345678-1234-1234-1234-1234567890ab}")

@@ -53,12 +53,14 @@ report_template.html.j2   the HTML report (~1000 lines, dark/light CSS tokens)
 gui_main.py               PySide6 desktop app entry point
 gui/                      desktop app (see §6)
 core/                     shared: config, schema, custody_log, hashing, exceptions,
-                          winadmin (is_admin), fs_scan (auto-discovery walker)
+                          winadmin (is_admin), fs_scan (auto-discovery walker),
+                          evidence_integrity (pre-parse hash check), safety (no root, rlimits)
 modules/module_a_registry/  Module A
 modules/module_b_disk/      Module B
 modules/module_c_memory/    Module C
 tests/                    pytest suite (~660 tests)
 scripts/score_run.py      scores a run's findings.json against planted ground truth (see §10)
+scripts/examiner-setup.sh Linux examiner hardening: GNOME automount off + USBGuard (see §11)
 output/                   local case outputs (gitignored) — some are STALE, see §8
 .github/workflows/ci.yml  pytest + ruff + black on push/PR to main/dev
 ```
@@ -118,13 +120,18 @@ modules/<name>/__init__.py:
   (threads; Module C's heavy work is in a process pool, see §4) and assembles the results in
   `MODULES` order, so `findings.json` doesn't depend on which finished first. It then
   builds findings, writes `findings.json` + `report.html`, builds and writes `custody.json`.
+  **Before any module runs** it refuses to run as root (`core.safety.refuse_root`) and
+  re-checks every hash record of the evidence (`core.evidence_integrity.verify_evidence`,
+  see §11); a failure means no module is started, each is recorded as `error`, and
+  `findings.json["evidence_integrity"]` / the report / the GUI say why.
   `progress_cb(step_name, step, total)` fires once per module *as it finishes* (so the order
   of names varies; `step` counts up) and once more after writing outputs (total = 4), always
   from the calling thread. Used by the GUI. `TRANCE_WORKERS=1` runs the modules one after
   another and turns the memory scan's process pool off.
 - `main(argv)` is the CLI: argparse + validation (case name must be a single path
   component; outputs must not already exist; output dir must be outside disk evidence),
-  builds `module_kwargs`, calls `run_pipeline`. Exit code 2 if any module errored.
+  builds `module_kwargs`, calls `run_pipeline`. Exit code 2 if any module errored or the
+  integrity check failed; 1 if run as root.
 - Modules are imported via `importlib.import_module(f"modules.{name}")` — PyInstaller cannot
   see that, hence the `--hidden-import` flags in the build commands (§7).
 
@@ -184,7 +191,9 @@ What follows describes the current state.
   HKLM\SOFTWARE`, and `reg save HKCU` (current user's NTUSER.DAT); Amcache.hve via a
   Volume Shadow Copy created with WMI (`Win32_ShadowCopy.Create()` through PowerShell —
   `vssadmin create shadow` is Server-only, confirmed on real client Windows) and deleted
-  with `vssadmin delete shadows` afterwards. `--ntuser-user <name>` pulls another user's
+  with `vssadmin delete shadows /shadow={GUID}` afterwards -- only ever the one snapshot
+  it created: `_shadow_guid()` must parse the ID as exactly one GUID or vssadmin isn't run
+  at all (no `/all`, `/oldest`, `/for=`; tested). `acquire_ntfs.py` reuses the same pair. `--ntuser-user <name>` pulls another user's
   NTUSER.DAT via VSS instead of the live HKCU export. UsrClass.dat is acquired the same
   way (VSS copy, no live-registry variant — see `acquire_usrclass()`'s docstring) for
   that same target user (or the current session's username if `--ntuser-user` wasn't
@@ -657,6 +666,11 @@ python acquire_all.py --output-dir evidence
 python -m PyInstaller --onefile --name trance-acquire acquire_all.py
 dist\trance-acquire.exe --output-dir evidence
 ```
+`--output-dir` must be new or empty (refused otherwise, nothing touched); landing on the
+system volume or the tool's own volume only warns (`volume_warnings`, also in the manifest's
+`"warnings"`). The manifest records `"tool": {path, sha256, frozen}` (the exe that ran, or
+acquire_all.py from source) and gets an LF-only `acquire_manifest.json.sha256`. A
+`*winpmem*.exe` next to the tool is used before the drive scan.
 Flags: `--skip-registry/--skip-memory/--skip-disk`, `--ntuser-user`, `--winpmem-path`,
 `--tor-browser-dir`, `--disk-profile-src`, `--tor-dir-src`, `--skip-ntfs`, `--ntfs-volume`,
 `--skip-pagefile`, `--include-hiberfil`. Omitting the path flags triggers
@@ -708,7 +722,7 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
 
 ## 6. Desktop GUI (`gui/`, PySide6 + QtWebEngine)
 
-- `main_window.py` — `QTabWidget`: **Analyse**, **Report**, **History**. Wires signals:
+- `main_window.py` — `QTabWidget`: **Analyse**, **Report**, **History**, **Build tool**. Wires signals:
   analysis finished → load report + refresh history; history "view" → load report;
   history delete → clear report tab if it showed that case + refresh recent cases.
 - **The GUI is the primary analysis interface** and covers every analysis-side CLI flag;
@@ -750,9 +764,25 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
 - Progress bar: 0–100 with a `QTimer` easing toward the last real checkpoint (25/50/75/100).
   Honest limitation: there are only 4 real checkpoints; it's visual smoothing.
 - `report_tab.py` — `QWebEngineView` loading the existing `report.html` (paths must be
-  resolved to absolute before `QUrl.fromLocalFile`). "Save as PDF…" prints it via
-  `page().printToPdf` (PySide6 spelling; `printToPDF` doesn't exist) after opening every
-  `<details>`, then hashes the PDF into custody.json.
+  resolved to absolute before `QUrl.fromLocalFile`). Locked down via `report_policy.py`
+  (Qt-free): JavaScript off, `LocalContentCanAccess{Remote,File}Urls` off, downloads
+  cancelled, no new windows, `acceptNavigationRequest` only allows the report file itself
+  (+ `#anchors`). Verified offscreen on Windows that a report still loads with these.
+- `build_tab.py` / `build_worker.py` (Qt) over `build_inputs.py` + `build_runner.py`
+  (Qt-free, `BuildJob`): PyInstaller as a child process into a temp dir, Cancel, then a new
+  `trance-acquire-<UTC>/` folder with the exe + LF `sha256sum`-format `.sha256`, optional
+  WinPMEM (+ its `.sha256`), optional verified copy to a tools drive. Disabled off Windows
+  and in a frozen app; warns (Yes/No) when elevated. Never overwrites: refuses non-empty
+  destination folders, files opened with `"x"`, removes only folders it created.
+- `evidence_import.py` (Qt-free) + `import_worker.py`: Analyse tab **Import from drive…**
+  copies a folder to `<output-dir>/imported-evidence/<name>_<UTC>/evidence/` (+
+  `import_record.json`), source opened read-only (`O_NOFOLLOW`), links skipped, each copy
+  re-hashed, then `verify_evidence`, then made read-only; says "safe to unplug". Case name
+  `imported-evidence` is rejected. Module B's `working_copy()` now makes its temp copy
+  writable, since `copytree` carries the read-only bit over (sqlite needs it writable).
+- `advanced_inputs.LimitsPage` ("Limits" tab): `AnalysisRequest.memory_limit_mb` /
+  `cpu_limit_seconds` → `core.safety.apply_resource_limits` at the top of the child
+  (`analysis_runner.run`), Linux only.
 - `history_tab.py` — scans `<output-dir>/*/findings.json` (no separate DB, by design).
   Sortable table with filter box, relative-time "Generated" column (ISO in tooltip), status
   chips painted by a `QStyledItemDelegate`, selection-gated View/Delete, Delete behind a
@@ -785,7 +815,7 @@ Qt gotchas already hit (don't rediscover them):
 
 | Exe | Source | Status |
 |---|---|---|
-| `trance-acquire` | `acquire_all.py` | Built ad hoc once on the Windows VM (`C:\forensics\TRANCE-new`); ran successfully 2026-09-29 (registry ✓, disk ✓ via auto-discovery, memory ✗ because Tor Browser wasn't running and WinPMEM auto-discovery didn't exist yet). **Not rebuilt/retested since commit `a544840`.** |
+| `trance-acquire` | `acquire_all.py` | Built 2026-10-13 through `gui.build_runner.BuildJob` on a Windows 11 dev machine (12.7 MB, sidecar checked with `sha256sum -c`); **not run** there. Before that: built ad hoc once on the Windows VM (`C:\forensics\TRANCE-new`); ran successfully 2026-09-29 (registry ✓, disk ✓ via auto-discovery, memory ✗ because Tor Browser wasn't running and WinPMEM auto-discovery didn't exist yet). **Not rebuilt/retested since commit `a544840`.** |
 | `trance-analyze` | `analyze_evidence.py` | Linux build only (dev proxy + a local `dist/` build). Never built/run on Windows. |
 | `trance-gui` | `gui_main.py` | Linux build only (~290 MB `--onefile`, QtWebEngine). Never built/run on Windows. |
 
@@ -900,8 +930,9 @@ workflow on large changes):
 ### P2 — forensic soundness
 
 - `acquire_all.py` defaults `--output-dir evidence` relative to the CWD — i.e. writes onto
-  the target's own disk, overwriting unallocated space. Default to / strongly recommend
-  external media, warn when the output dir is on the system volume, and check free space
+  the target's own disk, overwriting unallocated space. **Partly done 2026-10-13:** it now
+  warns when the output dir is on the system volume or the tool's own volume, and refuses a
+  non-empty output dir (§11). Still open: default to external media, and check free space
   before a multi-GB WinPMEM image.
 - Installing Python/git/pip on the target (as done on the VM) is itself contamination — the
   exe exists to avoid that. Document building on a separate Windows machine and carrying
@@ -988,6 +1019,15 @@ workflow on large changes):
   prints a permissions warning but works). The evaluation workspace is described in §10.
 - Windows-only code paths are tested with `monkeypatch` on `sys.platform`, `is_admin`, and
   `subprocess.run`; they have not been exercised for real beyond the one VM run above.
+- The suite targets Linux (CI). On a Windows host (checked 2026-10-13, checkout at
+  `D:\Trance\Trance`, venv `.venv\Scripts\python.exe`): 17 tests fail identically with and
+  without that day's changes (POSIX paths/symlinks in test_analyze_evidence,
+  test_disk_evidence, test_ntfs_*, test_volume_inputs, test_recycle_bin_downloads,
+  test_mount_helper_refuses_to_run_without_root), and
+  `test_acquire_disk_reports_error_when_auto_discovery_finds_nothing` plus four
+  test_module_b_acquire auto-discovery tests really scan every drive (~1 min each).
+  Heredocs through the Bash tool collapse `\\` and `\n` escapes there -- write edit
+  scripts/tests with the Write tool.
 
 ---
 
@@ -1057,3 +1097,45 @@ re-insert with `VBoxManage storageattach "Windows 10" --storagectl SATA --port 1
 --type dvddrive --medium ~/trance-eval/trance-eval-b1e29e2.iso`; it appears as `D:`, write
 output to `Z:\evidence\<run>`.
 
+---
+
+## 11. Examiner safety — added 2026-10-13
+
+Threat model: the target may be compromised, so evidence bytes and the drives that carry
+them are hostile input to the examiner's laptop. README → "Examiner safety" is the user-facing
+version (two-drive workflow, one-drive caveat, build-on-Windows rule).
+
+- **Integrity gate** (`core/evidence_integrity.py`, stdlib): re-hashes every file named by a
+  `*.sha256` record under the evidence folder (one-line sidecars and `hashes.sha256` lists,
+  relative to the record's folder) plus sidecars of inputs outside it
+  (`evidence_inputs(module_kwargs)`; disk image / mounted volume deliberately excluded).
+  `failed` = mismatch, malformed/unsafe record (absolute, `..`, drive), unreadable file, or
+  any symlink/junction in the folder → `run_pipeline` starts no module. `missing`/`unhashed`
+  files and a folder with no records (`unverified`) only warn. `*.custody.json` are
+  metadata, not expected to be hashed. Threaded hashing (≤4; `TRANCE_WORKERS=1` = serial).
+  Cost: the memory image is hashed here and again by Module C.
+  `findings.json["evidence_integrity"]` (additive, schema_version still 1); the report opens
+  with a red callout on failure; `RunSummary.integrity_status/_message` → GUI dialog.
+- **No root** (`core/safety.py`): `refuse_root()` in `run_pipeline`, early in `main.main`,
+  in `analysis_runner.run`, and as a GUI form error. Windows elevation is not refused.
+- **rlimits**: `apply_resource_limits(memory_mb, cpu_seconds)` sets soft=hard
+  `RLIMIT_AS`/`RLIMIT_CPU` (never above an existing hard limit), inherited by the process
+  pool and `vol`. Defaults 16 GB / 4 h (`TRANCE_LIMIT_MEMORY_MB`, `TRANCE_LIMIT_CPU_SECONDS`).
+  Not tried on a real full-memory run yet -- if a large image dies with MemoryError, raise it.
+- **Report XSS**: autoescape was already on and nothing evidence-derived is `|safe`/`Markup`
+  (only `_wrap_path`, which escapes first); added a strict CSP meta to both templates
+  (`default-src 'none'; style-src 'unsafe-inline'; img-src data:` ...; the report has no JS)
+  and `tests/test_report_xss.py` (parses the HTML; fails if autoescape is turned off).
+  `modules/module_c_memory/report_template.html.j2` is not rendered by any code.
+- **Acquisition**: see §4 (shadow delete by GUID only) and §5 (output dir, tool hash,
+  warnings, manifest sidecar).
+- **scripts/examiner-setup.sh**: dconf system db keys + locks for
+  `org/gnome/desktop/media-handling` (automount, automount-open, autorun-never), USBGuard
+  install + `generate-policy` allow-list of currently plugged devices, `systemctl enable
+  --now`. Never overwrites existing files (reports instead); `--dry-run`, `--yes`. Written,
+  syntax-checked and dry-run on Windows git-bash only -- **never run on a real Linux box**.
+
+Not done / open: no GPG/Authenticode signing of the built exe (the `.sha256` only protects
+against corruption, not a swap of both files); free-space check before WinPMEM; the GUI
+Build tool and Import flows were exercised offscreen and through their Qt-free logic, not
+clicked through by a person.
