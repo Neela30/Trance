@@ -25,7 +25,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._analyse_tab, "Analyse")
         self._tabs.addTab(self._report_tab, "Report")
         self._tabs.addTab(self._history_tab, "History")
-        self._tabs.addTab(self._build_tab, "Build EXE")
+        self._tabs.addTab(self._build_tab, "Build tool")
         self.setCentralWidget(self._tabs)
 
         self._analyse_tab.analysis_finished.connect(self._on_analysis_finished)
@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
         # Stop a running analysis and unmount any disk image before the window goes;
         # the mount helper would also clean up on its own once our pipe closes.
         self._analyse_tab.shutdown()
+        self._build_tab.shutdown()
         super().closeEvent(event)
 
     def _on_analysis_finished(self, result) -> None:

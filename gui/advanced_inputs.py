@@ -9,6 +9,7 @@
                      Disk    none / an image file (mount and/or byte search) /
                              an already-mounted volume (--disk-image, --disk-root)
                      Memory  --source-type and the Volatility3 options
+                     Limits  memory / CPU caps on the analysis process (Linux)
 
 Spacing constants are deliberately generous: every label sits clear of its field and
 every help line clear of the next control, so the form reads as steps, not a wall."""
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.safety import default_limits, limits_supported
 from gui.analysis_request import INPUT_SPECS, SummaryRow, display_path
 from gui.theme import COLORS, apply_eyebrow_style
 
@@ -546,6 +548,53 @@ class MemoryPage(_Page):
         }
 
 
+class LimitsPage(_Page):
+    """Caps on the analysis child process (core.safety.apply_resource_limits): a crafted
+    evidence file can't take the whole machine down. Linux only."""
+
+    def __init__(self, parent=None):
+        supported = limits_supported()
+        super().__init__(
+            "Caps on how much memory and CPU time the analysis may use, so a malformed or "
+            "booby-trapped evidence file can't exhaust this machine. 0 means no limit."
+            + ("" if supported else " Only applied on Linux; this system runs unlimited."),
+            parent,
+        )
+        memory_mb, cpu_seconds = default_limits()
+        self.memory_gb = QLineEdit(str(memory_mb // 1024), self)
+        self.memory_gb.setValidator(QIntValidator(0, 4096, self))
+        self.memory_gb.setMaximumWidth(140)
+        self.cpu_minutes = QLineEdit(str(cpu_seconds // 60), self)
+        self.cpu_minutes.setValidator(QIntValidator(0, 10**6, self))
+        self.cpu_minutes.setMaximumWidth(140)
+        pair = QHBoxLayout()
+        pair.setSpacing(ROW_GAP)
+        pair.addLayout(labelled(field_label("Memory (GB)", self), self.memory_gb))
+        pair.addLayout(labelled(field_label("CPU time (minutes)", self), self.cpu_minutes))
+        pair.addStretch(1)
+        self.body.addLayout(pair)
+        self.body.addWidget(
+            help_label(
+                "A full-memory image needs a few GB; raise the memory cap if a large run "
+                "stops with a memory error.",
+                self,
+            )
+        )
+        for field in (self.memory_gb, self.cpu_minutes):
+            field.setEnabled(supported)
+        self.finish()
+
+    def values(self) -> dict:
+        if not limits_supported():
+            return {"memory_limit_mb": None, "cpu_limit_seconds": None}
+        memory = self.memory_gb.text().strip()
+        cpu = self.cpu_minutes.text().strip()
+        return {
+            "memory_limit_mb": int(memory) * 1024 if memory else None,
+            "cpu_limit_seconds": int(cpu) * 60 if cpu else None,
+        }
+
+
 class OptionsPanel(QWidget):
     """'More options' toggle + a tabbed card with the four pages."""
 
@@ -565,6 +614,7 @@ class OptionsPanel(QWidget):
         self.inputs = InputsPage(self)
         self.disk = DiskPage(mount_supported, mount_reason, self)
         self.memory = MemoryPage(self)
+        self.limits = LimitsPage(self)
         for page in (self.inputs, self.disk, self.memory):
             page.changed.connect(self.changed)
 
@@ -575,6 +625,7 @@ class OptionsPanel(QWidget):
         self._card.addTab(self.inputs, "Inputs")
         self._card.addTab(self.disk, "Disk image")
         self._card.addTab(self.memory, "Memory")
+        self._card.addTab(self.limits, "Limits")
         self._card.setVisible(False)
         layout.addSpacing(4)
         layout.addWidget(self._card)

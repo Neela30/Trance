@@ -63,6 +63,13 @@ from core.winadmin import is_admin as _is_admin
 ACQUIRE_TIMEOUT_SECONDS = 300
 _SHADOW_ID_LINE_RE = re.compile(r"^ShadowID=(\S+)", re.MULTILINE)
 _DEVICE_OBJECT_LINE_RE = re.compile(r"^DeviceObject=(\S+)", re.MULTILINE)
+# A shadow copy ID is one GUID. Anything else is refused before vssadmin ever runs, so a
+# malformed ID can never turn the delete into "/all", "/oldest" or "/for=<volume>" -- TRANCE
+# only ever deletes the one snapshot it created itself.
+_SHADOW_GUID_RE = re.compile(
+    r"\{([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\}"
+    r"|([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+)
 # vssadmin's own "create shadow" verb is Server-only -- confirmed on a real client-Windows
 # target: it returns "Error: Invalid command" and its own printed command list omits
 # "Create Shadow" while still listing "Delete Shadows"/"List Shadows" as supported (so
@@ -156,7 +163,7 @@ def _create_shadow_copy(drive: str = "C:") -> tuple[str, str]:
         )
     id_match = _SHADOW_ID_LINE_RE.search(result.stdout)
     device_match = _DEVICE_OBJECT_LINE_RE.search(result.stdout)
-    if not id_match or not device_match:
+    if not id_match or not device_match or _shadow_guid(id_match.group(1)) is None:
         raise AcquisitionError(
             "Shadow copy creation reported success but its output didn't contain a "
             f"recognizable ShadowID/DeviceObject:\n{result.stdout}"
@@ -164,13 +171,38 @@ def _create_shadow_copy(drive: str = "C:") -> tuple[str, str]:
     return id_match.group(1), device_match.group(1)
 
 
+def _shadow_guid(shadow_id: str) -> str | None:
+    """The ID as "{GUID}" if it is exactly one GUID (braces optional), else None."""
+    match = _SHADOW_GUID_RE.fullmatch(shadow_id.strip())
+    if not match:
+        return None
+    return "{" + (match.group(1) or match.group(2)) + "}"
+
+
 def _delete_shadow_copy(shadow_id: str) -> None:
     """Best-effort cleanup, never raises -- so a copy failure still gets reported as
     itself rather than being masked by a cleanup error, and cleanup still runs either way.
     vssadmin delete IS supported on client Windows (unlike create -- see above), confirmed
-    by the same real target's own printed command list."""
-    shadow_id = shadow_id if shadow_id.startswith("{") else f"{{{shadow_id}}}"
-    result = _run(["vssadmin", "delete", "shadows", f"/shadow={shadow_id}", "/quiet"])
+    by the same real target's own printed command list.
+
+    Deletes exactly one shadow copy, by the ID _create_shadow_copy() returned -- never
+    /all, /oldest or a whole volume's (/for=). An ID that isn't a single GUID is refused
+    without running vssadmin at all."""
+    guid = _shadow_guid(shadow_id)
+    if guid is None:
+        print(
+            f"[!] Warning: refusing to delete shadow copy with unexpected ID {shadow_id!r}; "
+            "nothing was deleted. Check `vssadmin list shadows` and remove TRANCE's one "
+            "manually if it is still there.",
+            file=sys.stderr,
+        )
+        return
+    shadow_id = guid
+    try:
+        result = _run(["vssadmin", "delete", "shadows", f"/shadow={shadow_id}", "/quiet"])
+    except AcquisitionError as exc:
+        print(f"[!] Warning: could not delete shadow copy {shadow_id}: {exc}", file=sys.stderr)
+        return
     if result.returncode != 0:
         print(
             f"[!] Warning: could not delete shadow copy {shadow_id} automatically "

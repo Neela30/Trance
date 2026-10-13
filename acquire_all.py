@@ -27,12 +27,20 @@ Registry (SYSTEM/NTUSER/Amcache/SOFTWARE/UsrClass.dat) and the live memory dump 
 session; the disk copy doesn't but runs alongside them here for one output
 folder. Each category is isolated -- one failing does not stop the others,
 same philosophy as every acquire.acquire_all() this wraps.
+
+The manifest also records the acquisition tool's own SHA-256 (the exe, or acquire_all.py
+when run from source) so the examiner can match it against the .sha256 the Build tab wrote,
+and gets its own acquire_manifest.json.sha256 sidecar. The output folder must be new or
+empty; writing to the system volume or the tools drive itself only warns (see
+volume_warnings) -- it never blocks an acquisition.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import ntpath
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +53,67 @@ from modules.module_b_disk import acquire as disk_acquire
 from modules.module_b_disk import acquire_ntfs
 from modules.module_c_memory import dumper as memory_dumper
 from modules.module_c_memory import winpmem_acquire
+
+MANIFEST_NAME = "acquire_manifest.json"
+
+
+def tool_identity() -> dict:
+    """The acquisition program itself: the frozen exe, or this script from a checkout."""
+    frozen = bool(getattr(sys, "frozen", False))
+    path = Path(sys.executable if frozen else __file__).resolve()
+    try:
+        digest: str | None = hash_file(path)
+    except OSError:
+        digest = None
+    return {"path": str(path), "sha256": digest, "frozen": frozen}
+
+
+def _volume_of(path: Path) -> str:
+    """Drive ("C:") or UNC share ("\\\\server\\share") a Windows path lives on."""
+    drive = ntpath.splitdrive(str(path))[0]
+    if not drive:  # relative: resolve against the current directory first
+        drive = ntpath.splitdrive(os.path.abspath(str(path)))[0]
+    return drive.rstrip("\\/").upper()
+
+
+def volume_warnings(output_dir: Path, tool_path: Path, system_drive: str) -> list[str]:
+    """Advice only -- never blocks. Evidence written to the system volume overwrites free
+    space that may still hold deleted evidence; written next to the tool, it lands on the
+    tools drive that should stay write-protected."""
+    warnings = []
+    out = _volume_of(output_dir)
+    if out and out == system_drive.rstrip("\\/").upper():
+        warnings.append(
+            f"The output folder is on the system volume ({out}). Writing evidence there "
+            "overwrites free space that may still hold deleted files -- use a separate, "
+            "wiped evidence drive if you can."
+        )
+    if out and out == _volume_of(tool_path):
+        warnings.append(
+            f"The output folder is on the same volume as the acquisition tool ({out}). Keep "
+            "the tools drive write-protected and write evidence to a separate drive."
+        )
+    return warnings
+
+
+def _check_output_dir(output_dir: Path) -> None:
+    if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
+        raise AcquisitionError(
+            f"Output folder already exists and is not empty: {output_dir}. Choose a new "
+            "folder -- an earlier acquisition is never overwritten."
+        )
+
+
+def _winpmem_next_to_tool(tool_path: Path) -> list[Path]:
+    """A WinPMEM the Build tab bundled beside trance-acquire.exe on the tools drive."""
+    try:
+        return sorted(
+            p
+            for p in tool_path.parent.iterdir()
+            if p.is_file() and winpmem_acquire._looks_like_winpmem(p)
+        )
+    except OSError:
+        return []
 
 
 def _acquire_registry(output_dir: Path, ntuser_user: str | None) -> dict:
@@ -67,7 +136,10 @@ def _acquire_memory(output_dir: Path, winpmem_path: Path | None) -> dict:
         result["live_dump"] = {"status": "error", "message": str(exc)}
 
     if winpmem_path is None:
-        candidates = winpmem_acquire.find_winpmem_binaries()
+        candidates = (
+            _winpmem_next_to_tool(Path(tool_identity()["path"]))
+            or winpmem_acquire.find_winpmem_binaries()
+        )
         if candidates:
             winpmem_path = candidates[0]
             if len(candidates) > 1:
@@ -204,9 +276,16 @@ def acquire(
             "acquisition both need it."
         )
 
+    _check_output_dir(output_dir)
+    tool = tool_identity()
+    warnings = volume_warnings(output_dir, Path(tool["path"]), acquire_ntfs.system_drive())
+    for warning in warnings:
+        print(f"[!] Warning: {warning}", file=sys.stderr)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict = {
         "acquired_at": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "warnings": warnings,
         "registry": {},
         "memory": {},
         "disk": {},
@@ -245,8 +324,13 @@ def acquire(
         print("[*] disk.ntfs: skipped (--skip-ntfs)")
 
     _make_paths_portable(manifest, output_dir)
-    manifest_path = output_dir / "acquire_manifest.json"
+    manifest_path = output_dir / MANIFEST_NAME
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    # Lets the examiner side (core.evidence_integrity) detect an edited manifest too. LF
+    # endings, not the Windows default, so `sha256sum -c` accepts it as well.
+    manifest_path.with_name(MANIFEST_NAME + ".sha256").write_text(
+        f"{hash_file(manifest_path)}  {MANIFEST_NAME}\n", newline="\n"
+    )
     manifest["manifest_path"] = str(manifest_path)
     return manifest
 
