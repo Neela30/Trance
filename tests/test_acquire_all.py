@@ -222,3 +222,17 @@ def test_acquire_memory_hash_failure_does_not_stop_capture(tmp_path, monkeypatch
 
     assert full_image["status"] == "ok"
     assert full_image["winpmem_sha256"] is None
+
+
+def test_acquire_captures_memory_before_registry_and_disk(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(acquire_all, "is_admin", lambda: True)
+    monkeypatch.setattr(acquire_all, "_acquire_registry", lambda *a: calls.append("registry") or {})
+    monkeypatch.setattr(acquire_all, "_acquire_memory", lambda *a: calls.append("memory") or {})
+    monkeypatch.setattr(acquire_all, "_acquire_disk", lambda *a: calls.append("disk") or {})
+
+    manifest = acquire_all.acquire(tmp_path, include_ntfs=False)
+
+    assert calls == ["memory", "registry", "disk"]
+    assert manifest["acquisition_order"] == ["memory", "registry", "disk"]

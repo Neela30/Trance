@@ -272,6 +272,7 @@
       {% set acq = provenance.acquisition %}
       {% if acq %}
       <dt>Acquired</dt><dd>{{ acq.acquired_at or "time not recorded" }}{% if acq.acquired_by %} on {{ acq.acquired_by.hostname or "unknown host" }}{% if acq.acquired_by.os %} ({{ acq.acquired_by.os }}){% endif %}{% if acq.acquired_by.user %} by {{ acq.acquired_by.user }}{% endif %} with {{ acq.acquired_by.tool or "trance-acquire" }} {{ acq.acquired_by.version or "" }}{% endif %}</dd>
+      {% if acq.acquisition_order %}<dt>Acquisition order</dt><dd>{{ acq.acquisition_order|join(" → ") }}{% if acq.acquisition_order[0] == "memory" %} (most volatile first: memory was captured before the registry export and file copies, which change it){% endif %}</dd>{% endif %}
       <dt>Acquisition manifest</dt><dd>{{ acq.manifest|wrap_path }}{% if acq.manifest_sha256 %}<div class="hash">SHA-256 {{ acq.manifest_sha256 }}</div>{% endif %}</dd>
       {% if acq.winpmem_path %}<dt>Memory imager</dt><dd>{{ acq.winpmem_path|wrap_path }}{% if acq.winpmem_sha256 %}<div class="hash">SHA-256 {{ acq.winpmem_sha256 }}</div>{% endif %}</dd>{% endif %}
       {% if acq.custody_logs %}<dt>Acquisition custody logs</dt><dd class="mono" style="font-size:12px;">{% for c in acq.custody_logs %}{{ c|wrap_path }}{{ "; " if not loop.last }}{% endfor %}</dd>{% endif %}

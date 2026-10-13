@@ -309,22 +309,33 @@ def acquire(
         "acquired_by": acquisition_context(),
         "tool": tool,
         "warnings": warnings,
+        "acquisition_order": [
+            name
+            for name, included in (
+                ("memory", include_memory),
+                ("registry", include_registry),
+                ("disk", include_disk),
+                ("ntfs", include_ntfs),
+            )
+            if included
+        ],
         "registry": {},
         "memory": {},
         "disk": {},
     }
+
+    # Order of volatility: RAM first -- reg save, VSS and file copies all change memory.
+    if include_memory:
+        manifest["memory"] = _acquire_memory(output_dir, winpmem_path)
+        _print_category("memory", manifest["memory"])
+    else:
+        print("[*] memory: skipped (--skip-memory)")
 
     if include_registry:
         manifest["registry"] = _acquire_registry(output_dir, ntuser_user)
         # registry_acquire.acquire_all() already prints its own per-hive lines
     else:
         print("[*] registry: skipped (--skip-registry)")
-
-    if include_memory:
-        manifest["memory"] = _acquire_memory(output_dir, winpmem_path)
-        _print_category("memory", manifest["memory"])
-    else:
-        print("[*] memory: skipped (--skip-memory)")
 
     if include_disk:
         manifest["disk"] = _acquire_disk(output_dir, tor_browser_dir, disk_profile_src, tor_dir_src)
