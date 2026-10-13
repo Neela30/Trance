@@ -273,11 +273,15 @@
       {% if acq %}
       <dt>Acquired</dt><dd>{{ acq.acquired_at or "time not recorded" }}{% if acq.acquired_by %} on {{ acq.acquired_by.hostname or "unknown host" }}{% if acq.acquired_by.os %} ({{ acq.acquired_by.os }}){% endif %}{% if acq.acquired_by.user %} by {{ acq.acquired_by.user }}{% endif %} with {{ acq.acquired_by.tool or "trance-acquire" }} {{ acq.acquired_by.version or "" }}{% endif %}</dd>
       {% if acq.acquisition_order %}<dt>Acquisition order</dt><dd>{{ acq.acquisition_order|join(" → ") }}{% if acq.acquisition_order[0] == "memory" %} (most volatile first: memory was captured before the registry export and file copies, which change it){% endif %}</dd>{% endif %}
+      {% if acq.clock %}<dt>Target clock</dt><dd>{% if acq.clock.error %}Windows time-sync status could not be read at acquisition ({{ acq.clock.error }}).{% elif acq.clock.last_sync %}Last synchronised with {{ acq.clock.source or "an unrecorded source" }} at {{ acq.clock.last_sync }} (target's local time, from <span class="mono">w32tm /query /status</span>).{% else %}<span class="mono">w32tm /query /status</span> recorded at acquisition; see the manifest for its output.{% endif %}</dd>{% endif %}
       <dt>Acquisition manifest</dt><dd>{{ acq.manifest|wrap_path }}{% if acq.manifest_sha256 %}<div class="hash">SHA-256 {{ acq.manifest_sha256 }}</div>{% endif %}</dd>
       {% if acq.winpmem_path %}<dt>Memory imager</dt><dd>{{ acq.winpmem_path|wrap_path }}{% if acq.winpmem_sha256 %}<div class="hash">SHA-256 {{ acq.winpmem_sha256 }}</div>{% endif %}</dd>{% endif %}
       {% if acq.custody_logs %}<dt>Acquisition custody logs</dt><dd class="mono" style="font-size:12px;">{% for c in acq.custody_logs %}{{ c|wrap_path }}{{ "; " if not loop.last }}{% endfor %}</dd>{% endif %}
       {% else %}
       <dt>Acquired</dt><dd>No <span class="mono">acquire_manifest.json</span> with this evidence — acquisition details are not recorded here.</dd>
+      {% endif %}
+      {% if disk and disk.daemon and disk.daemon.clock_consistent is not none %}
+      <dt>Clock check</dt><dd>{% if disk.daemon.clock_consistent %}<span class="flag-ok">✓</span> When tor last wrote its state file ({{ disk.daemon.state_written }}), the target's clock was inside the validity window of the consensus tor held ({{ disk.daemon.consensus.valid_after }} → {{ disk.daemon.consensus.valid_until }}). The Tor directory authorities sign that window, so the target's clock was not badly wrong: one off by more than about a day would fall outside it.{% else %}<span class="flag-warn">⚠</span> When tor last wrote its state file ({{ disk.daemon.state_written }}), the target's clock was outside the validity window of the consensus tor held ({{ disk.daemon.consensus.valid_after }} → {{ disk.daemon.consensus.valid_until }}). The clock may have been wrong: treat the target's timestamps with caution.{% endif %}</dd>
       {% endif %}
     </dl>
   </section>

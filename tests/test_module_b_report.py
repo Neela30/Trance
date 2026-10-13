@@ -415,3 +415,13 @@ def test_journal_events_grouped_one_row_per_file():
     assert [(r["path"], r["count"]) for r in rows] == [("C:\\t\\a", 2), ("C:\\t\\b", 1)]
     assert rows[0]["actions"] == ["file create", "close"]
     assert rows[0]["first"] < rows[0]["last"]
+
+
+def test_clock_check_against_the_signed_consensus_window():
+    from modules.module_b_disk.report import _clock_consistent
+
+    window = {"valid_after_utc": "2026-09-19 07:00:00", "valid_until_utc": "2026-09-19 10:00:00"}
+    assert _clock_consistent({"last_written_utc": "2026-09-19 08:32:51"}, window) is True
+    assert _clock_consistent({"last_written_utc": "2026-09-21 08:32:51"}, window) is False
+    assert _clock_consistent({}, window) is None
+    assert build_context(_details())["daemon"]["clock_consistent"] is True

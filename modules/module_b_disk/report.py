@@ -122,6 +122,26 @@ def _profile_context(profile: dict) -> dict:
     }
 
 
+def _clock_consistent(state: dict, consensus: dict) -> bool | None:
+    """Was the target's clock inside the validity window of the consensus tor held when
+    tor last wrote its state file? The window is signed by the Tor directory authorities,
+    so it is a time reference the target cannot set. None when either side is missing."""
+    try:
+        written, after, until = (
+            dt.datetime.fromisoformat(v)
+            for v in (
+                state["last_written_utc"],
+                consensus["valid_after_utc"],
+                consensus["valid_until_utc"],
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len({v.tzinfo is None for v in (written, after, until)}) != 1:
+        return None
+    return after <= written <= until
+
+
 def _daemon_context(daemon: dict) -> dict:
     state = daemon.get("state", {})
     consensus = daemon.get("consensus", {})
@@ -171,6 +191,7 @@ def _daemon_context(daemon: dict) -> dict:
                 "fetched": _iso(consensus.get("file_mtime_utc")),
             }
         ),
+        "clock_consistent": _clock_consistent(state, consensus),
         "credentials": credentials,
         "ignored_auth_files": [f.get("filename") for f in auth.get("ignored_files", [])],
         "errors": {

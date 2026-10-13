@@ -44,6 +44,7 @@ import ntpath
 import os
 import platform
 import socket
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,6 +276,32 @@ def acquisition_context() -> dict:
     }
 
 
+def clock_status() -> dict:
+    """The target's clock at capture and its last time sync (``w32tm /query /status``,
+    read-only), so the report can say how far the target's own timestamps can be trusted.
+    The labels are parsed for English Windows only; the raw output is always kept."""
+    status: dict = {"target_utc": datetime.now(timezone.utc).isoformat()}
+    try:
+        out = subprocess.run(
+            ["w32tm", "/query", "/status"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {**status, "error": str(exc)}
+    if out.returncode != 0:
+        return {**status, "error": (out.stderr or out.stdout).strip() or f"exit {out.returncode}"}
+    fields = {
+        key.strip(): value.strip()
+        for key, sep, value in (line.partition(":") for line in out.stdout.splitlines())
+        if sep
+    }
+    return {
+        **status,
+        "last_sync": fields.get("Last Successful Sync Time"),
+        "source": fields.get("Source"),
+        "raw": out.stdout.strip(),
+    }
+
+
 def acquire(
     output_dir: Path,
     include_registry: bool = True,
@@ -307,6 +334,7 @@ def acquire(
     manifest: dict = {
         "acquired_at": datetime.now(timezone.utc).isoformat(),
         "acquired_by": acquisition_context(),
+        "clock": clock_status(),
         "tool": tool,
         "warnings": warnings,
         "acquisition_order": [

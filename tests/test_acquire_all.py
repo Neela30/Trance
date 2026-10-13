@@ -236,3 +236,22 @@ def test_acquire_captures_memory_before_registry_and_disk(tmp_path, monkeypatch)
 
     assert calls == ["memory", "registry", "disk"]
     assert manifest["acquisition_order"] == ["memory", "registry", "disk"]
+
+
+def test_clock_status_parses_w32tm_and_survives_its_failure(monkeypatch):
+    out = "Leap Indicator: 0(no warning)\nSource: time.windows.com,0x9\nLast Successful Sync Time: 10/9/2026 1:15:00 PM\n"
+    monkeypatch.setattr(
+        acquire_all.subprocess,
+        "run",
+        lambda *a, **k: acquire_all.subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+    )
+    clock = acquire_all.clock_status()
+    assert clock["source"] == "time.windows.com,0x9"
+    assert clock["last_sync"] == "10/9/2026 1:15:00 PM"
+    assert clock["target_utc"]
+
+    def missing(*a, **k):
+        raise FileNotFoundError("w32tm")
+
+    monkeypatch.setattr(acquire_all.subprocess, "run", missing)
+    assert "w32tm" in acquire_all.clock_status()["error"]

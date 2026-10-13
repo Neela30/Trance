@@ -153,6 +153,7 @@ def acquisition_info(evidence_dir: Path | None) -> dict | None:
         # Written by acquire_all.py since this field was added; absent in older captures.
         "acquired_by": manifest.get("acquired_by"),
         "acquisition_order": manifest.get("acquisition_order"),
+        "clock": manifest.get("clock"),
         "winpmem_path": memory.get("winpmem_path"),
         "winpmem_sha256": memory.get("winpmem_sha256"),
         "custody_logs": custody_logs,
