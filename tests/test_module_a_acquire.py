@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -395,7 +396,8 @@ def test_every_shadow_deletion_targets_exactly_the_created_id(tmp_path, monkeypa
         return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(acquire.subprocess, "run", fake_run)
-    (tmp_path / "file.bin").write_bytes(b"x")
+    # The source is a Windows device path; only the command sequence matters here.
+    monkeypatch.setattr(acquire.shutil, "copyfile", lambda src, dst: Path(dst).write_bytes(b"x"))
     acquire._copy_via_shadow("file.bin", tmp_path / "out.bin")
 
     deletes = [c for c in commands if c[0] == "vssadmin"]

@@ -148,6 +148,7 @@ def run_pipeline(
     """
     refuse_root()
     total_steps = len(MODULES) + 1
+    started_at = datetime.now(timezone.utc).isoformat()
     integrity = verify_evidence(config.evidence_dir, evidence_inputs(module_kwargs))
     print(f"[*] evidence integrity: {integrity['status']} — {integrity['message']}")
     if integrity["status"] == STATUS_FAILED:
@@ -167,8 +168,7 @@ def run_pipeline(
             for step, name in enumerate(MODULES, start=1):
                 progress_cb(name, step, total_steps)
     else:
-        started_at = datetime.now(timezone.utc).isoformat()
-    results = _run_modules(config, module_kwargs, progress_cb, total_steps)
+        results = _run_modules(config, module_kwargs, progress_cb, total_steps)
 
     findings = build_findings(config, results, integrity=integrity)
     findings["provenance"] = build_provenance(

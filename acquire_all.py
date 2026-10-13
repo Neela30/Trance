@@ -42,6 +42,8 @@ import getpass
 import json
 import ntpath
 import os
+import platform
+import socket
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
