@@ -255,7 +255,7 @@ def _print_category(name: str, result: dict) -> None:
             continue
         status = entry.get("status", "?")
         detail = entry.get("path") or entry.get("message") or ""
-        print(f"[*] {name}.{key}: {status}{' — ' + detail if detail else ''}")
+        print(f"[*] {name}.{key}: {status}{': ' + detail if detail else ''}")
 
 
 def acquisition_context() -> dict:
@@ -381,7 +381,7 @@ def acquire(
             print(f"[!] disk.ntfs: {ntfs.get('message')}", file=sys.stderr)
         for drive, volume in ntfs.get("volumes", {}).items():
             detail = volume.get("path") or volume.get("message") or ""
-            print(f"[*] disk.ntfs.{drive}: {volume['status']}{' — ' + detail if detail else ''}")
+            print(f"[*] disk.ntfs.{drive}: {volume['status']}{': ' + detail if detail else ''}")
     else:
         print("[*] disk.ntfs: skipped (--skip-ntfs)")
 

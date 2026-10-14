@@ -382,7 +382,7 @@ def test_report_renders_residue_and_ntfs_sections(tmp_path):
     )
     html = render_report(build_findings(config, [result]))
     assert "Memory residue on disk" in html
-    assert "hiberfil.sys" in html and "compressed — lower bound" in html
+    assert "hiberfil.sys" in html and "compressed, lower bound" in html
     assert "File system records" in html
     assert "Deleted internet-origin files" in html
     assert "gone.txt" in html and "live.txt" not in html

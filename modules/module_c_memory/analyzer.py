@@ -1128,7 +1128,7 @@ def analyze(
         },
         "targeting_suggestions": targeting_suggestions,
         "key_findings": {
-            "note": "Deduplicated, high-confidence hits only — start here. Full detail incl. low-confidence "
+            "note": "Deduplicated, high-confidence hits only. Start here. Full detail incl. low-confidence "
             "noise is in 'targeted' below.",
             "session_cookies": key_cookies,
             "credentials": key_credentials,
@@ -1145,15 +1145,15 @@ def analyze(
             "page_titles": page_titles,
         },
         "timeline": {
-            "disclaimer": "Ordered by memory offset ONLY — not a verified chronological timeline. Physical "
+            "disclaimer": "Ordered by memory offset ONLY, not a verified chronological timeline. Physical "
             "memory layout has no guaranteed relationship to time (allocator reuse and region placement can "
             "put older or newer data anywhere in the address space). Treat as a candidate sequence for "
-            "investigator review, not proven fact — cross-reference real timestamped sources (browser "
+            "investigator review, not proven fact; cross-reference real timestamped sources (browser "
             "history/places.sqlite, filesystem MACB times) before relying on the order.",
             "events": timeline,
         },
         "unfiltered": {
-            "note": "Unanchored context only — includes Firefox's own code/strings and default onion list. Not evidence on its own.",
+            "note": "Unanchored context only: includes Firefox's own code/strings and default onion list. Not evidence on its own.",
             "total_strings_extracted": total_strings,
             "urls": {"count": unfiltered_url_count, "sample": unfiltered_url_sample},
             "cookie_like": {"count": unfiltered_cookie_count, "sample": unfiltered_cookie_sample},
@@ -1202,14 +1202,14 @@ def format_summary(report: dict) -> str:
     if report.get("truncated"):
         record_cap = report.get("record_cap", MAX_RECORDS_PER_TYPE)
         capped = ", ".join(sorted(report["truncated"]))
-        lines.append(f"[!] Result cap ({record_cap:,}/type) hit — truncated: {capped}")
+        lines.append(f"[!] Result cap ({record_cap:,}/type) hit, truncated: {capped}")
     ha = report.get("host_anchoring")
     if ha and ha["applied"]:
         dropped = sum(v["count"] for v in ha["unanchored"].values())
         if dropped:
             lines.append(
                 f"[i] Host-anchoring dropped {dropped} cookie/credential/search-query hit(s) not "
-                f"co-located with --onion/--host in the same string (full-memory scan) — see "
+                f"co-located with --onion/--host in the same string (full-memory scan), see "
                 f"'host_anchoring.unanchored' in the JSON report."
             )
     lines += [
@@ -1219,11 +1219,11 @@ def format_summary(report: dict) -> str:
     if sugg:
         lines.append(
             "[!] Onion address(es) seen repeatedly in memory but NOT covered by --onion/--host "
-            "(note: Tor Browser's own bundled default services — search engine, connectivity checks — "
+            "(note: Tor Browser's own bundled default services (search engine, connectivity checks) "
             "also land here and aren't necessarily user activity; check before assuming a missed target):"
         )
         lines += [
-            f"    {s['onion']}  (seen {s['hit_count']}x) — re-run with --onion {s['onion']}"
+            f"    {s['onion']}  (seen {s['hit_count']}x); re-run with --onion {s['onion']}"
             for s in sugg
         ]
     lines.append(f"--- Session/cookie values ({len(kf['session_cookies'])} unique) ---")
@@ -1325,7 +1325,7 @@ def main() -> None:
         "--source-type",
         choices=sorted(SOURCE_TYPE_RECORD_CAPS),
         default=DEFAULT_SOURCE_TYPE,
-        help="What kind of image this is — a single process dump (dumper.py) or a full "
+        help="What kind of image this is: a single process dump (dumper.py) or a full "
         "physical-memory image (winpmem_acquire.py). Only changes per-category result caps "
         "and report labeling, not extraction logic (default: %(default)s)",
     )
@@ -1336,7 +1336,7 @@ def main() -> None:
 
     if not args.onion and not args.host:
         print(
-            "[!] Warning: no --onion or --host given — targeted URL section will be empty.",
+            "[!] Warning: no --onion or --host given; the targeted URL section will be empty.",
             file=sys.stderr,
         )
 

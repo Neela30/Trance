@@ -9,7 +9,7 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'none'; object-src 'none'; frame-src 'none'; connect-src 'none'; font-src 'none'; media-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TRANCE — {{ findings.case.name }}</title>
+<title>TRANCE · {{ findings.case.name }}</title>
 <style>
   :root {
     --bg: #eef1f0; --surface: #ffffff; --surface-2: #e3e7e6; --ink: #1b2226; --ink-muted: #5b6570;
@@ -195,7 +195,7 @@
   {% set integrity = findings.evidence_integrity %}
   {% if integrity and integrity.status == 'failed' %}
   <div class="callout" style="border-left-color: var(--accent); border-left-width: 5px; font-size: 14px;">
-    <strong>Evidence integrity check failed — nothing was analysed.</strong> {{ integrity.message }}
+    <strong>Evidence integrity check failed. Nothing was analysed.</strong> {{ integrity.message }}
     {% if integrity.mismatched %}<br>Changed since acquisition: {% for m in integrity.mismatched[:20] %}<span class="mono">{{ m.path }}</span>{{ ", " if not loop.last }}{% endfor %}{% if integrity.mismatched|length > 20 %} (+{{ integrity.mismatched|length - 20 }} more){% endif %}.{% endif %}
     {% if integrity.invalid %}<br>Unsafe or unreadable: {% for i in integrity.invalid[:20] %}<span class="mono">{{ i.record }}</span> ({{ i.reason }}){{ "; " if not loop.last }}{% endfor %}.{% endif %}
     <br>Re-copy the evidence from the original acquisition media and run the analysis again.
@@ -276,7 +276,7 @@
         {{ based_on(memory.basis.strings + (memory.basis.processes if memory.volatility3.process_activity and memory.volatility3.process_activity.groups else [])) }}
         {% endif %}
         {% if m.status == 'partial' and m.warnings %}
-        <p class="note" style="margin:6px 0 0;">Could not read: {% for w in m.warnings %}{{ w.artifact_type }}{% if w.source %} ({{ w.source }}){% endif %} — {{ w.reason }}{{ "; " if not loop.last }}{% endfor %}.</p>
+        <p class="note" style="margin:6px 0 0;">Could not read: {% for w in m.warnings %}{{ w.artifact_type }}{% if w.source %} ({{ w.source }}){% endif %}: {{ w.reason }}{{ "; " if not loop.last }}{% endfor %}.</p>
         {% elif m.message and m.status not in ['ok', 'partial'] %}<p class="note" style="margin:0;">{{ m.message }}</p>{% endif %}
       </div>
     </div>
@@ -349,7 +349,7 @@
     <h2>What Windows recorded</h2>
     <p class="band-subtitle">The registry records the summary above is built from.</p>
     <dl class="meta-grid" style="margin-bottom:32px;">
-      <dt>Hives read</dt><dd>{{ registry.hives_analyzed|join(", ") if registry.hives_analyzed else "— none" }}</dd>
+      <dt>Hives read</dt><dd>{{ registry.hives_analyzed|join(", ") if registry.hives_analyzed else "none" }}</dd>
       {% if registry.hives_missing %}
       <dt>Hives not provided</dt><dd>{{ registry.hives_missing|join(", ") }}</dd>
       {% endif %}
@@ -450,7 +450,7 @@
   <section>
     <div class="section-head">
       <h2>Confirmed Tor Browser components</h2>
-      <span class="count">{{ registry.component_timeline|length }} distinct file{{ "s" if registry.component_timeline|length != 1 }} — {{ registry.corroborated_components }} corroborated by 2+ independent hive sources</span>
+      <span class="count">{{ registry.component_timeline|length }} distinct file{{ "s" if registry.component_timeline|length != 1 }}, {{ registry.corroborated_components }} corroborated by 2+ independent hive sources</span>
     </div>
     {% if registry.component_timeline %}
     <div class="table-scroll">
@@ -462,8 +462,8 @@
             <td class="val">{{ c.basename|wrap_path }}{% if c.paths|length > 1 %}<br><span class="off">({{ c.paths|length }} path variants)</span>{% endif %}</td>
             <td class="val">{% for t in c.seen_in %}<span class="chip {{ 'high' if t in ('UserAssist', 'Amcache', 'BAM', 'InstalledPrograms') else 'low' if t in ('RecentDocs', 'RunMRU', 'WordWheelQuery', 'ComDlg32') else '' }}">{{ t }}{% if t == 'ShimCache' and c.shimcache_hits > 1 %} ×{{ c.shimcache_hits }}{% endif %}</span> {% endfor %}</td>
             <td class="off">{{ c.amcache_first_seen|fmt_ts }}</td>
-            <td class="off">{{ c.userassist_run_count or "—" }}</td>
-            <td class="off">{% if c.last_activity %}{{ c.last_activity.timestamp|fmt_ts }} <span class="off">({{ c.last_activity.source }})</span>{% else %}—{% endif %}</td>
+            <td class="off">{{ c.userassist_run_count or "n/a" }}</td>
+            <td class="off">{% if c.last_activity %}{{ c.last_activity.timestamp|fmt_ts }} <span class="off">({{ c.last_activity.source }})</span>{% else %}n/a{% endif %}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -471,7 +471,7 @@
     </div>
     {% if registry.corroborated_components %}
     <div class="callout">
-      <strong>Independent corroboration:</strong> {{ registry.corroborated_components }} file{{ "s" if registry.corroborated_components != 1 }} above {{ "is" if registry.corroborated_components == 1 else "are" }} confirmed by 2 or more separate OS subsystems (execution history, cache insertion, install record) agreeing independently — stronger than any single artifact type's say-so alone.
+      <strong>Independent corroboration:</strong> {{ registry.corroborated_components }} file{{ "s" if registry.corroborated_components != 1 }} above {{ "is" if registry.corroborated_components == 1 else "are" }} confirmed by 2 or more separate OS subsystems (execution history, cache insertion, install record) agreeing independently, stronger than any single artifact type's say-so alone.
     </div>
     {% endif %}
     {# Last use, BAM gap, strength and install date are already stated in "What happened" / "How reliable". #}
@@ -480,7 +480,7 @@
     <p class="note">{{ note }}</p>
     {% endfor %}
     {% for link in registry.linked_launches %}
-    <p class="note">Same instant, likely one action (a shortcut and the program it started), not two sources: {{ link.timestamp|fmt_ts }} — {{ link.paths|join(" ↔ ") }}</p>
+    <p class="note">Same instant, likely one action (a shortcut and the program it started), not two sources: {{ link.timestamp|fmt_ts }}, {{ link.paths|join(" ↔ ") }}</p>
     {% endfor %}
     {% else %}
     <p class="note">No cross-referenceable registry components found.</p>
@@ -488,7 +488,7 @@
   </section>
 
   <section>
-    <div class="section-head"><h2>Registry entries, hive by hive</h2><span class="count">{{ registry.total_findings }} finding{{ "s" if registry.total_findings != 1 }}, deduplicated — what the table above was built from</span></div>
+    <div class="section-head"><h2>Registry entries, hive by hive</h2><span class="count">{{ registry.total_findings }} finding{{ "s" if registry.total_findings != 1 }}, deduplicated, what the table above was built from</span></div>
     {% if registry.sections %}
     <details class="appendix">
       <summary>Show per-hive detail</summary>
@@ -506,7 +506,7 @@
               {% for f in s.findings %}
               <tr>
                 <td class="val">{{ f.path|wrap_path }}{% if f.harddiskvolume_note %}<br><span class="off">{{ f.harddiskvolume_note }}</span>{% endif %}</td>
-                <td class="off">{{ f.run_count if f.run_count is not none else "—" }}</td>
+                <td class="off">{{ f.run_count if f.run_count is not none else "n/a" }}</td>
                 <td class="off">{{ f.timestamp|fmt_ts }}</td>
               </tr>
               {% endfor %}
@@ -525,7 +525,7 @@
               {% endfor %}
             </tbody>
           </table>
-          <p class="note" style="margin-top:6px;">This timestamp is the registry key's own last-write time, shared by every program recorded in this key — not a per-program run time.</p>
+          <p class="note" style="margin-top:6px;">This timestamp is the registry key's own last-write time, shared by every program recorded in this key, not a per-program run time.</p>
           {% else %}
           <table class="evidence-table">
             <thead><tr><th>Path</th>{% if s.type != 'ShimCache' %}<th>Detail</th>{% endif %}<th>Timestamp</th></tr></thead>
@@ -536,7 +536,7 @@
                 {# A ShimCache description only repeats the path. #}
                 {% if s.type != 'ShimCache' %}
                 <td class="val">
-                  {% if s.type == 'Amcache' %}sha1={{ f.sha1 or "—" }}, size={{ f.size or "—" }}
+                  {% if s.type == 'Amcache' %}sha1={{ f.sha1 or "n/a" }}, size={{ f.size or "n/a" }}
                   {% else %}{{ f.description }}
                   {% endif %}
                 </td>
@@ -566,14 +566,14 @@
       <dt>Sources read</dt><dd>{{ disk.supplied|join(", ") }}</dd>
       {% if disk.profile %}
       <dt>Profile integrity</dt>
-      <dd>{% if disk.profile.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.profile.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest — {{ disk.profile.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.profile.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
+      <dd>{% if disk.profile.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.profile.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest, {{ disk.profile.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.profile.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
       {% endif %}
       {% if disk.daemon %}
       <dt>Daemon dir integrity</dt>
-      <dd>{% if disk.daemon.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.daemon.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest — {{ disk.daemon.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.daemon.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
+      <dd>{% if disk.daemon.integrity.manifest_status == 'verified' %}<span class="flag-ok">✓ {{ disk.daemon.integrity.hashed_files }} files verified against acquisition manifest</span>{% else %}<span class="flag-warn">⚠ No acquisition manifest, {{ disk.daemon.integrity.hashed_files }} files hashed at analysis time only</span>{% endif %}{% if disk.daemon.integrity.source_unchanged %} · source unchanged after analysis{% endif %}</dd>
       {% endif %}
       {% if disk.downloads %}
-      <dt>Volume scanned</dt><dd>{{ disk.downloads.volume_root }}{% if disk.downloads.live_scan %} (live scan on the target at acquisition){% endif %} — {{ "{:,}".format(disk.downloads.files_walked) }} files walked in {{ disk.downloads.scan_seconds }}s</dd>
+      <dt>Volume scanned</dt><dd>{{ disk.downloads.volume_root }}{% if disk.downloads.live_scan %} (live scan on the target at acquisition){% endif %}, {{ "{:,}".format(disk.downloads.files_walked) }} files walked in {{ disk.downloads.scan_seconds }}s</dd>
       {% endif %}
     </dl>
   </div>
@@ -595,13 +595,13 @@
   <section>
     <div class="section-head"><h2>Tor connection service (daemon)</h2><span class="count">from its data folder <span class="mono">Data/Tor</span>, which private browsing does not clear</span></div>
     <dl class="meta-grid" style="margin-bottom:18px;">
-      <dt>Tor version</dt><dd>{{ disk.daemon.tor_version or "—" }}</dd>
-      <dt>Daemon started</dt><dd>{{ disk.daemon.daemon_start or "— (no lock file)" }}</dd>
-      <dt>State last written</dt><dd>{{ disk.daemon.state_written or "—" }}{% if disk.daemon.guest_local_written %} <span style="color:var(--ink-muted)">(guest clock: {{ disk.daemon.guest_local_written }}{% if disk.daemon.guest_utc_offset_hours is not none %}, UTC{{ "%+g"|format(disk.daemon.guest_utc_offset_hours) }}h{% endif %})</span>{% endif %}</dd>
+      <dt>Tor version</dt><dd>{{ disk.daemon.tor_version or "n/a" }}</dd>
+      <dt>Daemon started</dt><dd>{{ disk.daemon.daemon_start or "unknown (no lock file)" }}</dd>
+      <dt>State last written</dt><dd>{{ disk.daemon.state_written or "n/a" }}{% if disk.daemon.guest_local_written %} <span style="color:var(--ink-muted)">(guest clock: {{ disk.daemon.guest_local_written }}{% if disk.daemon.guest_utc_offset_hours is not none %}, UTC{{ "%+g"|format(disk.daemon.guest_utc_offset_hours) }}h{% endif %})</span>{% endif %}</dd>
       {% if disk.daemon.minutes_since_user_activity is not none %}
       <dt>Idle at last write</dt><dd>{{ disk.daemon.minutes_since_user_activity }} min since user activity{% if disk.daemon.dormant %} · dormant={{ disk.daemon.dormant }}{% endif %}</dd>
       {% endif %}
-      <dt>Circuits built</dt><dd>{{ disk.daemon.circuits_built or "—" }}{% if disk.daemon.histogram_consistent is false %} <span class="flag-warn">⚠ build-time histogram does not sum to this — state file truncated or edited</span>{% endif %}</dd>
+      <dt>Circuits built</dt><dd>{{ disk.daemon.circuits_built or "n/a" }}{% if disk.daemon.histogram_consistent is false %} <span class="flag-warn">⚠ build-time histogram does not sum to this; the state file was truncated or edited</span>{% endif %}</dd>
       {% if disk.daemon.consensus %}
       <dt>Consensus</dt><dd>valid {{ disk.daemon.consensus.valid_after }} → {{ disk.daemon.consensus.valid_until }} <span style="color:var(--ink-muted)">(authority-signed; independent of the guest clock)</span></dd>
       {% endif %}
@@ -614,13 +614,13 @@
         <thead><tr><th>Nickname</th><th>RSA id</th><th>Confirmed</th><th>Uses ok/tried</th><th>Circuits ok/tried</th></tr></thead>
         <tbody>
           {% for g in disk.daemon.guards_used %}
-          <tr><td class="val">{{ g.nickname }}</td><td class="off">{{ g.rsa_id }}</td><td class="off">{{ g.confirmed_on or "—" }}</td><td class="mono">{{ g.use }}</td><td class="mono">{{ g.circuits }}</td></tr>
+          <tr><td class="val">{{ g.nickname }}</td><td class="off">{{ g.rsa_id }}</td><td class="off">{{ g.confirmed_on or "n/a" }}</td><td class="mono">{{ g.use }}</td><td class="mono">{{ g.circuits }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
     {% else %}
-    <p class="note">No guard has a recorded use — the daemon may never have built a working circuit.</p>
+    <p class="note">No guard has a recorded use; the daemon may never have built a working circuit.</p>
     {% endif %}
     {% if disk.daemon.credentials %}
     <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Client-auth credentials</h3><span class="count">configuration, not proof of a visit</span></div>
@@ -629,7 +629,7 @@
         <thead><tr><th>Onion address</th><th>File</th><th>Modified</th><th>SHA-256</th></tr></thead>
         <tbody>
           {% for c in disk.daemon.credentials %}
-          <tr><td class="val">{{ c.onion_address }}</td><td class="val">{{ c.filename }}</td><td class="off">{{ c.modified or "—" }}</td><td class="off">{{ c.sha256[:12] ~ "…" if c.sha256 else "—" }}</td></tr>
+          <tr><td class="val">{{ c.onion_address }}</td><td class="val">{{ c.filename }}</td><td class="off">{{ c.modified or "n/a" }}</td><td class="off">{{ c.sha256[:12] ~ "…" if c.sha256 else "n/a" }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -660,7 +660,7 @@
     {% elif disk.downloads.window %}
     <p class="note" style="margin-bottom:12px;">Tor daemon window used for correlation: <span class="mono">{{ disk.downloads.window.start }}</span> → <span class="mono">{{ disk.downloads.window.end }}</span>{% if disk.downloads.window.end_basis %} (end: {{ disk.downloads.window.end_basis }}){% endif %}.</p>
     {% elif 'tor_daemon' in disk.supplied %}
-    <p class="note" style="margin-bottom:12px;">No daemon window could be derived (missing <span class="mono">lock</span> or <span class="mono">state</span>) — no files are listed because none can be correlated.</p>
+    <p class="note" style="margin-bottom:12px;">No daemon window could be derived (missing <span class="mono">lock</span> or <span class="mono">state</span>); no files are listed because none can be correlated.</p>
     {% else %}
     <p class="note" style="margin-bottom:12px;">Supply <span class="mono">--tor-dir</span> alongside <span class="mono">--disk-root</span> to correlate these against the Tor daemon's session window.</p>
     {% endif %}
@@ -672,10 +672,10 @@
         <tbody>
           {% for h in disk.downloads.hits %}
           <tr>
-            <td class="val">{{ h.path }}{% if h.recycled %}<br><span class="flag-warn">⚠ In the Recycle Bin</span> <span class="off">— originally {{ h.recycled.original_path or "unknown (no $I record)" }}{% if h.recycled.deleted %}, deleted {{ h.recycled.deleted }}{% endif %}</span>{% endif %}{% if h.host_url or h.referrer_url %}<br><span class="off">host={{ h.host_url or "—" }} referrer={{ h.referrer_url or "—" }}</span>{% endif %}</td>
-            <td class="off">{{ h.created or h.modified or "—" }}{% if not h.created %}<br>(mtime; no creation time){% endif %}</td>
+            <td class="val">{{ h.path }}{% if h.recycled %}<br><span class="flag-warn">⚠ In the Recycle Bin</span> <span class="off">originally {{ h.recycled.original_path or "unknown (no $I record)" }}{% if h.recycled.deleted %}, deleted {{ h.recycled.deleted }}{% endif %}</span>{% endif %}{% if h.host_url or h.referrer_url %}<br><span class="off">host={{ h.host_url or "n/a" }} referrer={{ h.referrer_url or "n/a" }}</span>{% endif %}</td>
+            <td class="off">{{ h.created or h.modified or "n/a" }}{% if not h.created %}<br>(mtime; no creation time){% endif %}</td>
             <td>{% if h.within_window is true %}<span class="chip high">yes</span>{% elif h.within_window is false %}<span class="chip low">no</span>{% else %}<span class="chip">unknown</span>{% endif %}</td>
-            <td class="mono">{{ h.zone_id if h.zone_id is not none else "—" }}</td>
+            <td class="mono">{{ h.zone_id if h.zone_id is not none else "n/a" }}</td>
             <td class="off">{{ "{:,}".format(h.size) }}</td>
             <td class="off">{{ h.sha256[:12] }}…</td>
           </tr>
@@ -684,7 +684,7 @@
       </table>
     </div>
     {% if disk.downloads.xattr_support is false %}
-    <p class="note" style="margin-top:8px;"><span class="flag-warn">⚠</span> Volume not mounted through ntfs-3g — NTFS creation times unavailable, modification times shown instead.</p>
+    <p class="note" style="margin-top:8px;"><span class="flag-warn">⚠</span> Volume not mounted through ntfs-3g, NTFS creation times unavailable, modification times shown instead.</p>
     {% endif %}
     {% elif disk.downloads.total %}
     <p class="note">{{ disk.downloads.total }} file{{ "s" if disk.downloads.total != 1 }} carry a <span class="mono">Zone.Identifier</span> stream, but none {% if disk.downloads.window %}was created while the Tor daemon was running{% else %}could be correlated to a Tor session{% endif %}; the list is kept in <span class="mono">findings.json</span>.</p>
@@ -702,7 +702,7 @@
     <p class="note">No onion address in {% for f in disk.residue.files %}<span class="mono">{{ f.path }}</span>{{ ", " if not loop.last }}{% endfor %}.{% if not disk.residue.hibernation_present %} Tor Browser keeps visited addresses in memory only; Windows may never have paged them out.{% endif %}</p>
     {% else %}
     <div class="ribbon">
-      <strong>The one disk route to a public onion address.</strong> Tor Browser and the tor daemon keep visited addresses in memory only; these files are where Windows itself writes memory to disk. A hit proves the string was in RAM at some point — not when, and not which process held it.{% if disk.residue.hibernation_present %} <span class="mono">hiberfil.sys</span> is compressed: its counts are a lower bound, and a Volatility3 hibernation-layer pass would read it fully.{% endif %}
+      <strong>The one disk route to a public onion address.</strong> Tor Browser and the tor daemon keep visited addresses in memory only; these files are where Windows itself writes memory to disk. A hit proves the string was in RAM at some point, not when, and not which process held it.{% if disk.residue.hibernation_present %} <span class="mono">hiberfil.sys</span> is compressed: its counts are a lower bound, and a Volatility3 hibernation-layer pass would read it fully.{% endif %}
     </div>
     {% if disk.residue.files %}
     <div class="table-scroll">
@@ -711,13 +711,13 @@
         <tbody>
           {% for f in disk.residue.files %}
           <tr>
-            <td class="val">{{ f.path }}{% if f.compressed %}<br><span class="off">compressed — lower bound</span>{% endif %}{% if f.error %}<br><span class="chip error">error</span> <span class="off">{{ f.error }}</span>{% endif %}</td>
+            <td class="val">{{ f.path }}{% if f.compressed %}<br><span class="off">compressed, lower bound</span>{% endif %}{% if f.error %}<br><span class="chip error">error</span> <span class="off">{{ f.error }}</span>{% endif %}</td>
             <td class="mono">{{ f.kind.replace('_', ' ') }}</td>
             <td class="off">{{ "{:,}".format(f.size) }}</td>
-            <td class="off">{{ f.modified or "—" }}</td>
-            <td class="mono">{{ f.onion_count }}{% if f.invalid_onion_count %}<br><span class="off">+{{ f.invalid_onion_count }} matched the pattern but {{ "is not a valid v3 address" if f.invalid_onion_count == 1 else "are not valid v3 addresses" }} (e.g. the retired 16-character v2 form, or a failed checksum) &mdash; most likely random text</span>{% endif %}</td>
+            <td class="off">{{ f.modified or "n/a" }}</td>
+            <td class="mono">{{ f.onion_count }}{% if f.invalid_onion_count %}<br><span class="off">+{{ f.invalid_onion_count }} matched the pattern but {{ "is not a valid v3 address" if f.invalid_onion_count == 1 else "are not valid v3 addresses" }} (e.g. the retired 16-character v2 form, or a failed checksum), most likely random text</span>{% endif %}</td>
             <td class="mono">{{ f.credential_count }}</td>
-            <td class="off">{{ f.markers|join(", ") if f.markers else "—" }}</td>
+            <td class="off">{{ f.markers|join(", ") if f.markers else "n/a" }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -736,7 +736,7 @@
       </table>
     </div>
     {% else %}
-    <p class="note" style="margin-top:12px;">No onion address in any of these files. With enough RAM and no hibernation, Windows may never have paged Tor Browser out — a modified time older than the Tor session (see above) means the pagefile was not even written during it.</p>
+    <p class="note" style="margin-top:12px;">No onion address in any of these files. With enough RAM and no hibernation, Windows may never have paged Tor Browser out. A modified time older than the Tor session (see above) means the pagefile was not even written during it.</p>
     {% endif %}
     {% else %}
     <p class="note">No pagefile, swapfile, hibernation file or crash dump on this volume.</p>
@@ -749,7 +749,7 @@
   <section>
     <div class="section-head"><h2>File system records</h2><span class="count">NTFS metadata: the $MFT file table and the $UsnJrnl change journal</span></div>
     {% if disk.notes.ntfs %}
-    <p class="note"><span class="flag-warn">⚠</span> Not analyzed — {{ disk.notes.ntfs }}.</p>
+    <p class="note"><span class="flag-warn">⚠</span> Not analyzed: {{ disk.notes.ntfs }}.</p>
     {% else %}
     {% if disk.ntfs.addresses or disk.ntfs.downloads or disk.ntfs.deleted_downloads or disk.ntfs.deleted_tor_files %}
     <div class="ribbon">
@@ -757,8 +757,8 @@
     </div>
     {% endif %}
     <dl class="meta-grid" style="margin-bottom:18px;">
-      <dt>$MFT</dt><dd>{% if disk.ntfs.mft_available %}{{ "{:,}".format(disk.ntfs.mft_records) }} named records{% else %}— not available{% endif %}</dd>
-      <dt>$UsnJrnl</dt><dd>{% if disk.ntfs.usn_available %}{{ "{:,}".format(disk.ntfs.usn_records) }} records, {{ disk.ntfs.journal_first or "?" }} → {{ disk.ntfs.journal_last or "?" }}{% else %}— not available{% endif %}</dd>
+      <dt>$MFT</dt><dd>{% if disk.ntfs.mft_available %}{{ "{:,}".format(disk.ntfs.mft_records) }} named records{% else %}not available{% endif %}</dd>
+      <dt>$UsnJrnl</dt><dd>{% if disk.ntfs.usn_available %}{{ "{:,}".format(disk.ntfs.usn_records) }} records, {{ disk.ntfs.journal_first or "?" }} → {{ disk.ntfs.journal_last or "?" }}{% else %}not available{% endif %}</dd>
       {% if disk.ntfs.window %}
       <dt>Tor file activity</dt><dd>{{ disk.ntfs.window.events }} journal events on Tor Browser/daemon files, {{ disk.ntfs.window.first }} → {{ disk.ntfs.window.last }}</dd>
       {% endif %}
@@ -776,13 +776,13 @@
       </table>
     </div>
     {% if disk.ntfs.resident_credentials %}
-    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Client-auth credentials recovered from the MFT</h3><span class="count">{{ disk.ntfs.resident_credentials|length }} — file small enough to be stored inside its MFT record</span></div>
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Client-auth credentials recovered from the MFT</h3><span class="count">{{ disk.ntfs.resident_credentials|length }}, file small enough to be stored inside its MFT record</span></div>
     <div class="table-scroll">
       <table class="evidence-table">
         <thead><tr><th>Address</th><th>File</th><th>MFT record</th><th>Created (NTFS)</th><th>File status</th></tr></thead>
         <tbody>
           {% for c in disk.ntfs.resident_credentials %}
-          <tr><td class="val">{{ c.address }}</td><td class="val">{{ c.path }}{% if not c.loadable_by_tor %} <span class="chip low">not loadable by tor</span>{% endif %}</td><td class="mono">{{ c.record }}</td><td class="mono">{{ c.created or "—" }}</td><td>{% if c.deleted %}<span class="chip low">deleted</span>{% else %}<span class="chip ok">present</span>{% endif %}</td></tr>
+          <tr><td class="val">{{ c.address }}</td><td class="val">{{ c.path }}{% if not c.loadable_by_tor %} <span class="chip low">not loadable by tor</span>{% endif %}</td><td class="mono">{{ c.record }}</td><td class="mono">{{ c.created or "n/a" }}</td><td>{% if c.deleted %}<span class="chip low">deleted</span>{% else %}<span class="chip ok">present</span>{% endif %}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -790,15 +790,15 @@
     <p class="note" style="margin-top:8px;">The full credential (address and key) survives in the MFT record until Windows reuses that record, even after the file or the whole Tor Browser folder is deleted. A credential shows the hidden service was configured for access; on its own it does not prove a visit. Tor only loads files whose name ends exactly in <span class="mono">.auth_private</span>.</p>
     {% endif %}
     {% if disk.ntfs.resident_onion_files %}
-    <p class="note" style="margin-top:8px;">Addresses found inside small files stored in the MFT itself: {% for r in disk.ntfs.resident_onion_files %}<span class="mono">{{ r.path }}</span>{{ " (deleted)" if r.deleted }}{{ "; " if not loop.last }}{% endfor %} — check whether these are the examiner's own transfer files before counting them as browsing evidence.</p>
+    <p class="note" style="margin-top:8px;">Addresses found inside small files stored in the MFT itself: {% for r in disk.ntfs.resident_onion_files %}<span class="mono">{{ r.path }}</span>{{ " (deleted)" if r.deleted }}{{ "; " if not loop.last }}{% endfor %}, check whether these are the examiner's own transfer files before counting them as browsing evidence.</p>
     {% endif %}
     {% else %}
     <p class="note">No onion address appears in any filename, journal entry or MFT-resident file content.</p>
     {% endif %}
     {% if disk.ntfs.downloads %}
-    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Downloads reconstructed from the change journal</h3><span class="count">{{ disk.ntfs.downloads|length }} — temp-file naming identifies the browser family</span></div>
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Downloads reconstructed from the change journal</h3><span class="count">{{ disk.ntfs.downloads|length }}, temp-file naming identifies the browser family</span></div>
     <div class="callout">
-      <strong>Browser attribution.</strong> Firefox — and therefore Tor Browser — saves a download as <span class="mono">&lt;8 random chars&gt;.&lt;ext&gt;.part</span>, then renames it to the final name and stamps <span class="mono">Zone.Identifier</span>; Chromium uses <span class="mono">.crdownload</span>, legacy Edge/IE <span class="mono">.partial</span>. The journal records that sequence by name, so it survives the file being deleted and it names the family that wrote it. Attribution to Tor Browser specifically holds when it is the only Firefox-family browser on the machine.
+      <strong>Browser attribution.</strong> Firefox, and therefore Tor Browser, saves a download as <span class="mono">&lt;8 random chars&gt;.&lt;ext&gt;.part</span>, then renames it to the final name and stamps <span class="mono">Zone.Identifier</span>; Chromium uses <span class="mono">.crdownload</span>, legacy Edge/IE <span class="mono">.partial</span>. The journal records that sequence by name, so it survives the file being deleted and it names the family that wrote it. Attribution to Tor Browser specifically holds when it is the only Firefox-family browser on the machine.
     </div>
     <div class="table-scroll">
       <table class="evidence-table">
@@ -807,12 +807,12 @@
           {% for d in disk.ntfs.downloads %}
           <tr>
             <td class="val">{{ d.path }}<br><span class="off">via {{ d.temp_name }}</span></td>
-            <td class="off">{{ d.started or "—" }}</td>
-            <td class="off">{{ d.completed or "—" }}</td>
+            <td class="off">{{ d.started or "n/a" }}</td>
+            <td class="off">{{ d.completed or "n/a" }}</td>
             <td class="mono">{{ d.browser_family.replace('_', ' ') }}</td>
             <td>{% if d.within_window is true %}<span class="chip high">yes</span>{% elif d.within_window is false %}<span class="chip low">no</span>{% else %}<span class="chip">unknown</span>{% endif %}</td>
-            <td class="mono">{{ "yes" if d.zone_stamped else "—" }}</td>
-            <td class="off">{{ d.deleted or "—" }}</td>
+            <td class="mono">{{ "yes" if d.zone_stamped else "no" }}</td>
+            <td class="off">{{ d.deleted or "n/a" }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -826,17 +826,17 @@
         <thead><tr><th>Path</th><th>Created</th><th>Zone</th><th>MFT record</th></tr></thead>
         <tbody>
           {% for d in disk.ntfs.deleted_downloads %}
-          <tr><td class="val">{{ d.path }}</td><td class="off">{{ d.created or "—" }}</td><td class="mono">{{ d.zone_id if d.zone_id is not none else "—" }}</td><td class="mono">{{ d.record }}</td></tr>
+          <tr><td class="val">{{ d.path }}</td><td class="off">{{ d.created or "n/a" }}</td><td class="mono">{{ d.zone_id if d.zone_id is not none else "n/a" }}</td><td class="mono">{{ d.record }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
     {% endif %}
     {% if disk.ntfs.deleted_tor_files %}
-    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Deleted Tor-related files</h3><span class="count">{{ disk.ntfs.deleted_tor_files|length }} — MFT record not in use, name retained</span></div>
+    <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">Deleted Tor-related files</h3><span class="count">{{ disk.ntfs.deleted_tor_files|length }}, MFT record not in use, name retained</span></div>
     <details class="appendix"><summary>Show the deleted files</summary><div class="appendix-body">
     {% for d in disk.ntfs.deleted_tor_files[:200] %}
-    <div class="appendix-row"><span class="val">{{ d.path }}</span><span class="why">{{ d.modified or "—" }}</span></div>
+    <div class="appendix-row"><span class="val">{{ d.path }}</span><span class="why">{{ d.modified or "n/a" }}</span></div>
     {% endfor %}
     </div></details>
     {% endif %}
@@ -848,7 +848,7 @@
         <thead><tr><th>File and actions</th><th>Events</th><th>First</th><th>Last</th></tr></thead>
         <tbody>
           {% for f in disk.ntfs.event_files %}
-          <tr><td class="val">{{ f.path|wrap_path }}<div class="note" style="font-size:11.5px;">{{ f.actions|join(", ") }}</div></td><td class="mono">{{ f.count }}</td><td class="off">{{ f.first or "—" }}</td><td class="off">{{ f.last or "—" }}</td></tr>
+          <tr><td class="val">{{ f.path|wrap_path }}<div class="note" style="font-size:11.5px;">{{ f.actions|join(", ") }}</div></td><td class="mono">{{ f.count }}</td><td class="off">{{ f.first or "n/a" }}</td><td class="off">{{ f.last or "n/a" }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -863,10 +863,10 @@
   <section>
     <div class="section-head"><h2>Browser profile</h2><span class="count">{{ disk.profile.places_rows }} places rows, {{ disk.profile.default_entries }} shipped defaults, {{ disk.profile.history_visits }} recorded visits</span></div>
     {% if disk.profile.errors %}
-    <div class="callout"><strong>Unreadable:</strong> {% for name, err in disk.profile.errors.items() %}<span class="mono">{{ name }}</span> — {{ err }}{{ "; " if not loop.last }}{% endfor %}. Absence below is not established for these files.</div>
+    <div class="callout"><strong>Unreadable:</strong> {% for name, err in disk.profile.errors.items() %}<span class="mono">{{ name }}</span>: {{ err }}{{ "; " if not loop.last }}{% endfor %}. Absence below is not established for these files.</div>
     {% endif %}
     {% if disk.profile.inert %}
-    <div class="callout"><strong>Expected inert profile.</strong> Tor Browser runs in permanent private browsing: <span class="mono">places.sqlite</span> keeps only the shipped Tor Project bookmarks and never records visits, downloads or cookies. An empty table here is the normal state after real use — the daemon and volume sections above carry the activity evidence.</div>
+    <div class="callout"><strong>Expected inert profile.</strong> Tor Browser runs in permanent private browsing: <span class="mono">places.sqlite</span> keeps only the shipped Tor Project bookmarks and never records visits, downloads or cookies. An empty table here is the normal state after real use; the daemon and volume sections above carry the activity evidence.</div>
     {% endif %}
     {% if disk.profile.history %}
     <div class="section-head"><h3 style="font-size:15px; font-weight:600;">Visited pages</h3><span class="count">excluding shipped defaults</span></div>
@@ -875,7 +875,7 @@
         <thead><tr><th>URL</th><th>Title</th><th>Visits</th><th>Typed</th><th>Last visit</th></tr></thead>
         <tbody>
           {% for h in disk.profile.history %}
-          <tr><td class="val">{{ h.url }}</td><td class="val">{{ h.title or "—" }}</td><td class="mono">{{ h.visit_count }}</td><td class="mono">{{ "yes" if h.typed else "—" }}</td><td class="off">{{ h.last_visit or "—" }}</td></tr>
+          <tr><td class="val">{{ h.url }}</td><td class="val">{{ h.title or "n/a" }}</td><td class="mono">{{ h.visit_count }}</td><td class="mono">{{ "yes" if h.typed else "no" }}</td><td class="off">{{ h.last_visit or "n/a" }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -888,7 +888,7 @@
         <thead><tr><th>Source URL</th><th>Saved to</th><th>Added</th></tr></thead>
         <tbody>
           {% for d in disk.profile.download_records %}
-          <tr><td class="val">{{ d.source_url }}</td><td class="val">{{ d.destination }}</td><td class="off">{{ d.added or "—" }}</td></tr>
+          <tr><td class="val">{{ d.source_url }}</td><td class="val">{{ d.destination }}</td><td class="off">{{ d.added or "n/a" }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -901,7 +901,7 @@
         <thead><tr><th>Host</th><th>Name</th><th>Created</th><th>Last accessed</th><th>Expires</th></tr></thead>
         <tbody>
           {% for c in disk.profile.cookies %}
-          <tr><td class="val">{{ c.host }}</td><td class="val">{{ c.name }}</td><td class="off">{{ c.created or "—" }}</td><td class="off">{{ c.last_accessed or "—" }}</td><td class="off">{{ c.expires or "—" }}</td></tr>
+          <tr><td class="val">{{ c.host }}</td><td class="val">{{ c.name }}</td><td class="off">{{ c.created or "n/a" }}</td><td class="off">{{ c.last_accessed or "n/a" }}</td><td class="off">{{ c.expires or "n/a" }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -910,7 +910,7 @@
     {% if disk.profile.bookmarks %}
     <div class="section-head" style="margin-top:22px;"><h3 style="font-size:15px; font-weight:600;">User bookmarks</h3><span class="count">from bookmark backups, excluding shipped defaults</span></div>
     <div class="path-list">
-      {% for b in disk.profile.bookmarks %}<span class="path-pill">{{ b.uri }}{% if b.title %} <span style="color:var(--ink-muted)">— {{ b.title }}</span>{% endif %}</span>{% endfor %}
+      {% for b in disk.profile.bookmarks %}<span class="path-pill">{{ b.uri }}{% if b.title %} <span style="color:var(--ink-muted)">({{ b.title }})</span>{% endif %}</span>{% endfor %}
     </div>
     {% endif %}
     {% if disk.profile.favicon_pages %}
@@ -941,7 +941,7 @@
     <p class="note">No onion addresses carved from the image.</p>
     {% endif %}
     {% if disk.carve.credentials %}
-    <p class="note" style="margin-top:8px;">Client-auth credential bytes found for: <span class="mono">{{ disk.carve.credentials|join(", ") }}</span> — presence alone does not prove a visit.</p>
+    <p class="note" style="margin-top:8px;">Client-auth credential bytes found for: <span class="mono">{{ disk.carve.credentials|join(", ") }}</span>, presence alone does not prove a visit.</p>
     {% endif %}
   </section>
   {% endif %}
@@ -959,12 +959,12 @@
       <dt>Integrity</dt>
       <dd>
         {% if d.dump.integrity_verified == true %}<span class="flag-ok">✓ Verified against .sha256 sidecar</span>
-        {% else %}<span class="flag-warn">⚠ Unverified — no .sha256 sidecar alongside this copy</span>
+        {% else %}<span class="flag-warn">⚠ Unverified: no .sha256 sidecar alongside this copy</span>
         {% endif %}
       </dd>
-      <dt>Target onion</dt><dd>{{ d.targeting.onion or "— not supplied" }}</dd>
-      <dt>Target host</dt><dd>{{ d.targeting.host or "— not supplied" }}</dd>
-      <dt>Username</dt><dd>{{ d.targeting.username or "— not supplied this run" }}</dd>
+      <dt>Target onion</dt><dd>{{ d.targeting.onion or "not supplied" }}</dd>
+      <dt>Target host</dt><dd>{{ d.targeting.host or "not supplied" }}</dd>
+      <dt>Username</dt><dd>{{ d.targeting.username or "not supplied this run" }}</dd>
     </dl>
   </div>
 
@@ -973,9 +973,9 @@
   <section>
     <div class="callout">
       <strong>No target was given, so nothing in this memory section is attributed to Tor Browser.</strong>
-      A full-memory image holds every process's memory &mdash; antivirus signatures, scripts and other programs' data &mdash; and without an <span class="mono">--onion</span> or <span class="mono">--host</span> there is nothing to tie a credential, cookie, search or download path to the browser. The {{ "{:,}".format(held) }} such match{{ "es" if held != 1 }} found are kept in <span class="mono">findings.json</span> as unattributed observations (<span class="mono">host_anchoring.unanchored</span>), not reported as findings.
+      A full-memory image holds every process's memory (antivirus signatures, scripts and other programs' data), and without an <span class="mono">--onion</span> or <span class="mono">--host</span> there is nothing to tie a credential, cookie, search or download path to the browser. The {{ "{:,}".format(held) }} such match{{ "es" if held != 1 }} found are kept in <span class="mono">findings.json</span> as unattributed observations (<span class="mono">host_anchoring.unanchored</span>), not reported as findings.
       {% if d.targeting_suggestions %}
-      The onion address mentioned most often in memory is <span class="mono">{{ d.targeting_suggestions[0].onion }}</span> ({{ d.targeting_suggestions[0].hit_count }}&times;). If it is the site under investigation, run the analysis again with <span class="mono">--onion {{ d.targeting_suggestions[0].onion }}</span> &mdash; Tor Browser's own built-in services can also appear in this list, so check it first.
+      The onion address mentioned most often in memory is <span class="mono">{{ d.targeting_suggestions[0].onion }}</span> ({{ d.targeting_suggestions[0].hit_count }}&times;). If it is the site under investigation, run the analysis again with <span class="mono">--onion {{ d.targeting_suggestions[0].onion }}</span>. Tor Browser's own built-in services can also appear in this list, so check it first.
       {% endif %}
     </div>
   </section>
@@ -984,7 +984,7 @@
   {% if d.targeting_suggestions %}
   <section>
     <div class="callout">
-      <strong>Heads up:</strong> onion address(es) seen repeatedly in memory but not covered by <span class="mono">--onion</span>/<span class="mono">--host</span> (Tor Browser's own bundled default services also land here — check before assuming a missed target):
+      <strong>Heads up:</strong> onion address(es) seen repeatedly in memory but not covered by <span class="mono">--onion</span>/<span class="mono">--host</span> (Tor Browser's own bundled default services also land here; check before assuming a missed target):
       <ul style="margin:8px 0 0; padding-left:18px;">
         {% for s in d.targeting_suggestions %}
         <li class="mono" style="font-size:12px;">{{ s.onion }} (seen {{ s.hit_count }}×)</li>
@@ -1045,12 +1045,12 @@
     {% if memory.near_duplicates %}
     <p class="note" style="margin-top:10px;">
       {% for p, close in memory.near_duplicates.items() %}
-      <strong style="color:var(--noise)">{{ p }}</strong> closely resembles {{ close|join(", ") }} — possible typo, stray keystroke, or manual endpoint probing.<br>
+      <strong style="color:var(--noise)">{{ p }}</strong> closely resembles {{ close|join(", ") }}, possible typo, stray keystroke, or manual endpoint probing.<br>
       {% endfor %}
     </p>
     {% endif %}
     {% if memory.assets %}
-    <p class="note" style="margin-top:10px;">+ {{ memory.assets|length }} automatic asset request{{ "s" if memory.assets|length != 1 }} (<span class="mono">{{ memory.assets|join(", ") }}</span>) — page-load traffic, not user actions; kept out of the sequence below.</p>
+    <p class="note" style="margin-top:10px;">+ {{ memory.assets|length }} automatic asset request{{ "s" if memory.assets|length != 1 }} (<span class="mono">{{ memory.assets|join(", ") }}</span>), page-load traffic, not user actions; kept out of the sequence below.</p>
     {% endif %}
   </section>
   {% endif %}
@@ -1074,9 +1074,9 @@
     {% endif %}
     {% if memory.downloads.unmatched %}
     <details class="appendix" style="margin-top:14px;">
-      <summary>Show {{ memory.downloads.unmatched|length }} other download{{ "s" if memory.downloads.unmatched|length != 1 }} seen on this machine — not correlated to the target site</summary>
+      <summary>Show {{ memory.downloads.unmatched|length }} other download{{ "s" if memory.downloads.unmatched|length != 1 }} seen on this machine, not correlated to the target site</summary>
       <div class="appendix-body">
-        <p class="note" style="margin-bottom:10px;">This is a full-memory image: a <span class="mono">Users\*\Downloads\</span> path anywhere on the machine — any user account, any application, unrelated installers — shows up here, not just this investigation's target. None of these correlate to a recovered target-site path; treat them as machine-wide context, not evidence tied to the target.</p>
+        <p class="note" style="margin-bottom:10px;">This is a full-memory image: a <span class="mono">Users\*\Downloads\</span> path anywhere on the machine, any user account, any application, unrelated installers, shows up here, not just this investigation's target. None of these correlate to a recovered target-site path; treat them as machine-wide context, not evidence tied to the target.</p>
         {% for dl in memory.downloads.unmatched %}
         <div class="appendix-row"><span class="val">{{ dl.value }}</span></div>
         {% endfor %}
@@ -1121,12 +1121,12 @@
     </ol>
     {% if memory.any_clustered %}
     <div class="callout">
-      <strong>‡ Clustered events:</strong> events flagged with ‡ sit within {{ "{:,}".format(memory.cluster_gap_bytes) }} bytes of the previous one — tight enough to more likely be one rendered page's set of links (e.g. a dashboard listing everything at once) than separate sequential navigations. Treat clustered runs as "seen together," not necessarily "done in that exact order."
+      <strong>‡ Clustered events:</strong> events flagged with ‡ sit within {{ "{:,}".format(memory.cluster_gap_bytes) }} bytes of the previous one, tight enough to more likely be one rendered page's set of links (e.g. a dashboard listing everything at once) than separate sequential navigations. Treat clustered runs as "seen together," not necessarily "done in that exact order."
     </div>
     {% endif %}
     {% if memory.any_far_from_start %}
     <div class="callout">
-      <strong>† Storage-region caveat:</strong> events flagged with † sit far past the sequence's typical spacing from the earliest event. Cookie/session and download-manager data live in their own memory regions, separate from rendered page content — a late offset here reflects where that data happens to sit in memory, not when it was created. Don't read these as "happened last."
+      <strong>† Storage-region caveat:</strong> events flagged with † sit far past the sequence's typical spacing from the earliest event. Cookie/session and download-manager data live in their own memory regions, separate from rendered page content. A late offset here reflects where that data happens to sit in memory, not when it was created. Don't read these as "happened last."
     </div>
     {% endif %}
     {% else %}
@@ -1138,24 +1138,24 @@
   <section>
     <div class="section-head">
       <h2>Processes and connections (Volatility 3)</h2>
-      <span class="count">independent structural pass — never merged with string-carver evidence above</span>
+      <span class="count">independent structural pass, never merged with string-carver evidence above</span>
     </div>
     <div class="ribbon">
       <strong>A second, independent method, not a second string carver.</strong> Everything below comes from
       parsing kernel data structures (process pool allocations, network/file/registry state), not from
-      scanning bytes for text patterns — see each row's <span class="mono">source</span> tag. It can confirm
+      scanning bytes for text patterns; see each row's <span class="mono">source</span> tag. It can confirm
       <em>which process</em> and <em>when</em> in ways raw string carving can't, but needs kernel symbols
       matching the imaged OS build to run at all.
     </div>
     {% if memory.volatility3.status == 'skipped' %}
-    <p class="note">Not run this pass — {{ memory.volatility3.message }}.</p>
+    <p class="note">Not run this pass: {{ memory.volatility3.message }}.</p>
     {% elif memory.volatility3.status == 'error' %}
-    <p class="note"><span class="chip error">error</span> Volatility3 could not be invoked at all — {{ memory.volatility3.message }}</p>
+    <p class="note"><span class="chip error">error</span> Volatility3 could not be invoked at all: {{ memory.volatility3.message }}</p>
     {% else %}
     {% if memory.volatility3.corroboration %}
     <div class="callout">
       <strong>Independent corroboration:</strong> the notes below point out where this structural pass and the
-      string-carver evidence above happen to agree — a human-readable juxtaposition, not an automated score.
+      string-carver evidence above happen to agree, a human-readable juxtaposition, not an automated score.
       <ul style="margin:8px 0 0; padding-left:18px;">
         {% for note in memory.volatility3.corroboration %}
         <li>{{ note }}</li>
@@ -1245,7 +1245,7 @@
   {% for g in generic_modules %}
   <div class="band">
     <div class="eyebrow">{{ g.name }}</div>
-    <h2>{{ g.name.replace('module_', '').replace('_', ' — ', 1)|title }}</h2>
+    <h2>{{ g.name.replace('module_', '').replace('_', ': ', 1)|title }}</h2>
   </div>
   <section>
     <p><span class="chip {{ g.status }}">{{ g.status.replace('_', ' ') }}</span>{% if g.message %} <span class="note">{{ g.message }}</span>{% endif %}</p>
@@ -1260,8 +1260,8 @@
             <td class="mono">{{ a.artifact_type }}</td>
             <td class="val">{{ a.source }}</td>
             <td class="val">{{ a.description }}</td>
-            <td class="off">{{ a.sha256[:12] ~ "…" if a.sha256 else "—" }}</td>
-            <td class="off">{{ a.timestamp or "—" }}</td>
+            <td class="off">{{ a.sha256[:12] ~ "…" if a.sha256 else "n/a" }}</td>
+            <td class="off">{{ a.timestamp or "n/a" }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -1270,7 +1270,7 @@
     {% elif g.status == 'ok' %}
     <p class="note">Ran cleanly, no artifacts reported.</p>
     {% elif g.status == 'not_implemented' %}
-    <p class="note">This module has no implementation yet — nothing from this evidence layer contributes to the case until it does.</p>
+    <p class="note">This module has no implementation yet; nothing from this evidence layer contributes to the case until it does.</p>
     {% elif g.status == 'skipped' %}
     <p class="note">No evidence was supplied for this module this run.</p>
     {% endif %}
@@ -1288,13 +1288,13 @@
       <li>Re-run with <span class="mono">--username &lt;candidate&gt;</span> to confirm which search term was the real login via the <span class="mono">matches_username</span> flag.</li>
       {% endif %}
       {% if memory.details.targeting_suggestions %}
-      <li>Check the onion address(es) flagged in the memory section — re-run with <span class="mono">--onion</span> set to any that turn out to be a real missed target.</li>
+      <li>Check the onion address(es) flagged in the memory section; re-run with <span class="mono">--onion</span> set to any that turn out to be a real missed target.</li>
       {% endif %}
       {% if (memory.session_cookies or memory.site_map) and not memory.details.key_findings.credentials %}
-      <li>No plaintext credentials recovered from memory strings alone — for firmer proof of the login itself, correlate with server-side access logs or a disk-based artifact (browser saved-logins store, if enabled).</li>
+      <li>No plaintext credentials recovered from memory strings alone. For firmer proof of the login itself, correlate with server-side access logs or a disk-based artifact (browser saved-logins store, if enabled).</li>
       {% endif %}
       {% if memory.downloads.matched %}
-      <li>If the source machine is still available, pull real filesystem MACB timestamps on the confirmed downloads — actual time data this memory-only view can't provide.</li>
+      <li>If the source machine is still available, pull real filesystem MACB timestamps on the confirmed downloads, actual time data this memory-only view can't provide.</li>
       {% endif %}
       {% if memory.any_clustered or memory.any_far_from_start %}
       <li>Treat every ‡/† flag in the activity sequence as an investigative lead worth checking against another source, not as settled fact.</li>
@@ -1363,10 +1363,10 @@
   </section>
 
   <section>
-    <div class="section-head"><h2>Analysis provenance</h2><span class="count">what produced this report — needed to repeat the analysis and get the same result</span></div>
+    <div class="section-head"><h2>Analysis provenance</h2><span class="count">what produced this report, needed to repeat the analysis and get the same result</span></div>
     <dl class="meta-grid">
       <dt>Tool</dt><dd>TRANCE {{ provenance.tool.version }}{{ " (packaged build)" if provenance.tool.packaged }}</dd>
-      <dt>Source commit</dt><dd>{% if provenance.tool.git_commit %}<span class="mono">{{ provenance.tool.git_commit }}</span>{% if provenance.tool.git_dirty %} — <strong>with uncommitted changes</strong>; the exact code is not recoverable from this commit alone{% endif %}{% else %}not recorded{% endif %}</dd>
+      <dt>Source commit</dt><dd>{% if provenance.tool.git_commit %}<span class="mono">{{ provenance.tool.git_commit }}</span>{% if provenance.tool.git_dirty %}, <strong>with uncommitted changes</strong>; the exact code is not recoverable from this commit alone{% endif %}{% else %}not recorded{% endif %}</dd>
       <dt>Analysis ran</dt><dd>{{ provenance.analysis_started_at }} → {{ provenance.analysis_finished_at }}</dd>
       <dt>Examiner machine</dt><dd>{{ provenance.runtime.hostname }}{% if provenance.runtime.user %} · user {{ provenance.runtime.user }}{% endif %} · {{ provenance.runtime.platform }} · Python {{ provenance.runtime.python }}</dd>
       <dt>Libraries</dt><dd class="mono" style="font-size:12px;">{% for name, v in provenance.runtime.libraries.items() if v %}{{ name }} {{ v }}{{ " · " if not loop.last }}{% endfor %}</dd>
@@ -1379,7 +1379,7 @@
       {% if acq.winpmem_path %}<dt>Memory imager</dt><dd>{{ acq.winpmem_path|wrap_path }}{% if acq.winpmem_sha256 %}<div class="hash">SHA-256 {{ acq.winpmem_sha256 }}</div>{% endif %}</dd>{% endif %}
       {% if acq.custody_logs %}<dt>Acquisition custody logs</dt><dd class="mono" style="font-size:12px;">{% for c in acq.custody_logs %}{{ c|wrap_path }}{{ "; " if not loop.last }}{% endfor %}</dd>{% endif %}
       {% else %}
-      <dt>Acquired</dt><dd>No <span class="mono">acquire_manifest.json</span> with this evidence — acquisition details are not recorded here.</dd>
+      <dt>Acquired</dt><dd>No <span class="mono">acquire_manifest.json</span> with this evidence; acquisition details are not recorded here.</dd>
       {% endif %}
       {% if disk and disk.daemon and disk.daemon.clock_consistent is not none %}
       <dt>Clock check</dt><dd>{% if disk.daemon.clock_consistent %}<span class="flag-ok">✓</span> When tor last wrote its state file ({{ disk.daemon.state_written }}), the target's clock was inside the validity window of the consensus tor held ({{ disk.daemon.consensus.valid_after }} → {{ disk.daemon.consensus.valid_until }}). The Tor directory authorities sign that window, so the target's clock was not badly wrong: one off by more than about a day would fall outside it.{% else %}<span class="flag-warn">⚠</span> When tor last wrote its state file ({{ disk.daemon.state_written }}), the target's clock was outside the validity window of the consensus tor held ({{ disk.daemon.consensus.valid_after }} → {{ disk.daemon.consensus.valid_until }}). The clock may have been wrong: treat the target's timestamps with caution.{% endif %}</dd>

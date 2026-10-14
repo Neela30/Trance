@@ -807,7 +807,7 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open("x", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
-    print("=== TRANCE Module B — NTFS metadata ===")
+    print("=== TRANCE Module B: NTFS metadata ===")
     if report.get("error"):
         print(f"error: {report['error']}", file=sys.stderr)
         return 1

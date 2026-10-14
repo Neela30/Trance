@@ -45,12 +45,12 @@ GLOSSARY: dict[str, str] = {
         "recently."
     ),
     "ShimCache": (
-        "Also called AppCompatCache — a Windows Registry cache of programs Windows has "
+        "Also called AppCompatCache, a Windows Registry cache of programs Windows has "
         "seen, for compatibility purposes. It shows a program was present, not "
         "necessarily that it was run."
     ),
     "BAM": (
-        "Background Activity Moderator — a Windows Registry record, separate from "
+        "Background Activity Moderator, a Windows Registry record, separate from "
         "UserAssist, of the last time a program actually ran."
     ),
     "registry hive": (
@@ -62,12 +62,12 @@ GLOSSARY: dict[str, str] = {
         "activity history, including UserAssist."
     ),
     "UTC": (
-        "Coordinated Universal Time — a single, location-independent time standard. "
+        "Coordinated Universal Time, a single, location-independent time standard. "
         "TRANCE always records evidence timestamps in UTC so they don't depend on any "
         "computer's local clock setting."
     ),
     "\\Device\\HarddiskVolumeN": (
-        "Windows' own internal name for the Nth storage volume it found — not the drive "
+        "Windows' own internal name for the Nth storage volume it found, not the drive "
         "letter shown in File Explorer. TRANCE shows the matching drive letter when it "
         "can be inferred from another record of the same file; otherwise it is shown "
         "as-is, with a note that the letter could not be determined."
@@ -79,7 +79,7 @@ GLOSSARY: dict[str, str] = {
     ),
     "SSID": ("The name of a Wi-Fi network, as it appears when choosing a network to join."),
     "gateway MAC address": (
-        "A unique hardware identifier for the router a network connection went through — "
+        "A unique hardware identifier for the router a network connection went through, "
         "useful for telling apart two different networks that happen to share the same "
         "name."
     ),
@@ -175,7 +175,7 @@ def describe_run0_with_focus(basename: str, focus_phrase: str) -> str:
     does not name UserAssist, which is a plain-English section."""
     return (
         f'Windows recorded the "{basename}" window being used ({focus_phrase}), but not '
-        "as a completed launch — this can happen when a program is closed before it "
+        "as a completed launch. This can happen when a program is closed before it "
         "exits normally."
     )
 
@@ -263,7 +263,7 @@ def describe_drive_device(
                 timing_clause = ", " + ", ".join(times)
         return (
             f"{drive_letter}: is a USB drive ({name}{serial_clause}) connected to this "
-            f"computer{timing_clause} — files there may not remain on this machine."
+            f"computer{timing_clause}, so files there may not remain on this machine."
         )
     if device_info.get("dynamic_disk"):
         return (
@@ -311,7 +311,7 @@ def describe_install_location(
         if note is None:
             note = (
                 f"{drive}: is not the main system drive and may be a USB drive or a second "
-                "disk — files there may not remain on this machine."
+                "disk, so files there may not remain on this machine."
             )
     return folder, note
 
@@ -418,7 +418,7 @@ def describe_evidence_strength(component_timeline: list[dict]) -> str:
     if len(sources) >= 2:
         return (
             f"Strength: confirmed by {len(sources)} independent sources "
-            f"({', '.join(sources)}) — stronger evidence than any single artifact type "
+            f"({', '.join(sources)}), stronger evidence than any single artifact type "
             "alone."
         )
     return (
@@ -463,13 +463,13 @@ def describe_reliability(component_timeline: list[dict]) -> list[str]:
         sentences = [
             (
                 "No Windows feature that confirms a program actually ran recorded this "
-                "activity — only contextual records, such as folder-browsing history, "
+                "activity: only contextual records, such as folder-browsing history, "
                 "which show something was accessed but not that it was executed."
             )
         ]
     sentences.append(
         "Some Windows features only keep the most recent record, or need a periodic scan "
-        "that may not have run yet — that is why a real activity can still be missing "
+        "that may not have run yet; that is why a real activity can still be missing "
         "from one or more of them."
     )
     return sentences
@@ -497,11 +497,11 @@ def describe_not_determined(
         bullets.append("The exact date Tor Browser was set up.")
     if multiple_launches:
         bullets.append(
-            "The dates of earlier uses — Windows only keeps a record of the most recent one."
+            "The dates of earlier uses: Windows only keeps a record of the most recent one."
         )
     if has_network_profiles:
         bullets.append(
-            "Which network was in use at the exact moment Tor Browser was opened — the "
+            "Which network was in use at the exact moment Tor Browser was opened: the "
             "registry only records when each network was first and last connected, not a "
             "connection history."
         )
@@ -518,7 +518,7 @@ def describe_no_findings() -> list[str]:
     return [
         "No registry evidence that Tor Browser was run by this account was found.",
         (
-            "This does not prove Tor Browser was never used — for example, a portable "
+            "This does not prove Tor Browser was never used: for example, a portable "
             "copy run from a USB drive, or a registry that was cleaned afterward, would "
             "leave little or nothing here."
         ),
@@ -626,14 +626,14 @@ def find_latest_tor_use_iso(
 
 _NETWORK_HISTORY_CAVEAT = (
     "Windows only keeps one first-connected and one last-connected time per network, not "
-    "a connection history — so this cannot show whether the computer was connected to a "
+    "a connection history, so this cannot show whether the computer was connected to a "
     "particular network for the whole time Tor Browser was open, only the closest "
     "recorded connection before it was last opened."
 )
 
 _TIMEZONE_UNKNOWN_CAVEAT = (
     "The computer's own time zone setting could not be determined, so the times below are "
-    "shown exactly as recorded — in the computer's own local time, not UTC — and have not "
+    "shown exactly as recorded, in the computer's own local time, not UTC, and have not "
     "been compared against the UTC-timestamped Tor Browser activity elsewhere in this "
     "report."
 )
@@ -809,7 +809,7 @@ def describe_run_key_autostart(run_keys: list[dict]) -> list[str]:
         name_clause = f" (listed as {value_name!r})" if value_name else ""
         sentences.append(
             f"{path} is configured to start automatically when this user signs "
-            f"in{name_clause} — indicating deliberate, ongoing use, not just a one-off "
+            f"in{name_clause}, indicating deliberate, ongoing use, not just a one-off "
             "session."
         )
     return sentences
@@ -826,7 +826,7 @@ def describe_service_autostart(services: list[dict]) -> list[str]:
         name_clause = f" (service {name!r})" if name else ""
         sentences.append(
             f"{path} is installed as a Windows service{name_clause}, configured to "
-            "start automatically with the computer — indicating deliberate, ongoing Tor "
+            "start automatically with the computer, indicating deliberate, ongoing Tor "
             "use set up ahead of time, not just a one-off session."
         )
     return sentences
@@ -842,7 +842,7 @@ def describe_proxy_configuration(proxy_settings: list[dict]) -> list[str]:
         server = finding.get("proxy_server") or "a Tor SOCKS port"
         sentences.append(
             f"Other programs on this computer were configured to send their network "
-            f"traffic through {server} — Tor's own proxy — meaning programs other than "
+            f"traffic through {server}, Tor's own proxy, meaning programs other than "
             "Tor Browser itself may have been set up to use Tor."
         )
     return sentences
@@ -877,7 +877,7 @@ def describe_portable_install_note(installed_programs_present: bool) -> str | No
         return None
     return (
         "Tor Browser is normally run as a portable app, with no installer and no entry "
-        "in the Windows list of installed programs — its absence from that list is "
+        "in the Windows list of installed programs; its absence from that list is "
         "expected, not a sign anything is missing."
     )
 
@@ -903,8 +903,8 @@ def describe_install_date(
         return (
             "The exact installation date could not be determined: the installer's own "
             "UserAssist entry has no recorded run time (installers often don't register "
-            "as a completed run), and Amcache — which would otherwise record an install "
-            "date — has no matching entry, typically because its periodic scan hasn't "
+            "as a completed run), and Amcache, which would otherwise record an install "
+            "date, has no matching entry, typically because its periodic scan hasn't "
             "run since."
         )
     return "The exact installation date could not be determined from the available registry data."
@@ -987,7 +987,7 @@ def describe_source_time_gap(component: dict, local_tz: str | None) -> str | Non
             (("UserAssist", ua), ("BAM", bam)) if gap > 0 else (("BAM", bam), ("UserAssist", ua))
         )
         return (
-            f"{earlier[0]} recorded this at {earlier[1]}; {later[0]} recorded it at {later[1]} — a "
+            f"{earlier[0]} recorded this at {earlier[1]}; {later[0]} recorded it at {later[1]}, a "
             f"gap of {seconds} {unit}. This is normal and refers to the same use, not two "
             "different events."
         )
@@ -1199,7 +1199,7 @@ def build_narrative(
         if focus_phrase and not installer_finding.get("run_count"):
             if installer_focus_count > 1:
                 timeline.append(
-                    f"The installer window was {focus_phrase} — this is a running "
+                    f"The installer window was {focus_phrase}; this is a running "
                     "total Windows keeps for this program, not a single-visit "
                     "duration, so it may be longer than just the most recent time "
                     "it was open."

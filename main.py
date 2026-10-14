@@ -111,7 +111,7 @@ def _run_modules(
 
     def finished(name: str, result: ModuleResult, step: int) -> None:
         by_name[name] = result
-        suffix = f" — {result.message}" if result.message else ""
+        suffix = f": {result.message}" if result.message else ""
         print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
         if progress_cb:
             progress_cb(name, step, total_steps)
@@ -161,7 +161,7 @@ def run_pipeline(
     total_steps = len(MODULES) + 1
     started_at = datetime.now(timezone.utc).isoformat()
     integrity = verify_evidence(config.evidence_dir, evidence_inputs(module_kwargs))
-    print(f"[*] evidence integrity: {integrity['status']} — {integrity['message']}")
+    print(f"[*] evidence integrity: {integrity['status']} ({integrity['message']})")
     if integrity["status"] == STATUS_FAILED:
         for item in integrity["mismatched"]:
             print(f"[!] hash mismatch: {item['path']}", file=sys.stderr)
@@ -383,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("process", "full-memory"),
         default="process",
         help="Which acquisition path produced --dump: dumper.py's live-process dump, or "
-        "winpmem_acquire.py's full physical-memory image. Provenance/labeling only — this "
+        "winpmem_acquire.py's full physical-memory image. Provenance/labeling only: this "
         "does not run either acquisition tool (both need a separate elevated Windows "
         "session); it only tells the analyzer which one already produced --dump (default: %(default)s)",
     )

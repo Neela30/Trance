@@ -86,7 +86,7 @@ def _format_timestamp(value: str | datetime | None) -> str:
     each one's own default text form, they used to show up differently (microseconds and
     a "+00:00" offset) depending on which path produced them."""
     if not value:
-        return "—"
+        return "n/a"
     dt = value
     if isinstance(dt, str):
         try:
@@ -154,7 +154,7 @@ def _wrap_path(value: str | None) -> Markup:
     zero-width, invisible "it's OK to break here" hint -- after every backslash and
     forward slash, so the browser only ever wraps at a real path separator."""
     if not value:
-        return Markup("—")
+        return Markup("n/a")
     escaped = str(escape(value))
     wrapped = re.sub(r"([\\/])", r"\1<wbr>", escaped)
     return Markup(wrapped)
@@ -164,7 +164,7 @@ def _format_cell(value: object) -> str | Markup:
     """One cell of a raw Volatility 3 table: ISO times in the report's one time format,
     paths wrapped only at separators, None as a dash."""
     if value is None or value == "":
-        return "—"
+        return "n/a"
     if isinstance(value, str):
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}T[\d:.]+([+-]\d{2}:\d{2}|Z)?", value):
             return _format_timestamp(value)
@@ -230,7 +230,7 @@ def _is_secret_field(name: object) -> bool:
 
 def _format_bytes(value: int | None) -> str:
     if value is None:
-        return "—"
+        return "n/a"
     size = float(value)
     for unit in ("bytes", "KB", "MB", "GB"):
         if size < 1024 or unit == "GB":

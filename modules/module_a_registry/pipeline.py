@@ -289,7 +289,7 @@ def _process_hive(
         raise IntegrityError(
             f"Hash mismatch for {hive_label} at {hive_path}: "
             f"ingest={pre_hash} post-parse={post_hash}. "
-            "Source evidence was modified during parsing — this must never happen "
+            "Source evidence was modified during parsing; this must never happen "
             "under strictly read-only extraction."
         )
 
@@ -347,7 +347,7 @@ def _process_profiles(
         raise IntegrityError(
             f"Hash mismatch for SOFTWARE (ProfileList) at {software_path}: "
             f"ingest={pre_hash} post-parse={post_hash}. "
-            "Source evidence was modified during parsing — this must never happen "
+            "Source evidence was modified during parsing; this must never happen "
             "under strictly read-only extraction."
         )
     return profiles
@@ -461,7 +461,7 @@ def _build_summary(
         if not provided
     ]
     if missing:
-        summary += f" (Not analyzed — hive(s) not provided: {', '.join(missing)}.)"
+        summary += f" (Not analyzed; hive(s) not provided: {', '.join(missing)}.)"
     if errors:
         summary += f" ({len(errors)} extraction error(s) encountered.)"
 

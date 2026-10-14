@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open("x", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
-    print("=== TRANCE Module B — Internet-origin files ===")
+    print("=== TRANCE Module B: Internet-origin files ===")
     print(f"walked {report['files_walked']} files in {report['scan_seconds']}s")
     print(f"files with Zone.Identifier: {len(report['internet_origin_files'])}")
     for hit in report["internet_origin_files"]:

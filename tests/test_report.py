@@ -9,9 +9,9 @@ from report import _format_timestamp, _resolve_local_tz, _wrap_path, render_repo
 
 
 class TestFormatTimestamp:
-    def test_none_and_empty_become_dash(self):
-        assert _format_timestamp(None) == "—"
-        assert _format_timestamp("") == "—"
+    def test_none_and_empty_become_n_a(self):
+        assert _format_timestamp(None) == "n/a"
+        assert _format_timestamp("") == "n/a"
 
     def test_iso_string_with_microseconds_and_offset_is_simplified(self):
         assert _format_timestamp("2026-09-03T04:41:53.211000+00:00") == "2026-09-03 04:41:53 UTC"
@@ -40,9 +40,9 @@ class TestWrapPath:
         assert "<script>" not in result
         assert "&lt;script&gt;" in result
 
-    def test_none_and_empty_become_a_dash(self):
-        assert _wrap_path(None) == "—"
-        assert _wrap_path("") == "—"
+    def test_none_and_empty_become_n_a(self):
+        assert _wrap_path(None) == "n/a"
+        assert _wrap_path("") == "n/a"
 
     def test_result_is_marked_safe_for_the_template(self):
         from markupsafe import Markup
@@ -427,7 +427,7 @@ def test_exhibit_list_is_written_beside_the_report_and_escapes_paths(tmp_path):
 
 def test_volatility_cells_are_formatted_and_offsets_not_printed():
     assert report._format_cell("2026-10-09T13:17:30+00:00") == "2026-10-09 13:17:30 UTC"
-    assert report._format_cell(None) == "—"
+    assert report._format_cell(None) == "n/a"
     assert "<wbr>" in report._format_cell("\\Users\\a\\b.txt")
     assert report._format_cell(2844) == "2844"
     assert report._is_offset_column("Offset(V)") and not report._is_offset_column("PID")

@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open("x", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
-    print("=== TRANCE Module B — Memory residue on disk ===")
+    print("=== TRANCE Module B: Memory residue on disk ===")
     if not report["files"]:
         print("no pagefile/swapfile/hiberfil/crash dumps on this volume")
     for record in report["files"]:

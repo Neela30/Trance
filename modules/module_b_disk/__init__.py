@@ -114,7 +114,7 @@ def _profile_artifacts(report: dict) -> list[Artifact]:
         )
     for item in report["cookies"].get("moz_cookies", []):
         artifacts.append(
-            Artifact(MODULE_NAME, "browser_cookie", source, f"{item['host']} — {item['name']}")
+            Artifact(MODULE_NAME, "browser_cookie", source, f"{item['host']}, {item['name']}")
         )
     for item in report["favicons"].get("non_default_pages", []):
         artifacts.append(Artifact(MODULE_NAME, "favicon_page", source, item))

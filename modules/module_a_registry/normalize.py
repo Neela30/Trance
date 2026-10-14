@@ -123,7 +123,7 @@ def _normalize_recentdocs(entry: dict) -> tuple[str, str | None]:
     name = candidate_path(ARTIFACT_TYPE_RECENTDOCS, entry) or "<unknown>"
     extension = entry.get("extension")
     ext_suffix = f", extension={extension}" if extension else ""
-    description = f"RecentDocs entry '{name}'{ext_suffix} — recently accessed file."
+    description = f"RecentDocs entry '{name}'{ext_suffix}: recently accessed file."
     return description, entry.get("last_write")
 
 
@@ -151,7 +151,7 @@ def _normalize_muicache(entry: dict) -> tuple[str, str | None]:
         details.append(repr(display_name))
     if company:
         details.append(company)
-    detail_suffix = f" — {', '.join(details)}" if details else ""
+    detail_suffix = f": {', '.join(details)}" if details else ""
     description = f"MUICache entry for '{path}'{detail_suffix}."
     return description, entry.get("last_write")
 
@@ -180,7 +180,7 @@ def _normalize_comdlg32(entry: dict) -> tuple[str, str | None]:
     path = candidate_path(ARTIFACT_TYPE_COMDLG32, entry) or "<unknown>"
     mru_type = entry.get("mru_type")
     type_suffix = f" ({mru_type})" if mru_type else ""
-    description = f"ComDlg32 entry for '{path}'{type_suffix} — used in a file Open/Save dialog."
+    description = f"ComDlg32 entry for '{path}'{type_suffix}: used in a file Open/Save dialog."
     return description, entry.get("last_write")
 
 
@@ -243,7 +243,7 @@ def _normalize_windows_version(entry: dict) -> tuple[str, str | None]:
 
 def _normalize_shellbags(entry: dict) -> tuple[str, str | None]:
     path = candidate_path(ARTIFACT_TYPE_SHELLBAGS, entry) or "<unknown>"
-    description = f"ShellBags entry for '{path}' — folder browsed in Explorer."
+    description = f"ShellBags entry for '{path}': folder browsed in Explorer."
     return description, entry.get("last_write")
 
 
@@ -267,7 +267,7 @@ def _normalize_app_switched(entry: dict) -> tuple[str, str | None]:
     path = candidate_path(ARTIFACT_TYPE_APP_SWITCHED, entry) or "<unknown>"
     count = entry.get("switch_count")
     count_suffix = f" (switch_count={count})" if count is not None else ""
-    description = f"AppSwitched entry for '{path}'{count_suffix} — switched to via Alt+Tab/taskbar."
+    description = f"AppSwitched entry for '{path}'{count_suffix}: switched to via Alt+Tab/taskbar."
     return description, entry.get("last_write")
 
 
@@ -309,8 +309,8 @@ def _normalize_usbstor(entry: dict) -> tuple[str, str | None]:
     last_connected = entry.get("last_connected") or "unknown"
     description = (
         f"USBSTOR device '{name}' (manufacturer={manufacturer}, serial={serial}, "
-        f"first_connected={first_connected}, last_connected={last_connected}) "
-        "— USB mass-storage connection history."
+        f"first_connected={first_connected}, last_connected={last_connected}): "
+        "USB mass-storage connection history."
     )
     timestamp = _first(entry, ("last_connected", "last_installed", "first_installed", "last_write"))
     return description, timestamp
@@ -360,7 +360,7 @@ def _normalize_mounted_devices(entry: dict) -> tuple[str, str | None]:
 
 def _normalize_mountpoints2(entry: dict) -> tuple[str, str | None]:
     path = entry.get("path") or "<unknown>"
-    description = f"MountPoints2 entry '{path}' — volume mounted by this user's session."
+    description = f"MountPoints2 entry '{path}': volume mounted by this user's session."
     return description, entry.get("last_write")
 
 
@@ -369,8 +369,8 @@ def _normalize_emdmgmt(entry: dict) -> tuple[str, str | None]:
     capacity = entry.get("device_capacity")
     capacity_str = capacity if capacity is not None else "unknown"
     description = (
-        f"EMDMgmt entry '{path}' (device_capacity={capacity_str}) "
-        "— ReadyBoost device-eligibility test record."
+        f"EMDMgmt entry '{path}' (device_capacity={capacity_str}): "
+        "ReadyBoost device-eligibility test record."
     )
     return description, entry.get("last_write")
 
@@ -386,8 +386,8 @@ def _normalize_portable_devices(entry: dict) -> tuple[str, str | None]:
     raw_path = entry.get("path") or "<unknown>"
     name = entry.get("friendly_name") or raw_path
     description = (
-        f"Windows Portable Devices entry '{name}' (device_id={raw_path}) "
-        "— MTP/portable device history."
+        f"Windows Portable Devices entry '{name}' (device_id={raw_path}): "
+        "MTP/portable device history."
     )
     return description, entry.get("last_write")
 
@@ -468,8 +468,8 @@ def _normalize_run_key(entry: dict) -> tuple[str, str | None]:
     name = entry.get("name") or "<unknown>"
     key_path = entry.get("key_path") or "unknown"
     description = (
-        f"RunKey entry '{path}' (value name={name!r}, key={key_path}) "
-        "— configured to start automatically."
+        f"RunKey entry '{path}' (value name={name!r}, key={key_path}): "
+        "configured to start automatically."
     )
     return description, entry.get("last_write")
 
@@ -480,8 +480,8 @@ def _normalize_service(entry: dict) -> tuple[str, str | None]:
     start = entry.get("start")
     start_suffix = f", start={start}" if start is not None else ""
     description = (
-        f"Service entry for '{path}' (service name={name!r}{start_suffix}) "
-        "— installed as a Windows service."
+        f"Service entry for '{path}' (service name={name!r}{start_suffix}): "
+        "installed as a Windows service."
     )
     return description, entry.get("last_write")
 
@@ -492,7 +492,7 @@ def _normalize_proxy_settings(entry: dict) -> tuple[str, str | None]:
     auto_config = entry.get("auto_config_url") or "none"
     description = (
         f"Internet Settings proxy configuration (enabled={enabled}, server={proxy_server}, "
-        f"auto_config_url={auto_config}) — other programs routed through this proxy."
+        f"auto_config_url={auto_config}): other programs routed through this proxy."
     )
     return description, entry.get("last_write")
 

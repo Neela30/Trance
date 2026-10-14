@@ -71,25 +71,25 @@ ARTIFACT_TYPE_ORDER = (
     "ProxySettings",
 )
 ARTIFACT_TYPE_LABELS = {
-    "UserAssist": "UserAssist — GUI-launched execution",
-    "Amcache": "Amcache — install / first-seen",
-    "BAM": "BAM — last-execution record",
+    "UserAssist": "UserAssist: GUI-launched execution",
+    "Amcache": "Amcache: install / first-seen",
+    "BAM": "BAM: last-execution record",
     "InstalledPrograms": "Installed Programs (Uninstall key)",
     "CompatAssistantStore": "Program Compatibility Assistant Store",
     "FirefoxLauncher": "Firefox Launcher",
     "ShimCache": "ShimCache / AppCompatCache",
-    "MUICache": "MUICache — shell display names",
-    "ShellBags": "ShellBags — folder-browsing history",
-    "LastVisitedPidlMRU": "LastVisitedPidlMRU — program + last-browsed folder",
-    "RecentDocs": "RecentDocs — contextual",
-    "RunMRU": "RunMRU — Run dialog history",
-    "WordWheelQuery": "WordWheelQuery — Explorer search history",
-    "ComDlg32": "ComDlg32 — Open/Save dialog history",
-    "AppSwitched": "AppSwitched — Alt+Tab/taskbar switches",
-    "TypedPaths": "TypedPaths — Explorer address bar history",
-    "RunKey": "Run / RunOnce — automatic start configuration",
-    "Service": "Windows Service — automatic start configuration",
-    "ProxySettings": "Internet Settings — proxy configuration",
+    "MUICache": "MUICache: shell display names",
+    "ShellBags": "ShellBags: folder-browsing history",
+    "LastVisitedPidlMRU": "LastVisitedPidlMRU: program + last-browsed folder",
+    "RecentDocs": "RecentDocs: contextual",
+    "RunMRU": "RunMRU: Run dialog history",
+    "WordWheelQuery": "WordWheelQuery: Explorer search history",
+    "ComDlg32": "ComDlg32: Open/Save dialog history",
+    "AppSwitched": "AppSwitched: Alt+Tab/taskbar switches",
+    "TypedPaths": "TypedPaths: Explorer address bar history",
+    "RunKey": "Run / RunOnce: automatic start configuration",
+    "Service": "Windows Service: automatic start configuration",
+    "ProxySettings": "Internet Settings: proxy configuration",
 }
 # Confidence used to be independently restated here as a static per-type map, duplicating
 # normalize.py's own prose-embedded "Confidence: ..." sentence. As of Phase 0 of the
@@ -480,20 +480,20 @@ def _quiet_hive_notes(hives_provided: dict, annotated_by_type: dict[str, list[di
         notes.append(
             "Amcache.hve was supplied but contained no Tor-related entries. Amcache is "
             "populated by Windows' periodic Compatibility Appraiser scan, not at install "
-            "or run time — this usually means that scan hasn't run since the activity "
+            "or run time, so this usually means that scan hasn't run since the activity "
             "above, not that Tor wasn't used."
         )
     if hives_provided.get("system") and not annotated_by_type.get("ShimCache"):
         notes.append(
             "SYSTEM was supplied but contained no Tor-related ShimCache entries. "
             "ShimCache is a bounded, insertion-order cache that reboots or other "
-            "activity can evict entries from — its absence doesn't rule out execution."
+            "activity can evict entries from, so its absence doesn't rule out execution."
         )
     if hives_provided.get("system") and not annotated_by_type.get("BAM"):
         notes.append(
             "SYSTEM was supplied but contained no Tor-related BAM entries. BAM "
-            "(Background Activity Moderator) only exists from Windows 10 1709 onward "
-            "— its absence doesn't rule out execution on an older or unaffected system."
+            "(Background Activity Moderator) only exists from Windows 10 1709 onward, "
+            "so its absence doesn't rule out execution on an older or unaffected system."
         )
     portable_note = describe_portable_install_note(bool(annotated_by_type.get("InstalledPrograms")))
     if hives_provided.get("software") and portable_note:
@@ -513,7 +513,7 @@ def _build_extraction_warnings(warnings: list[dict]) -> list[str]:
     for warning in warnings:
         artifact_type = warning.get("artifact_type", "")
         label = ARTIFACT_TYPE_LABELS.get(artifact_type, artifact_type)
-        friendly = label.split(" — ")[0]
+        friendly = label.split(": ")[0]
         sentences.append(
             f"{friendly} could not be read due to a parser error; other registry "
             "evidence in this report is unaffected."
@@ -670,7 +670,7 @@ def _annotate_harddiskvolume_notes(
             letter = drive_inferences.get(path)
             if letter:
                 finding["harddiskvolume_note"] = (
-                    f"Windows recorded this as volume HarddiskVolume{volume_number} — its "
+                    f"Windows recorded this as volume HarddiskVolume{volume_number}, its "
                     f"internal name for a storage volume. It very likely corresponds to "
                     f"{letter}: because the same file also appears as {letter}:\\... in "
                     "another record (an inference, not a value read directly from the "
@@ -678,7 +678,7 @@ def _annotate_harddiskvolume_notes(
                 )
             else:
                 finding["harddiskvolume_note"] = (
-                    f"Windows recorded this as volume HarddiskVolume{volume_number} — its "
+                    f"Windows recorded this as volume HarddiskVolume{volume_number}, its "
                     "internal name for a storage volume. The matching drive letter could "
                     "not be determined from the available registry data."
                 )

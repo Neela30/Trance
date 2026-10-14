@@ -73,7 +73,8 @@ Requirements are split on purpose:
 - `requirements-dev.txt` — pytest, pytest-cov, mypy, ruff, black.
 - `requirements-gui.txt` — `PySide6` only. Kept separate so the CLI exes stay lean.
 
-Style: black + ruff, line length 100, target py310 (`pyproject.toml`). Several ruff rules are
+Style: black + ruff, line length 100, target py310 (`pyproject.toml`). No em dash ("—", `&mdash;`) in any text the
+user sees (report, GUI, console): use a comma, colon or semicolon; empty table cells print "n/a". Several ruff rules are
 intentionally ignored with written justification in `pyproject.toml` — read it before
 "fixing" them.
 
