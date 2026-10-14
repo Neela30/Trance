@@ -159,7 +159,7 @@ Report structure (2026-10-13): a "How to read this report" note; narrative secti
 memory, dirty checkout, plus `METHOD_LIMITS`); Tool validation (the §10 numbers, hardcoded
 in the template -- update them when the evaluation is re-run); and a blank examiner
 declaration/signature block as the last page. The stamp reads "Forensic examination report /
-Not valid unless signed". **Tor-only printing** (2026-10-13): the report prints only
+Becomes final when the examiner signs it". **Tor-only printing** (2026-10-13): the report prints only
 Tor-related data; findings.json keeps everything. Volatility tables show only firefox.exe/
 tor.exe PIDs (psscan/netscan/cmdline) and distinct files in `TorBrowser\Data` (filescan),
 hivelist is not printed (`module_c_memory/report._tor_rows`); empty memory sections collapse
@@ -167,8 +167,7 @@ to one line; NTFS journal events are grouped per file (`module_b_disk/report._gr
 verified evidence folders are one row (`report._evidence_rows`); the glossary lists only
 terms the report uses; no "Filtered as noise" or device/profile appendices; Module A drops
 the network/interface tables and the technical lines that repeat "What happened". Per-module summaries
-(Module A's key finding, B/C summary tiles) are folded into one "Summary of findings" after
-Recommendations. nc-01:
+(Module A's key finding, B/C summary tiles) are folded into one "Summary of findings" (now at the start). nc-01:
 40 -> 16 pages, c3: 35 -> 20, c4: 38 -> 23.
 **Evidence-quality round** (2026-10-14, from the course's legal/forensics material): acquisition
 captures memory first and records `acquisition_order` and the target clock (`clock_status()`,
@@ -186,6 +185,17 @@ Report tab's "Exhibit list" button shows it, and "Save as PDF…" saves `<case>_
 (`case_info["s6_certificate"]`) adds a DRAFT certificate under ESPA s.6 after the declaration,
 pre-filled with examiner, case, exhibit range, TRANCE version and hash results -- its wording has
 NOT been checked by a lawyer; the page says so.
+**Readability round** (2026-10-14): the report opens with the answer. Order: masthead, "Summary of
+findings" (key finding as the lead, one row per module with its status in plain words -- this
+replaced the Module status tiles), How to read, What happened / How reliable / What we could not
+determine, then per-layer detail ("What Windows recorded", "What was on the disk", "What was in
+memory"), Recommendations, and an "About this examination" appendix (Evidence examined -- hash
+under the file name --, provenance, Methodology, Limitations, Tool validation, Glossary) before
+the declaration. Labels and table headers are sans, sentence case; body font no longer lists
+Roboto (on one Linux box it resolved to Roboto Black and printed every paragraph bold).
+Volatility tables and the long journal lists are collapsed on screen (printed open, their
+"Show" labels hidden in print), offset columns are not printed (`report._is_offset_column`), and
+cells go through `report._format_cell`.
 
 ---
 

@@ -160,6 +160,24 @@ def _wrap_path(value: str | None) -> Markup:
     return Markup(wrapped)
 
 
+def _format_cell(value: object) -> str | Markup:
+    """One cell of a raw Volatility 3 table: ISO times in the report's one time format,
+    paths wrapped only at separators, None as a dash."""
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, str):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T[\d:.]+([+-]\d{2}:\d{2}|Z)?", value):
+            return _format_timestamp(value)
+        if "\\" in value or "/" in value:
+            return _wrap_path(value)
+    return str(value)
+
+
+def _is_offset_column(name: object) -> bool:
+    # Where a structure sits in the memory image: kept in findings.json, not printed.
+    return "offset" in str(name).lower()
+
+
 def _resolve_local_tz(local_tz: str | None) -> str | None:
     """None means "auto-detect" -- resolved once here (not in core.config.TranceConfig)
     so a config built once and reused doesn't freeze in a stale "current machine" guess.
@@ -409,6 +427,8 @@ def render_report(
     env.filters["css_string"] = _css_string
     env.filters["mask"] = _mask
     env.tests["secret_field"] = _is_secret_field
+    env.filters["fmt_cell"] = _format_cell
+    env.tests["is_offset"] = _is_offset_column
     template = env.get_template(TEMPLATE_NAME)
 
     resolved_tz = _resolve_local_tz(local_tz)

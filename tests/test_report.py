@@ -110,7 +110,7 @@ def test_render_report_includes_glossary_for_a_module_a_case(tmp_path):
     assert "NTUSER.DAT" in html
 
 
-def test_key_finding_is_only_in_the_closing_summary(tmp_path):
+def test_key_finding_is_only_in_the_opening_summary(tmp_path):
     config = TranceConfig(case_name="case", output_dir=tmp_path)
     findings = build_findings(config, [_module_a_result_with_one_launch()])
 
@@ -118,9 +118,7 @@ def test_key_finding_is_only_in_the_closing_summary(tmp_path):
 
     key = "The evidence shows Tor Browser was installed"
     assert html.count(key) == 1
-    assert (
-        html.index("Summary of findings") < html.index(key) < html.index("Examiner's declaration")
-    )
+    assert html.index("Summary of findings") < html.index(key) < html.index("What happened")
 
 
 def test_render_report_narrative_uses_the_given_timezone(tmp_path):
@@ -425,3 +423,11 @@ def test_exhibit_list_is_written_beside_the_report_and_escapes_paths(tmp_path):
     assert "X-01" in page and "a" * 64 in page and "R/1" in page and "f" * 64 in page
     assert "/e/&lt;b&gt;SYSTEM" in page
     assert report.render_exhibit_list({"case": {"name": "c1"}}) is None
+
+
+def test_volatility_cells_are_formatted_and_offsets_not_printed():
+    assert report._format_cell("2026-10-09T13:17:30+00:00") == "2026-10-09 13:17:30 UTC"
+    assert report._format_cell(None) == "—"
+    assert "<wbr>" in report._format_cell("\\Users\\a\\b.txt")
+    assert report._format_cell(2844) == "2844"
+    assert report._is_offset_column("Offset(V)") and not report._is_offset_column("PID")

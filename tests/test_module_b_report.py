@@ -210,7 +210,7 @@ def test_report_renders_module_b_section(tmp_path):
     config = TranceConfig("case", tmp_path)
     result = ModuleResult(module="module_b_disk", status="ok", artifacts=[], details=_details())
     html = render_report(build_findings(config, [result]))
-    assert "Disk — Tor Browser profile, Tor daemon &amp; downloaded files" in html
+    assert "What was on the disk" in html
     assert "Internet-origin files" in html
     assert "Users/u/Downloads/a.txt" in html
     assert "Tor Browser deliberately omits" in html
@@ -383,7 +383,7 @@ def test_report_renders_residue_and_ntfs_sections(tmp_path):
     html = render_report(build_findings(config, [result]))
     assert "Memory residue on disk" in html
     assert "hiberfil.sys" in html and "compressed — lower bound" in html
-    assert "NTFS metadata" in html
+    assert "File system records" in html
     assert "Deleted internet-origin files" in html
     assert "gone.txt" in html and "live.txt" not in html
     assert "examiner's own transfer files" in html
