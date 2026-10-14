@@ -356,6 +356,8 @@ def test_evidence_rows_fold_verified_folders_but_list_failures():
         ("/e/m.raw", "verified"),
     ]
     assert rows[0]["size_bytes"] == 20 and "2 files" in rows[0]["note"]
+    assert [r["exhibit"] for r in rows] == ["E-01", "E-02", "E-03"]
+    assert report._evidence_rows(rows[:1], "X")[0]["exhibit"] == "X-01"
 
 
 def test_glossary_lists_only_terms_the_report_uses(tmp_path):

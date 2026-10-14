@@ -169,9 +169,15 @@ terms the report uses; no "Filtered as noise" or device/profile appendices; Modu
 the network/interface tables and the technical lines that repeat "What happened". Per-module summaries
 (Module A's key finding, B/C summary tiles) are folded into one "Summary of findings" after
 Recommendations. nc-01:
-40 -> 16 pages, c3: 35 -> 20, c4: 38 -> 23. Remaining plan: case metadata (examiner/case no./exhibits, to
-pre-fill the declaration), reproducibility test, and a Sri Lanka Evidence (Special
-Provisions) Act certificate template (needs legal check of wording).
+40 -> 16 pages, c3: 35 -> 20, c4: 38 -> 23.
+**Evidence-quality round** (2026-10-14, from the course's legal/forensics material): acquisition
+captures memory first and records `acquisition_order` and the target clock (`clock_status()`,
+w32tm); Module B's `clock_consistent` checks tor's last state write against the signed consensus
+window; `tests/test_reproducibility.py` runs the pipeline twice; cookie values and password-like
+fields print shortened (`report._mask`); case details (`core.config.CASE_INFO_FIELDS`: CLI
+`--examiner/--organisation/--reference/--requested-by/--purpose/--exhibit-prefix`, GUI "Case" tab)
+go to `findings.json["case"]["info"]`, page 1 and the declaration; evidence rows carry exhibit
+numbers (`<prefix>-01`).
 
 ---
 

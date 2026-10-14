@@ -2,6 +2,7 @@
 
   EvidenceSummary  the "Evidence found" checklist -- what this run will analyse
   OptionsPanel     one "More options" toggle over a tabbed card:
+                     Case    examiner, case number, purpose, exhibit prefix (report)
                      Target  host / username (the onion lives on the main card)
                      Inputs  each auto-discovered input, overridable (main.py's
                              --system/--ntuser/--amcache/--dump/--disk-profile/
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.config import CASE_INFO_FIELDS
 from core.safety import default_limits, limits_supported
 from gui.analysis_request import INPUT_SPECS, SummaryRow, display_path
 from gui.theme import COLORS, apply_eyebrow_style
@@ -251,6 +253,39 @@ class _Page(QWidget):
 
     def finish(self) -> None:
         self.body.addStretch(1)
+
+
+CASE_PLACEHOLDERS = {
+    "examiner": "e.g. A. Perera",
+    "organisation": "e.g. CID Cyber Crimes Unit",
+    "reference": "e.g. CCD/2026/0142",
+    "requested_by": "e.g. OIC, Colombo Fort Police",
+    "purpose": "e.g. Establish whether Tor Browser was used on exhibit E-01 and which sites",
+    "exhibit_prefix": "e.g. E (exhibits become E-01, E-02, …)",
+}
+
+
+class CasePage(_Page):
+    """Who examined what, and why -- printed on the report's first page and declaration."""
+
+    def __init__(self, parent=None):
+        super().__init__(
+            "Printed on the report's first page and in the examiner's declaration. "
+            "All optional.",
+            parent,
+        )
+        self.fields: dict[str, QLineEdit] = {}
+        for key, label, _flag in CASE_INFO_FIELDS:
+            line = QLineEdit(self)
+            line.setPlaceholderText(CASE_PLACEHOLDERS.get(key, ""))
+            self.fields[key] = line
+            self.body.addLayout(labelled(field_label(label, self), line, None, self))
+        self.finish()
+
+    def values(self) -> dict[str, str]:
+        return {
+            key: line.text().strip() for key, line in self.fields.items() if line.text().strip()
+        }
 
 
 class TargetPage(_Page):
@@ -596,7 +631,7 @@ class LimitsPage(_Page):
 
 
 class OptionsPanel(QWidget):
-    """'More options' toggle + a tabbed card with the four pages."""
+    """'More options' toggle + a tabbed card of option pages."""
 
     changed = Signal()
 
@@ -610,6 +645,7 @@ class OptionsPanel(QWidget):
         self._toggle.clicked.connect(lambda: self.set_expanded(not self._card.isVisible()))
         layout.addWidget(self._toggle, alignment=Qt.AlignmentFlag.AlignLeft)
 
+        self.case = CasePage(self)
         self.target = TargetPage(self)
         self.inputs = InputsPage(self)
         self.disk = DiskPage(mount_supported, mount_reason, self)
@@ -621,6 +657,7 @@ class OptionsPanel(QWidget):
         # The tab pane is the card itself (styled in theme.qss) -- no frame inside a frame.
         self._card = QTabWidget(self)
         self._card.setObjectName("optionsTabs")
+        self._card.addTab(self.case, "Case")
         self._card.addTab(self.target, "Target")
         self._card.addTab(self.inputs, "Inputs")
         self._card.addTab(self.disk, "Disk image")

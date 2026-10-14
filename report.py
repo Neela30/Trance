@@ -19,6 +19,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup, escape
 
+from core.config import CASE_INFO_FIELDS
 from modules.module_a_registry.report import build_context as registry_context
 from modules.module_b_disk.report import build_context as disk_context
 from modules.module_c_memory.report import build_context as memory_context
@@ -259,10 +260,11 @@ def _glossary_needle(term: str) -> str:
     return term.removesuffix("N") if term.endswith("VolumeN") else term
 
 
-def _evidence_rows(items: list[dict]) -> list[dict]:
+def _evidence_rows(items: list[dict], prefix: str = "E") -> list[dict]:
     """The "Evidence examined" table: a folder whose files all verified becomes one row
     (its per-file hashes stay in findings.json); a file that did not verify is always
-    listed on its own."""
+    listed on its own. Each row gets an exhibit number (<prefix>-01, -02, ...) in
+    table order, which the rest of the report cites."""
     by_label: dict[str, list[dict]] = {}
     for item in items:
         by_label.setdefault(item["label"], []).append(item)
@@ -284,7 +286,9 @@ def _evidence_rows(items: list[dict]) -> list[dict]:
                 }
             )
             group = [i for i in group if i["status"] != "verified"]
-        rows.extend(group)
+        rows.extend(dict(i) for i in group)
+    for n, row in enumerate(rows, start=1):
+        row["exhibit"] = f"{prefix}-{n:02d}"
     return rows
 
 
@@ -347,6 +351,7 @@ def render_report(
         glossary.update(context.get("glossary", {}))
 
     provenance = findings.get("provenance")
+    case_info = findings.get("case", {}).get("info") or {}
 
     def render(terms: list[tuple[str, str]]) -> str:
         return template.render(
@@ -357,7 +362,13 @@ def render_report(
             generic_modules=generic,
             glossary=terms,
             provenance=provenance,
-            evidence_rows=_evidence_rows(provenance["evidence_items"]) if provenance else [],
+            evidence_rows=(
+                _evidence_rows(provenance["evidence_items"], case_info.get("exhibit_prefix") or "E")
+                if provenance
+                else []
+            ),
+            case_info=case_info,
+            case_info_labels={key: label for key, label, _flag in CASE_INFO_FIELDS},
             limitations=_limitations(findings),
             findings_sha256=findings_sha256,
         )

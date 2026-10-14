@@ -53,6 +53,7 @@ class AnalysisRequest:
     username: str = ""
     cookie_names: str = ""  # comma-separated; blank = the analyzer's defaults
     report_timezone: str = ""  # IANA zone name; blank = auto-detect this machine's own
+    case_info: dict[str, str] = field(default_factory=dict)  # core.config.CASE_INFO_FIELDS
     disk_image: str | None = None
     mount_image: bool = False  # mount disk_image read-only and analyse the volume
     carve_image: bool = False  # raw byte carve of disk_image

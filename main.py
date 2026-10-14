@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
-from core.config import TranceConfig
+from core.config import CASE_INFO_FIELDS, TranceConfig
 from core.custody_log import CustodyEntry, CustodyLog
 from core.evidence_integrity import STATUS_FAILED, evidence_inputs, verify_evidence
 from core.hashing import hash_file
@@ -128,6 +128,14 @@ def _run_modules(
             for step, future in enumerate(as_completed(futures), start=1):
                 finished(futures[future], future.result(), step)
     return [by_name[name] for name in MODULES]
+
+
+def case_info_from_args(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        key: value.strip()
+        for key, _label, _flag in CASE_INFO_FIELDS
+        if (value := getattr(args, f"case_{key}", None)) and value.strip()
+    }
 
 
 def run_pipeline(
@@ -285,6 +293,10 @@ def main(argv: list[str] | None = None) -> int:
         "local times in, alongside UTC. Omit to auto-detect this machine's own timezone",
     )
 
+    case = parser.add_argument_group("case details (printed on the report)")
+    for key, label, flag in CASE_INFO_FIELDS:
+        case.add_argument(flag, dest=f"case_{key}", help=label)
+
     registry = parser.add_argument_group("module_a_registry")
     registry.add_argument(
         "--ntuser", type=Path, help="Acquired NTUSER.DAT hive (feeds UserAssist and RecentDocs)"
@@ -419,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         evidence_dir=args.evidence_dir,
         verbose=args.verbose,
         report_timezone=args.report_timezone,
+        case_info=case_info_from_args(args),
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

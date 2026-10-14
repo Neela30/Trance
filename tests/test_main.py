@@ -117,3 +117,28 @@ def test_cli_warns_that_a_full_memory_image_without_target_gives_observations_on
 def test_no_target_warning_for_a_process_dump_is_about_urls_only():
     assert "targeted URLs will be empty" in main.no_target_warning("process")
     assert "observations only" not in main.no_target_warning("process")
+
+
+def test_case_details_reach_findings_and_the_report(tmp_path):
+    argv = ["--case", "c1", "--output-dir", str(tmp_path)]
+    argv += [
+        "--examiner",
+        "A. Perera",
+        "--reference",
+        "CCD/2026/0142",
+        "--purpose",
+        "Was Tor used?",
+    ]
+    assert main.main(argv) == 0
+
+    findings = json.loads((tmp_path / "c1" / "findings.json").read_text())
+    assert findings["case"]["info"] == {
+        "examiner": "A. Perera",
+        "reference": "CCD/2026/0142",
+        "purpose": "Was Tor used?",
+    }
+    html = (tmp_path / "c1" / "report.html").read_text()
+    assert "Was Tor used?" in html
+    declaration = html[html.index("Examiner's declaration") :]
+    assert "<dt>Name</dt><dd>A. Perera</dd>" in declaration
+    assert "<dt>Case reference</dt><dd>CCD/2026/0142</dd>" in declaration

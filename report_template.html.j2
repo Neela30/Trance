@@ -172,6 +172,9 @@
       <div class="stamp">Forensic examination report<br>Not valid unless signed</div>
     </div>
     <dl class="meta-grid">
+      {% for key in ["reference", "examiner", "organisation", "requested_by"] if case_info[key] %}
+      <dt>{{ case_info_labels[key] }}</dt><dd>{{ case_info[key] }}</dd>
+      {% endfor %}
       <dt>Generated</dt><dd>{{ findings.generated_at }}</dd>
       <dt>Modules</dt><dd>{{ ok_count }} of {{ modules|length }} ran cleanly</dd>
       <dt>Artifacts</dt><dd>{{ findings.artifacts|length }} across all modules</dd>
@@ -179,6 +182,9 @@
       {% if findings.case.evidence_dir %}<dt>Evidence dir</dt><dd>{{ findings.case.evidence_dir|wrap_path }}</dd>{% endif %}
       {% if provenance %}<dt>Tool</dt><dd>TRANCE {{ provenance.tool.version }}{% if provenance.tool.git_commit %} · commit <span class="mono">{{ provenance.tool.git_commit[:12] }}</span>{% if provenance.tool.git_dirty %} (modified){% endif %}{% endif %}</dd>{% endif %}
     </dl>
+    {% if case_info.purpose %}
+    <p style="margin-top:14px;"><strong>Purpose and scope.</strong> {{ case_info.purpose }}</p>
+    {% endif %}
   </div>
 
   {% set integrity = findings.evidence_integrity %}
@@ -243,10 +249,11 @@
     {% if items %}
     <div class="table-scroll">
       <table class="evidence-table">
-        <thead><tr><th>Item</th><th>File</th><th>Size</th><th>SHA-256 (now)</th><th>Check</th></tr></thead>
+        <thead><tr><th>Exhibit</th><th>Item</th><th>File</th><th>Size</th><th>SHA-256 (now)</th><th>Check</th></tr></thead>
         <tbody>
           {% for it in evidence_rows %}
           <tr>
+            <td class="mono" style="white-space:nowrap;">{{ it.exhibit }}</td>
             <td>{{ it.label }}</td>
             <td class="mono" style="font-size:12px;">{{ it.path|relative_to(findings.case.evidence_dir)|wrap_path }}{% if it.note %}<div class="note" style="font-size:11.5px;">{{ it.note }}</div>{% endif %}</td>
             <td class="mono" style="font-size:12px; white-space:nowrap;">{{ it.size_bytes|fmt_bytes }}</td>
@@ -1438,9 +1445,9 @@
     </div>
     <p class="note">I confirm that I examined the evidence listed in "Evidence examined" using the tool and method described in this report; that the evidence verified as stated there; that the facts in this report are, to the best of my knowledge, true and complete; and that the sections marked as interpretation are opinions I have reviewed and accept, within the limitations stated.</p>
     <dl class="sign-grid">
-      <dt>Name</dt><dd></dd>
-      <dt>Position / organisation</dt><dd></dd>
-      <dt>Case reference</dt><dd></dd>
+      <dt>Name</dt><dd>{{ case_info.examiner or "" }}</dd>
+      <dt>Position / organisation</dt><dd>{{ case_info.organisation or "" }}</dd>
+      <dt>Case reference</dt><dd>{{ case_info.reference or "" }}</dd>
       <dt>Signature</dt><dd></dd>
       <dt>Date</dt><dd></dd>
     </dl>

@@ -23,6 +23,7 @@ import sys
 from pathlib import Path, PureWindowsPath
 
 import main as main_module
+from core.config import CASE_INFO_FIELDS
 
 # main.py's --source-type default; used when a manifest doesn't say otherwise.
 _DEFAULT_SOURCE_TYPE = "process"
@@ -325,6 +326,9 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
         argv.append("--verbose")
     if args.report_timezone:
         argv += ["--report-timezone", args.report_timezone]
+    for key, _label, flag in CASE_INFO_FIELDS:
+        if value := getattr(args, f"case_{key}", None):
+            argv += [flag, value]
 
     overrides = {
         "ntuser": args.ntuser,
@@ -396,6 +400,9 @@ def main(argv: list[str] | None = None) -> int:
         help="IANA zone name (e.g. Asia/Colombo) for the report's local-time display; "
         "passed through to main.py. Omit to auto-detect this machine's own timezone",
     )
+
+    for key, label, flag in CASE_INFO_FIELDS:
+        parser.add_argument(flag, dest=f"case_{key}", help=f"{label} (printed on the report)")
 
     parser.add_argument("--ntuser", type=Path, help="Override auto-discovery")
     parser.add_argument("--system", type=Path, help="Override auto-discovery")
