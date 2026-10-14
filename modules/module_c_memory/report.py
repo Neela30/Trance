@@ -422,6 +422,22 @@ def _vol3_context(details: dict) -> dict:
     }
 
 
+def _basis(details: dict) -> dict[str, list[dict]]:
+    """What each memory statement rests on (Evidence Ordinance s.51)."""
+    dump = details["dump"]["path"]
+    targeting = details.get("targeting", {})
+    target = " / ".join(t for t in (targeting.get("onion"), targeting.get("host")) if t)
+    return {
+        "strings": [
+            {
+                "what": f"string search tied to {target}" if target else "string search, no target",
+                "source": dump,
+            }
+        ],
+        "processes": [{"what": "Volatility windows.psscan", "source": dump}],
+    }
+
+
 def build_context(details: dict, local_tz: str | None = None) -> dict:
     """Presentation context for the memory section of the case report.
 
@@ -448,4 +464,5 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
         "any_far_from_start": any(e["far_from_start"] for e in events),
         "cluster_gap_bytes": CLUSTER_GAP_BYTES,
         "volatility3": _vol3_context(details),
+        "basis": _basis(details),
     }

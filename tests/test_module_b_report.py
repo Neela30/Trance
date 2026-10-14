@@ -425,3 +425,15 @@ def test_clock_check_against_the_signed_consensus_window():
     assert _clock_consistent({"last_written_utc": "2026-09-21 08:32:51"}, window) is False
     assert _clock_consistent({}, window) is None
     assert build_context(_details())["daemon"]["clock_consistent"] is True
+
+
+def test_daemon_basis_names_only_the_files_that_were_read():
+    details = _details()
+    basis = build_context(details)["daemon"]["basis"]
+    assert [b["what"].split(":")[0] for b in basis] == [
+        "lock",
+        "state",
+        "cached-microdesc-consensus",
+    ]
+    details["tor_daemon"]["daemon_start_utc"] = None
+    assert all(not b["what"].startswith("lock") for b in build_context(details)["daemon"]["basis"])

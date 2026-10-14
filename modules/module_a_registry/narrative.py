@@ -1076,6 +1076,75 @@ def _empty_result(lines: list[str]) -> dict:
         "not_determined": [],
         "technical": {"account": "", "strength": "", "install_date_detail": ""},
         "device_story": [],
+        "basis": {"key_finding": [], "timeline": [], "reliability": []},
+    }
+
+
+def _cite(what: str, findings: list[dict]) -> list[dict]:
+    """One "Based on" entry per distinct source file of `findings` (Evidence Ordinance
+    s.51: the grounds of an opinion are relevant). The root report turns each source into
+    its exhibit number."""
+    sources = sorted({f.get("source") for f in findings if f.get("source")})
+    return [{"what": what, "source": source} for source in sources] or [
+        {"what": what, "source": None}
+    ]
+
+
+def _basis(
+    annotated_by_type: dict[str, list[dict]],
+    component_timeline: list[dict],
+    launch_findings: list[dict],
+    installer_finding: dict | None,
+    install_timestamp: str | None,
+    account_basis: str,
+) -> dict[str, list[dict]]:
+    """Which registry findings each plain-English section was built from -- the same
+    findings build_narrative() used, so the citation and the sentence cannot drift."""
+    key: list[dict] = []
+    if launch_findings:
+        key += _cite("UserAssist: times opened and last opened", launch_findings)
+    else:
+        seen = sorted({t for c in component_timeline for t in c.get("seen_in", [])})
+        for artifact_type in seen:
+            key += _cite(
+                f"{artifact_type}: Tor Browser present", annotated_by_type.get(artifact_type, [])
+            )
+    if account_basis == "bam_profile":
+        key += _cite("BAM: the account's SID", annotated_by_type.get("BAM", []))
+        key.append(
+            {"what": "profile list: the SID's account name", "source": None, "hive": "SOFTWARE"}
+        )
+    elif account_basis == "path_guess":
+        key.append({"what": "account name taken from the file paths above", "source": None})
+
+    timeline = list(key)
+    if installer_finding is not None:
+        timeline += _cite("UserAssist: the installer", [installer_finding])
+    if install_timestamp:
+        timeline += _cite(
+            "Amcache: first seen (install date)", annotated_by_type.get("Amcache", [])
+        )
+    if annotated_by_type.get("ShellBags"):
+        timeline += _cite("ShellBags: folders opened in Explorer", annotated_by_type["ShellBags"])
+    if annotated_by_type.get("BAM"):
+        timeline += _cite("BAM: last recorded running", annotated_by_type["BAM"])
+
+    reliability: list[dict] = []
+    execution = sorted(
+        {t for c in component_timeline for t in c.get("execution_sources", c.get("seen_in", []))}
+    )
+    for artifact_type in execution:
+        reliability += _cite(
+            f"{artifact_type}: execution", annotated_by_type.get(artifact_type, [])
+        )
+
+    def unique(items: list[dict]) -> list[dict]:
+        return list({(i["what"], i["source"]): i for i in items}.values())
+
+    return {
+        "key_finding": unique(key),
+        "timeline": unique(timeline),
+        "reliability": unique(reliability),
     }
 
 
@@ -1325,8 +1394,17 @@ def build_narrative(
         ),
     }
 
+    _username, account_basis = _resolve_username(all_paths, bam_sid, profiles)
     return {
         "empty": [],
+        "basis": _basis(
+            annotated_by_type,
+            component_timeline,
+            launch_candidates,
+            installer_finding,
+            install_timestamp,
+            account_basis,
+        ),
         "key_finding": build_key_finding(
             has_findings=True,
             account_phrase=describe_user_account_plain(all_paths, bam_sid, profiles),

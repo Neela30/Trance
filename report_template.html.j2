@@ -159,6 +159,7 @@
 </head>
 <body>
 <div class="page">
+{% macro based_on(items) %}{% if items %}<p class="note basis"><strong>Based on:</strong> {{ cite(items)|join(" · ") }}</p>{% endif %}{% endmacro %}
 
   {% set modules = findings.modules %}
   {% set ok_count = modules.values()|selectattr("status", "equalto", "ok")|list|length %}
@@ -428,6 +429,7 @@
       <li>{{ point }}</li>
       {% endfor %}
     </ol>
+    {{ based_on(registry.narrative.basis.timeline) }}
     {% endif %}
   </section>
 
@@ -437,6 +439,7 @@
     {% for line in registry.narrative.reliability %}
     <p class="note">{{ line }}</p>
     {% endfor %}
+    {{ based_on(registry.narrative.basis.reliability) }}
   </section>
 
   {% if registry.narrative.not_determined %}
@@ -615,6 +618,7 @@
       <dt>Consensus</dt><dd>valid {{ disk.daemon.consensus.valid_after }} → {{ disk.daemon.consensus.valid_until }} <span style="color:var(--ink-muted)">(authority-signed; independent of the guest clock)</span></dd>
       {% endif %}
     </dl>
+    {{ based_on(disk.daemon.basis) }}
     <div class="section-head"><h3 style="font-size:15px; font-weight:600;">Entry guards that carried traffic</h3><span class="count">{{ disk.daemon.guards_used|length }} of {{ disk.daemon.guards_sampled }} sampled</span></div>
     {% if disk.daemon.guards_used %}
     <div class="table-scroll">
@@ -1176,6 +1180,7 @@
     </div>
     {% if pa.groups %}
     <p class="note">{{ pa.process_count }} Tor Browser process{{ "es" if pa.process_count != 1 }} (firefox.exe / tor.exe) ran from {{ pa.first_start|fmt_ts }}{% if pa.still_running %}, and some were still running when the image was taken{% else %} to {{ pa.last_exit|fmt_ts }}{% endif %}, in {{ pa.groups|length }} group{{ "s" if pa.groups|length != 1 }} by parent process. A group is the set of processes one parent started: Tor Browser starts several per run and their parents have often exited, so a group is not necessarily one launch.</p>
+    {{ based_on(memory.basis.processes) }}
     <div class="table-scroll">
       <table class="evidence-table">
         <thead><tr><th>Parent PID</th><th>Processes</th><th>First started</th><th>Last exited</th></tr></thead>
@@ -1373,6 +1378,7 @@
     {% if registry %}
     <h3 style="font-size:15px; font-weight:600; margin-top:14px;">Registry</h3>
     <p>{{ registry.narrative.key_finding }}</p>
+    {{ based_on(registry.narrative.basis.key_finding) }}
     {% endif %}
     {% if disk %}
     <h3 style="font-size:15px; font-weight:600; margin-top:14px;">Disk</h3>
@@ -1400,6 +1406,7 @@
       <li>{% if disk.profile.inert %}The browser profile holds no history, cookies or bookmarks beyond the shipped defaults, as expected with permanent private browsing.{% else %}The browser profile holds {{ disk.profile.history|length }} visited page{{ "s" if disk.profile.history|length != 1 }}, {{ disk.profile.cookies|length }} cookie{{ "s" if disk.profile.cookies|length != 1 }} and {{ disk.profile.bookmarks|length }} user bookmark{{ "s" if disk.profile.bookmarks|length != 1 }}; unusual for Tor Browser.{% endif %}</li>
       {% endif %}
     </ul>
+    {% if disk.daemon %}{{ based_on(disk.daemon.basis) }}{% endif %}
     {% endif %}
     {% if memory %}
     {% set d = memory.details %}
@@ -1422,6 +1429,7 @@
       <li>Nothing recovered for: {% for _, label, n in mem_empty %}{{ label }}{{ ", " if not loop.last }}{% endfor %}.</li>
       {% endif %}
     </ul>
+    {{ based_on(memory.basis.strings + (memory.basis.processes if memory.volatility3.process_activity and memory.volatility3.process_activity.groups else [])) }}
     {% endif %}
   </section>
 

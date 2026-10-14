@@ -177,7 +177,9 @@ window; `tests/test_reproducibility.py` runs the pipeline twice; cookie values a
 fields print shortened (`report._mask`); case details (`core.config.CASE_INFO_FIELDS`: CLI
 `--examiner/--organisation/--reference/--requested-by/--purpose/--exhibit-prefix`, GUI "Case" tab)
 go to `findings.json["case"]["info"]`, page 1 and the declaration; evidence rows carry exhibit
-numbers (`<prefix>-01`).
+numbers (`<prefix>-01`). Each interpretation prints a "Based on:" line (Evidence Ordinance s.51):
+Module A `narrative["basis"]` (same findings the sentences used), Module B `daemon["basis"]`, Module C
+`basis`; `report._cite()` maps each source file to its exhibit number (file name if none).
 
 ---
 

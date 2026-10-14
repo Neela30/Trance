@@ -16,6 +16,7 @@ raw_carve into flat, display-ready structures. Two presentation rules matter:
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 from modules.module_b_disk.acquire_downloads import SKIP_DIR_NAMES
 from modules.module_b_disk.onion import is_v3_onion
@@ -142,6 +143,32 @@ def _clock_consistent(state: dict, consensus: dict) -> bool | None:
     return after <= written <= until
 
 
+def _daemon_basis(daemon: dict) -> list[dict]:
+    """The Tor data-folder files the daemon section's statements come from, only those
+    that were actually read (Evidence Ordinance s.51: the grounds of an opinion)."""
+    folder = daemon.get("tor_data_dir")
+    if not folder:
+        return []
+    files = (
+        ("lock", "daemon start", daemon.get("daemon_start_utc")),
+        (
+            "state",
+            "last write, entry guards, circuits",
+            daemon.get("state", {}).get("last_written_utc"),
+        ),
+        (
+            "cached-microdesc-consensus",
+            "signed validity window",
+            daemon.get("consensus", {}).get("valid_after_utc"),
+        ),
+    )
+    return [
+        {"what": f"{name}: {what}", "source": str(Path(folder) / name)}
+        for name, what, present in files
+        if present
+    ]
+
+
 def _daemon_context(daemon: dict) -> dict:
     state = daemon.get("state", {})
     consensus = daemon.get("consensus", {})
@@ -192,6 +219,7 @@ def _daemon_context(daemon: dict) -> dict:
             }
         ),
         "clock_consistent": _clock_consistent(state, consensus),
+        "basis": _daemon_basis(daemon),
         "credentials": credentials,
         "ignored_auth_files": [f.get("filename") for f in auth.get("ignored_files", [])],
         "errors": {

@@ -292,6 +292,36 @@ def _evidence_rows(items: list[dict], prefix: str = "E") -> list[dict]:
     return rows
 
 
+def _exhibit_for(item: dict, rows: list[dict]) -> str | None:
+    """The exhibit a basis entry's source file belongs to: the row for that file, the
+    folder row holding it, or (for "hive") the hive row of that name."""
+    source = item.get("source")
+    for row in rows:
+        path = row.get("path") or ""
+        if source and (
+            source == path or (row.get("kind") == "folder" and source.startswith(path + os.sep))
+        ):
+            return row["exhibit"]
+        if item.get("hive") and row["label"].startswith(item["hive"] + " "):
+            return row["exhibit"]
+    return None
+
+
+def _cite(items: list[dict], rows: list[dict]) -> list[str]:
+    """ "Based on" entries as text: each statement once, with the exhibits it rests on,
+    or the file name when the evidence list has no row for it."""
+    cited: dict[str, list[str]] = {}
+    for item in items or []:
+        name = os.path.basename(item["source"]) if item.get("source") else None
+        ref = _exhibit_for(item, rows) or (
+            name if name and not item["what"].startswith(name + ":") else None
+        )
+        refs = cited.setdefault(item["what"], [])
+        if ref and ref not in refs:
+            refs.append(ref)
+    return [f"{what} ({', '.join(refs)})" if refs else what for what, refs in cited.items()]
+
+
 def render_report(
     findings: dict, local_tz: str | None = None, findings_sha256: str | None = None
 ) -> str:
@@ -353,6 +383,12 @@ def render_report(
     provenance = findings.get("provenance")
     case_info = findings.get("case", {}).get("info") or {}
 
+    evidence_rows = (
+        _evidence_rows(provenance["evidence_items"], case_info.get("exhibit_prefix") or "E")
+        if provenance
+        else []
+    )
+
     def render(terms: list[tuple[str, str]]) -> str:
         return template.render(
             findings=findings,
@@ -362,11 +398,8 @@ def render_report(
             generic_modules=generic,
             glossary=terms,
             provenance=provenance,
-            evidence_rows=(
-                _evidence_rows(provenance["evidence_items"], case_info.get("exhibit_prefix") or "E")
-                if provenance
-                else []
-            ),
+            evidence_rows=evidence_rows,
+            cite=lambda items: _cite(items, evidence_rows),
             case_info=case_info,
             case_info_labels={key: label for key, label, _flag in CASE_INFO_FIELDS},
             limitations=_limitations(findings),

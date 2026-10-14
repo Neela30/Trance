@@ -375,3 +375,31 @@ def test_secrets_are_shortened_in_print():
     assert _mask("dark") == "•••• (4 chars)"
     assert _is_secret_field("password") and _is_secret_field("csrf_token")
     assert not _is_secret_field("username")
+
+
+def test_interpretations_cite_the_exhibits_they_rest_on(tmp_path):
+    rows = report._evidence_rows(
+        [
+            {"label": "NTUSER.DAT registry hive", "path": "/e/NTUSER.DAT", "status": "verified"},
+            {"label": "Tor data folder", "path": "/e/tor/state", "status": "verified"},
+            {"label": "Tor data folder", "path": "/e/tor/lock", "status": "verified"},
+            {"label": "SOFTWARE registry hive", "path": "/e/SOFTWARE", "status": "verified"},
+        ]
+    )
+    items = [
+        {"what": "UserAssist: launches", "source": "/e/NTUSER.DAT"},
+        {"what": "state: last write", "source": "/e/tor/state"},
+        {"what": "profile list", "source": None, "hive": "SOFTWARE"},
+        {"what": "lock: daemon start", "source": "/elsewhere/lock"},
+    ]
+    assert report._cite(items, rows) == [
+        "UserAssist: launches (E-01)",
+        "state: last write (E-02)",
+        "profile list (E-03)",
+        "lock: daemon start",
+    ]
+
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    html = render_report(build_findings(config, [_module_a_result_with_one_launch()]))
+    what_happened = html[html.index("What happened") : html.index("How reliable")]
+    assert "Based on:</strong> UserAssist: times opened and last opened" in what_happened
