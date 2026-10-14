@@ -280,12 +280,27 @@ class CasePage(_Page):
             line.setPlaceholderText(CASE_PLACEHOLDERS.get(key, ""))
             self.fields[key] = line
             self.body.addLayout(labelled(field_label(label, self), line, None, self))
+        self.s6_certificate = QCheckBox(
+            "Add a draft certificate under section 6 of the Evidence (Special Provisions) Act",
+            self,
+        )
+        self.body.addWidget(self.s6_certificate)
+        self.body.addWidget(
+            help_label(
+                "A template page after the declaration. Its wording must be confirmed by an "
+                "attorney-at-law before use.",
+                self,
+            )
+        )
         self.finish()
 
     def values(self) -> dict[str, str]:
-        return {
+        values = {
             key: line.text().strip() for key, line in self.fields.items() if line.text().strip()
         }
+        if self.s6_certificate.isChecked():
+            values["s6_certificate"] = "yes"
+        return values
 
 
 class TargetPage(_Page):

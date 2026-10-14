@@ -131,11 +131,14 @@ def _run_modules(
 
 
 def case_info_from_args(args: argparse.Namespace) -> dict[str, str]:
-    return {
+    info = {
         key: value.strip()
         for key, _label, _flag in CASE_INFO_FIELDS
         if (value := getattr(args, f"case_{key}", None)) and value.strip()
     }
+    if getattr(args, "s6_certificate", False):
+        info["s6_certificate"] = "yes"
+    return info
 
 
 def run_pipeline(
@@ -297,6 +300,12 @@ def main(argv: list[str] | None = None) -> int:
     case = parser.add_argument_group("case details (printed on the report)")
     for key, label, flag in CASE_INFO_FIELDS:
         case.add_argument(flag, dest=f"case_{key}", help=label)
+    case.add_argument(
+        "--s6-certificate",
+        action="store_true",
+        help="Add a draft certificate under s.6 of the Evidence (Special Provisions) Act "
+        "after the declaration (wording to be confirmed by an attorney-at-law)",
+    )
 
     registry = parser.add_argument_group("module_a_registry")
     registry.add_argument(

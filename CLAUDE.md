@@ -182,7 +182,10 @@ Module A `narrative["basis"]` (same findings the sentences used), Module B `daem
 `basis`; `report._cite()` maps each source file to its exhibit number (file name if none). "How to read" names the report a
 conversion under ESPA s.5(2). `exhibit_list.html` (s.7 list of evidence, inline template
 `report.EXHIBIT_LIST_TEMPLATE`) is written beside report.html and recorded in custody.json; the GUI
-Report tab's "Exhibit list" button shows it, and "Save as PDF…" saves `<case>_exhibit_list.pdf`.
+Report tab's "Exhibit list" button shows it, and "Save as PDF…" saves `<case>_exhibit_list.pdf`. `--s6-certificate` / the GUI Case tab's checkbox
+(`case_info["s6_certificate"]`) adds a DRAFT certificate under ESPA s.6 after the declaration,
+pre-filled with examiner, case, exhibit range, TRANCE version and hash results -- its wording has
+NOT been checked by a lawyer; the page says so.
 
 ---
 

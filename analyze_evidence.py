@@ -329,6 +329,8 @@ def build_argv(args: argparse.Namespace, resolved: dict) -> list[str]:
     for key, _label, flag in CASE_INFO_FIELDS:
         if value := getattr(args, f"case_{key}", None):
             argv += [flag, value]
+    if getattr(args, "s6_certificate", False):
+        argv.append("--s6-certificate")
 
     overrides = {
         "ntuser": args.ntuser,
@@ -403,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for key, label, flag in CASE_INFO_FIELDS:
         parser.add_argument(flag, dest=f"case_{key}", help=f"{label} (printed on the report)")
+    parser.add_argument("--s6-certificate", action="store_true", help="passed through to main.py")
 
     parser.add_argument("--ntuser", type=Path, help="Override auto-discovery")
     parser.add_argument("--system", type=Path, help="Override auto-discovery")

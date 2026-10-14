@@ -1466,6 +1466,33 @@
     <p class="note" style="margin-top:14px;">Report produced from findings.json{% if findings_sha256 %} with SHA-256 <span class="mono">{{ findings_sha256 }}</span>{% endif %}.</p>
   </section>
 
+  {% if case_info.s6_certificate %}
+  {% set unverified = evidence_rows|rejectattr("status", "equalto", "verified")|list %}
+  <section class="declaration">
+    <div class="band" style="break-before: page;">
+      <div class="eyebrow">Certificate</div>
+      <h2>Certificate under section 6 of the Evidence (Special Provisions) Act, No. 14 of 1995</h2>
+    </div>
+    <div class="callout"><strong>Draft template.</strong> The wording below must be confirmed by an attorney-at-law before it is signed or filed. TRANCE fills in the facts it recorded; it does not give legal advice.</div>
+    <p>I, <strong>{{ case_info.examiner or "____________________" }}</strong>{% if case_info.organisation %}, of {{ case_info.organisation }}{% endif %}, being a person occupying a responsible position in relation to the operation of the computer described below, state as follows{% if case_info.reference %} in case {{ case_info.reference }}{% endif %}:</p>
+    <ol class="narrative-list">
+      <li>This certificate relates to the report "{{ findings.case.name }}" generated on {{ findings.generated_at }}{% if evidence_rows %}, and to exhibits {{ evidence_rows[0].exhibit }}{% if evidence_rows|length > 1 %} to {{ evidence_rows[-1].exhibit }}{% endif %} listed under "Evidence examined"{% endif %}.</li>
+      <li>The report was produced by the computer program TRANCE{% if provenance %} version {{ provenance.tool.version }}{% if provenance.tool.git_commit %} (source commit {{ provenance.tool.git_commit[:12] }}){% endif %}, running on {{ provenance.runtime.hostname }} ({{ provenance.runtime.platform }}){% endif %}, from the information contained in those exhibits, by the method described under "Methodology".</li>
+      <li>Throughout the material time that computer was operating properly, or if not, any respect in which it was not operating properly was not such as to affect the production of the report or the accuracy of its contents.</li>
+      <li>{% if unverified %}{{ evidence_rows|length - unverified|length }} of {{ evidence_rows|length }} exhibits matched the SHA-256 recorded when they were acquired; {{ unverified|map(attribute="exhibit")|join(", ") }} did not, as stated under "Evidence examined".{% else %}Each exhibit matched the SHA-256 recorded when it was acquired.{% endif %}</li>
+      <li>The report reproduces, or is derived from, the information contained in those exhibits.</li>
+      <li>The statements in this certificate are true to the best of my knowledge and belief.</li>
+    </ol>
+    <dl class="sign-grid">
+      <dt>Name</dt><dd>{{ case_info.examiner or "" }}</dd>
+      <dt>Position / organisation</dt><dd>{{ case_info.organisation or "" }}</dd>
+      <dt>Signature</dt><dd></dd>
+      <dt>Date and place</dt><dd></dd>
+      <dt>Before me (Justice of the Peace / Commissioner for Oaths)</dt><dd></dd>
+    </dl>
+  </section>
+  {% endif %}
+
   <footer>
     <span>TRANCE{% if provenance %} {{ provenance.tool.version }}{% endif %} · findings.json schema v{{ findings.schema_version }}</span>
     {% if findings_sha256 %}
