@@ -400,12 +400,9 @@ the target wrote to back to wherever you build your tools.
 
 ### On the analysis machine
 
-- **Import from drive…** (Analyse tab) copies the evidence folder into
-  `<output-dir>/imported-evidence/<folder>_<UTC time>/evidence/`, checks every
-  file against the acquisition hashes, makes the copy read-only and then tells
-  you it is safe to unplug. The drive is only ever read: nothing on it is
-  created, changed or deleted, and symbolic links on it are not followed. The
-  analysis then runs from the copy with the drive gone.
+- **Copy, then unplug.** Copy the evidence folder onto the analysis machine,
+  unplug the drive, and pick the copy with **Browse…** (Analyse tab), so the
+  analysis never reads the evidence drive itself.
 - **Hash check before parsing.** Every run first re-checks every hash record in
   the evidence folder (the `<file>.sha256` sidecars, each `hashes.sha256`, and
   `acquire_manifest.json.sha256`) and the sidecars of inputs outside it. Any

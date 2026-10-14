@@ -6,11 +6,7 @@ is reused as-is, no separate GUI-side path-discovery logic.
 
 Run order when a disk image is to be mounted: MountSession (pkexec helper) mounts it,
 the analysis runs with the mountpoint as disk_root, and the helper unmounts afterwards
--- on success, failure, cancel, or the app closing.
-
-"Import from drive..." copies an evidence folder off removable media into case storage
-(gui/evidence_import.py: hash-verified, made read-only) and then analyses that copy, so the
-untrusted drive can be unplugged before any parsing starts."""
+-- on success, failure, cancel, or the app closing."""
 
 from __future__ import annotations
 
@@ -51,9 +47,7 @@ from gui.analysis_request import (
     summary_rows,
     validate,
 )
-from gui.evidence_import import store_root
 from gui.history import scan_history
-from gui.import_worker import ImportWorker
 from gui.processes import AnalysisProcess, MountSession, mount_support
 from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style, repolish
 
@@ -107,7 +101,6 @@ class AnalyseTab(QWidget):
         self._request: AnalysisRequest | None = None
         self._case_dir_existed = False
         self._finish_state: tuple | None = None  # set when the analysis ends, shown after unmount
-        self._import: ImportWorker | None = None
 
         self._analysis = AnalysisProcess(self)
         self._analysis.progress.connect(self._on_progress)
@@ -205,23 +198,15 @@ class AnalyseTab(QWidget):
         self._folder_field.folder_dropped.connect(self._set_evidence_folder)
         browse_button = QPushButton("Browse…", self)
         browse_button.clicked.connect(self._browse)
-        self._import_button = QPushButton("Import from drive…", self)
-        self._import_button.setToolTip(
-            "Copy the evidence folder off the drive into case storage, check its hashes and "
-            "make the copy read-only -- then the drive can be unplugged before analysis."
-        )
-        self._import_button.clicked.connect(self._import_from_drive)
         folder_row = QHBoxLayout()
         folder_row.setSpacing(FIELD_GAP)
         folder_row.addWidget(self._folder_field, 1)
         folder_row.addWidget(browse_button)
-        folder_row.addWidget(self._import_button)
         layout.addLayout(
             labelled(
                 field_label("Evidence folder", self),
                 folder_row,
-                "The folder trance-acquire created on the suspect machine. Prefer Import "
-                "from drive: the analysis then never reads the evidence drive itself.",
+                "The folder trance-acquire created on the suspect machine.",
                 self,
             )
         )
@@ -376,11 +361,6 @@ class AnalyseTab(QWidget):
         )
 
     def _run(self) -> None:
-        if self._import is not None:
-            self._run_button.setEnabled(False)
-            apply_eyebrow_style(self._status_label, "Cancelling import…")
-            self._import.cancel()
-            return
         if self._analysis.is_running() or self._mount.is_active:
             self._cancel()
             return
@@ -423,10 +403,7 @@ class AnalyseTab(QWidget):
             self._mount.unmount()
 
     def shutdown(self) -> None:
-        """Called when the window closes: stop an import or the analysis, then unmount."""
-        if self._import is not None:
-            self._import.cancel()
-            self._import.wait(30000)
+        """Called when the window closes: stop the analysis, then unmount."""
         self._analysis.kill_and_wait()
         self._mount.unmount_and_wait()
 
@@ -516,79 +493,6 @@ class AnalyseTab(QWidget):
             removed = " Partial case output removed."
         self._log_view.appendPlainText(f"[*] cancelled.{removed}")
         self._reset_ui("skipped", "Cancelled", f"Cancelled.{removed}")
-
-    # -- evidence import ---------------------------------------------------------
-
-    def _import_from_drive(self) -> None:
-        if self._import is not None or self._analysis.is_running() or self._mount.is_active:
-            return
-        source = QFileDialog.getExistingDirectory(
-            self, "Select the evidence folder on the drive (trance-acquire output)"
-        )
-        if not source:
-            return
-        store = store_root(self._output_dir)
-        self._import = ImportWorker(Path(source), store, self)
-        self._import.progress.connect(self._on_import_progress)
-        self._import.finished_ok.connect(self._on_import_finished)
-        self._import.failed.connect(self._on_import_failed)
-        self._import.cancelled.connect(self._on_import_cancelled)
-        self._set_running_ui()
-        self._progress_timer.stop()
-        self._run_button.setText("Cancel import")
-        self._import_button.setEnabled(False)
-        self._log_view.appendPlainText(f"[*] importing {source} into {store} (read only)")
-        self._import.start()
-
-    def _on_import_progress(self, name: str, done: int, total: int) -> None:
-        if total:
-            self._progress.setValue(min(99, int(done * 100 / total)))
-        shown = f"{done / 2**30:.2f} of {total / 2**30:.2f} GB" if total >= 2**30 else ""
-        apply_eyebrow_style(self._status_label, f"Copying {name} {shown}".strip())
-
-    def _import_ended(self) -> None:
-        self._import = None
-        self._import_button.setEnabled(True)
-
-    def _on_import_finished(self, result) -> None:
-        self._import_ended()
-        self._progress.setValue(100)
-        integrity = result.integrity
-        self._log_view.appendPlainText(
-            f"[*] copied {result.files_copied} file(s), {result.bytes_copied / 2**20:.1f} MB "
-            f"to {result.evidence_dir} (read-only)"
-        )
-        for entry in result.skipped:
-            self._log_view.appendPlainText(f"[!] not copied: {entry}")
-        self._log_view.appendPlainText(f"[*] evidence integrity: {integrity.get('message')}")
-        self._set_evidence_folder(str(result.evidence_dir))
-        unplug = "The copy is complete -- it is now safe to unplug the evidence drive."
-        if result.integrity_failed:
-            self._reset_ui("error", "Integrity failed", "Imported; hash check FAILED.")
-            QMessageBox.critical(
-                self,
-                "Evidence integrity check failed",
-                f"{integrity.get('message')}\n\n{unplug}\n\nDo not analyse this copy; "
-                "take a fresh copy from the original acquisition media.",
-            )
-            return
-        self._reset_ui("ok", "Imported", "Imported and verified. Safe to unplug the drive.")
-        QMessageBox.information(
-            self,
-            "Evidence imported",
-            f"Copied {result.files_copied} file(s) into\n{result.evidence_dir}\nand made the "
-            f"copy read-only.\n\n{integrity.get('message')}\n\n{unplug}",
-        )
-
-    def _on_import_failed(self, message: str) -> None:
-        self._import_ended()
-        self._reset_ui("error", "Failed", "Import failed. Nothing was kept.")
-        QMessageBox.critical(self, "Import failed", message)
-
-    def _on_import_cancelled(self) -> None:
-        self._import_ended()
-        self._log_view.appendPlainText("[*] import cancelled; the partial copy was removed.")
-        self._reset_ui("skipped", "Cancelled", "Import cancelled. Nothing was kept.")
 
     # -- ui state ----------------------------------------------------------------
 

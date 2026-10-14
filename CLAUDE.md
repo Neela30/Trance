@@ -798,12 +798,10 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
   WinPMEM (+ its `.sha256`), optional verified copy to a tools drive. Disabled off Windows
   and in a frozen app; warns (Yes/No) when elevated. Never overwrites: refuses non-empty
   destination folders, files opened with `"x"`, removes only folders it created.
-- `evidence_import.py` (Qt-free) + `import_worker.py`: Analyse tab **Import from drive…**
-  copies a folder to `<output-dir>/imported-evidence/<name>_<UTC>/evidence/` (+
-  `import_record.json`), source opened read-only (`O_NOFOLLOW`), links skipped, each copy
-  re-hashed, then `verify_evidence`, then made read-only; says "safe to unplug". Case name
-  `imported-evidence` is rejected. Module B's `working_copy()` now makes its temp copy
-  writable, since `copytree` carries the read-only bit over (sqlite needs it writable).
+- The Analyse tab's **Import from drive…** (copy off the drive, re-hash, make read-only) was
+  removed on 2026-10-14 at the user's request: the evidence folder is picked with Browse… only.
+  Module B's `working_copy()` still makes its temp copy writable, since `copytree` carries a
+  read-only bit over (sqlite needs it writable) -- `tests/test_disk_evidence.py` covers it.
 - `advanced_inputs.LimitsPage` ("Limits" tab): `AnalysisRequest.memory_limit_mb` /
   `cpu_limit_seconds` → `core.safety.apply_resource_limits` at the top of the child
   (`analysis_runner.run`), Linux only.
@@ -1161,5 +1159,5 @@ version (two-drive workflow, one-drive caveat, build-on-Windows rule).
 
 Not done / open: no GPG/Authenticode signing of the built exe (the `.sha256` only protects
 against corruption, not a swap of both files); free-space check before WinPMEM; the GUI
-Build tool and Import flows were exercised offscreen and through their Qt-free logic, not
+Build tool flow was exercised offscreen and through its Qt-free logic, not
 clicked through by a person.

@@ -805,3 +805,20 @@ def test_report_states_live_scan_coverage_instead_of_the_whole_volume():
     assert "whole volume" not in text
     assert "found by the live scan" in text
     assert "checked 6,559 files" in text
+
+
+def test_working_copy_of_read_only_evidence_is_writable(tmp_path):
+    """Module B opens sqlite in its temp copy; copytree carries a read-only bit over, so the
+    copy must be made writable even when the evidence folder is read-only."""
+    from modules.module_b_disk.evidence import working_copy
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "places.sqlite").write_bytes(b"db")
+    (profile / "places.sqlite").chmod(0o444)
+    profile.chmod(0o555)
+    try:
+        with working_copy(profile) as (copy, _before, _verification):
+            (copy / "places.sqlite").write_bytes(b"db2")
+    finally:
+        profile.chmod(0o755)

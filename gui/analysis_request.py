@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from analyze_evidence import resolve_evidence, with_volume_inputs
 from core.safety import default_limits, limits_supported, running_as_root
-from gui.evidence_import import IMPORT_DIRNAME
 from main import CUSTODY_FILENAME, no_target_warning
 
 SOURCE_TYPES = ("process", "full-memory")
@@ -170,8 +169,6 @@ def validate(request: AnalysisRequest, inputs: dict) -> Issues:
 
     if not _is_single_component(request.case_name.strip()):
         errors.append("Case name must be a single folder name, without path separators.")
-    elif request.case_name.strip().casefold() == IMPORT_DIRNAME:
-        errors.append(f"'{IMPORT_DIRNAME}' is where imported evidence is kept; pick another name.")
     elif any((request.case_dir / name).exists() for name in OUTPUT_FILES):
         errors.append(
             f"This case already has outputs; choose a new case name ({request.case_dir})."
