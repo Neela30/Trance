@@ -44,9 +44,14 @@ def _run_gui(argv: list[str]) -> int:
     from gui.main_window import MainWindow
     from gui.theme import apply_app_font, load_stylesheet
 
+    # A packaged app is started from a shortcut or a file manager, so its working directory
+    # says nothing about where cases belong.
+    default_output = (
+        Path.home() / "TRANCE" / "cases" if getattr(sys, "frozen", False) else Path("output")
+    )
     parser = argparse.ArgumentParser(description="TRANCE desktop GUI.")
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("output"), help="Default: %(default)s"
+        "--output-dir", type=Path, default=default_output, help="Default: %(default)s"
     )
     args = parser.parse_args(argv)
 

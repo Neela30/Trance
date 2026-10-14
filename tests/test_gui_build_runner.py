@@ -218,3 +218,38 @@ def test_elevation_warning_only_when_elevated(monkeypatch):
     assert "administrator" in build_inputs.elevation_warning()
     monkeypatch.setattr(build_inputs, "is_elevated", lambda: False)
     assert build_inputs.elevation_warning() is None
+
+
+def _shipped_exe(folder: Path, data: bytes = EXE_BYTES, recorded: bytes = EXE_BYTES) -> Path:
+    exe = folder / "acquire" / "trance-acquire.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(data)
+    digest = hashlib.sha256(recorded).hexdigest()
+    exe.with_name("trance-acquire.exe.sha256").write_text(sidecar_text(digest, exe.name))
+    return exe
+
+
+def test_prebuilt_exe_is_saved_without_running_pyinstaller(tmp_path, script):
+    FakePopen.instances.clear()
+    exe = _shipped_exe(tmp_path / "bundle")
+    result = _job(tmp_path, script, prebuilt=exe).run()
+
+    assert FakePopen.instances == []
+    assert result.exe_path.read_bytes() == EXE_BYTES
+    assert result.sha256 == hashlib.sha256(EXE_BYTES).hexdigest()
+    assert result.sha256_path.is_file()
+
+
+def test_damaged_prebuilt_exe_is_refused_and_nothing_kept(tmp_path, script):
+    exe = _shipped_exe(tmp_path / "bundle", data=b"MZ tampered")
+    with pytest.raises(BuildError, match="damaged"):
+        _job(tmp_path, script, prebuilt=exe).run()
+    assert not (tmp_path / "builds" / BUNDLE).exists()
+
+
+def test_frozen_app_with_a_shipped_exe_can_save_it_on_any_os(tmp_path, monkeypatch):
+    _shipped_exe(tmp_path)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert build_inputs.bundled_acquire_exe() == tmp_path / "acquire" / "trance-acquire.exe"
+    assert build_inputs.build_support("linux") == (True, "")

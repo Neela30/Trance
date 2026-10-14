@@ -20,6 +20,63 @@ scenarios.
 
 **Status:** In development · **Platform:** Windows 10/11 (target) · 
 
+## Install (release download)
+
+Releases are on the repository's **Releases** page, built by
+`.github/workflows/release.yml` from a version tag:
+
+| File | What it is |
+|---|---|
+| `TRANCE-<version>-windows-x64.zip` | The desktop app for Windows 10/11 |
+| `TRANCE-<version>-linux-x64.tar.gz` | The desktop app for Linux (x86-64, glibc 2.35 or newer, e.g. Ubuntu 22.04+) |
+| `trance-acquire.exe` (+ `.sha256`) | The acquisition tool you run on the suspect Windows machine |
+| `SHA256SUMS` | Checksums of all of the above |
+
+1. Check the download: `sha256sum -c SHA256SUMS --ignore-missing` (Linux) or
+   `Get-FileHash TRANCE-<version>-windows-x64.zip` (PowerShell) and compare.
+2. Unzip it anywhere (no installer, no admin rights) and run `TRANCE/TRANCE.exe`
+   on Windows or `TRANCE/TRANCE` on Linux. Cases are saved in `~/TRANCE/cases`
+   (change it with `--output-dir`).
+3. To get the acquisition tool onto a tools drive, open the **Build tool** tab and
+   click **Save trance-acquire.exe**: the app ships the exe built with it, checks
+   it against its recorded SHA-256, and writes a copy plus `.sha256` (and a
+   WinPMEM binary, if you pick one) to the folder or drive you choose.
+
+Notes:
+- The builds are not code-signed. Windows SmartScreen shows "unknown publisher"
+  (More info, then Run anyway), and some antivirus products flag
+  `trance-acquire.exe`; check its SHA-256 and allow-list it on the tools machine.
+- Linux: the report view needs a few desktop libraries most distributions already
+  have (`sudo apt install libxcb-cursor0 libnss3` if the window does not open).
+  Mounting a disk image from the app needs `qemu-utils`, `ntfs-3g` and polkit.
+- Volatility3 is bundled (`vol` next to `TRANCE`) and filled in under Memory options,
+  so the structural memory pass (processes, connections, files) works as it does from
+  source. Like from source, it downloads the symbol tables for a Windows build it has not
+  seen before from Microsoft's symbol server and caches them in `~/.cache/volatility3`;
+  on an offline machine, copy that cache folder over from a machine that has run it.
+- macOS is not packaged yet; run from source there.
+
+### Building the release packages yourself
+
+```bash
+pip install -r requirements.txt -r requirements-gui.txt -r requirements-dev.txt
+python scripts/build.py acquire     # Windows only: packaging/acquire/trance-acquire.exe
+python scripts/build.py app         # dist/TRANCE/ + dist/release/TRANCE-<version>-<os>-x64.*
+python scripts/build.py smoke       # one small analysis + a GUI start with the packaged app
+```
+
+PyInstaller can't cross-compile, so each OS's package is built on that OS. The app
+build includes `packaging/acquire/trance-acquire.exe` when it exists (copy it over
+from a Windows build to put it in the Linux package too). On Linux, build from a
+checkout and venv whose paths contain no parentheses: PyInstaller misreads `ldd`
+output for them and leaves Qt out (the script refuses). The settings live in
+`packaging/trance.spec` (one folder, not one file: a single 400 MB file would unpack
+itself on every start and for every analysis).
+
+To release: set the version in `core/version.py` and `pyproject.toml`, commit, push a
+tag `v<version>` (or `v<version>-rc1` for a test build), then check and publish the
+draft release the workflow creates.
+
 ## Running the pipeline
 
 `main.py` runs every module, merges their output into one `findings.json`, and
@@ -294,34 +351,12 @@ pipeline, not a replacement for `trance-analyze` — both stay available.
 The Analyse tab's target options take the host, a username, the target's
 cookie names and the report time zone.
 
-Kept out of `requirements.txt` on purpose — `requirements-gui.txt`
-(`PySide6`) is separate so `trance-acquire`/`trance-analyze` builds stay
-exactly as lean as before:
-
-```
-pip install -r requirements.txt -r requirements-gui.txt pyinstaller
-pyinstaller --onefile --name trance-gui gui_main.py \
-    --hidden-import modules.module_a_registry \
-    --hidden-import modules.module_b_disk \
-    --hidden-import modules.module_c_memory \
-    --collect-all PySide6 \
-    --collect-all tzdata \
-    --add-data "report_template.html.j2:." \
-    --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
-
-trance-gui.exe --output-dir output
-```
-
-(`;` instead of `:` for `--add-data` on Windows, same as `trance-analyze`.)
-The GUI needs `requirements.txt` too, not just `requirements-gui.txt` —
-it drives `main.py`'s full pipeline (regipy, jinja2, tzdata, ...), not
-just PySide6, and `--collect-all tzdata` is needed for the same reason
-noted under `trance-analyze` above. `--collect-all PySide6` is needed for `QtWebEngine`'s own resources/
-plugins. Expect a noticeably larger binary than the other two exes —
-QtWebEngine bundles a Chromium build (built and smoke-tested in this
-repo at ~290MB `--onefile`, vs. ~15MB for `trance-analyze`); this is the
-tradeoff of embedding the report view instead of a lighter web
-framework. Same AV-allowlisting note as the other `--onefile` exes.
+`requirements-gui.txt` (`PySide6`) is kept out of `requirements.txt` so the
+acquisition exe stays lean. The packaged app is built with `scripts/build.py`
+(see "Install" above), not by hand: `packaging/trance.spec` carries the hidden
+imports, data files, tz data and library metadata, and trims Qt to what the app
+uses (Widgets and WebEngine), and adds Volatility3 as `vol` (about 490 MB unpacked,
+195 MB as an archive).
 
 ### Building the acquisition EXE from the GUI
 
@@ -332,7 +367,9 @@ target machine:
 
 1. Open the GUI from a source checkout (`python gui_main.py`) **on Windows**
    and switch to the **Build tool** tab. PyInstaller can't cross-compile, so
-   on Linux/macOS the button is disabled with that explanation.
+   on Linux/macOS the button is disabled with that explanation. (The released
+   app doesn't build: it saves the `trance-acquire.exe` it ships with, on
+   Windows and Linux alike; see "Install".)
 2. Pick **Save to** (default `~/trance-builds`). Each build goes into a new
    `trance-acquire-<UTC time>/` folder; nothing existing is overwritten.
 3. Optionally pick **Also copy to (tools drive)** and a **WinPMEM binary**.
