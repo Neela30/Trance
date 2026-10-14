@@ -66,7 +66,7 @@ def check_prerequisites(script: Path = ACQUIRE_SCRIPT) -> list[str]:
 
     if sys.maxsize <= 2**32:
         problems.append(
-            "This Python interpreter is 32-bit -- it would produce a 32-bit exe, not "
+            "This Python interpreter is 32-bit, so it would produce a 32-bit exe, not "
             "the required 64-bit one. Install 64-bit Python and retry."
         )
 

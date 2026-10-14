@@ -326,7 +326,7 @@ def summary_rows(request: AnalysisRequest, inputs: dict) -> list[SummaryRow]:
             SummaryRow("Disk volume", "found", f"{request.disk_root} (mounted)", request.disk_root)
         )
     else:
-        rows.append(SummaryRow("Disk image", "off", "optional — add one under More options"))
+        rows.append(SummaryRow("Disk image", "off", "optional, add one under More options"))
     if request.report_timezone:
         rows.append(SummaryRow("Report timezone", "found", request.report_timezone))
     return rows

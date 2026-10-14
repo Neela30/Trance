@@ -1,8 +1,9 @@
 """Design tokens + helpers for the app's Qt theme, matching report_template.html.j2's
 CSS custom properties (dark theme) so the native UI and the embedded report read as one
-system. Qt Style Sheets (theme.qss) cover color/border/radius/font-family/state -- Qt
-Style Sheets have no text-transform or letter-spacing support, so the report's eyebrow-
-label letter-spacing is set directly on QFont here instead.
+system. Qt Style Sheets (theme.qss) cover color/border/radius/state; fonts are set here.
+
+Type: one sans for everything (apply_app_font), Georgia for page headings like the
+report's, monospace only for logs and paths. Labels are sentence case.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 COLORS = {
@@ -29,8 +30,37 @@ COLORS = {
     "mono_chip_bg": "#232a2f",
 }
 
-FONT_MONO = "Cascadia Code"
 FONT_SERIF = "Georgia"
+# Roboto is left out on purpose: on one Linux box it was installed only as Roboto Black,
+# and Qt's fallback to it made every label bold.
+UI_FONTS = ("Segoe UI", "Inter", "Noto Sans", "Cantarell", "Ubuntu", "DejaVu Sans")
+MONO_FONTS = ("Cascadia Mono", "Cascadia Code", "Consolas", "Noto Sans Mono", "DejaVu Sans Mono")
+
+
+def _first_installed(candidates: tuple[str, ...], fallback: QFontDatabase.SystemFont) -> str:
+    installed = set(QFontDatabase.families())
+    return (
+        next((f for f in candidates if f in installed), None)
+        or QFontDatabase.systemFont(fallback).family()
+    )
+
+
+def ui_family() -> str:
+    return _first_installed(UI_FONTS, QFontDatabase.SystemFont.GeneralFont)
+
+
+def mono_family() -> str:
+    return _first_installed(MONO_FONTS, QFontDatabase.SystemFont.FixedFont)
+
+
+def apply_app_font(app) -> None:
+    """Call once, after QApplication exists: the QSS deliberately sets no font-family."""
+    app.setFont(QFont(ui_family(), 10))
+
+
+def mono_css(size_px: float = 12) -> str:
+    return f"font-family: '{mono_family()}'; font-size: {size_px}px;"
+
 
 _QSS_PATH = Path(__file__).parent / "theme.qss"
 
@@ -40,13 +70,12 @@ def load_stylesheet() -> str:
 
 
 def apply_eyebrow_style(label: QLabel, text: str | None = None) -> None:
-    """Small uppercase monospace muted label, matching the report's .eyebrow class --
-    letter-spacing has no QSS equivalent, so it's set on the QFont directly."""
-    label.setText((text if text is not None else label.text()).upper())
+    """Small semibold muted label, matching the report's .eyebrow class."""
+    label.setText(text if text is not None else label.text())
     label.setProperty("class", "eyebrow")
-    font = QFont(FONT_MONO)
-    font.setPointSize(9)
-    font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 114)  # ~0.14em
+    font = QFont(ui_family())
+    font.setPointSizeF(9.5)
+    font.setWeight(QFont.Weight.DemiBold)
     label.setFont(font)
     repolish(label)
 
@@ -56,7 +85,7 @@ def apply_heading_style(label: QLabel) -> None:
     instead of the platform's default UI font."""
     label.setProperty("class", "heading")
     font = QFont(FONT_SERIF)
-    font.setPointSize(16)
+    font.setPointSize(19)
     font.setWeight(QFont.Weight.DemiBold)
     label.setFont(font)
     repolish(label)
@@ -64,6 +93,13 @@ def apply_heading_style(label: QLabel) -> None:
 
 def status_color(status: str) -> str:
     return {"ok": COLORS["confirm"], "error": COLORS["accent"]}.get(status, COLORS["noise"])
+
+
+def status_text(status: str) -> str:
+    """A case's overall status in words, for chips and lists."""
+    return {"ok": "OK", "partial": "Partial", "error": "Error"}.get(
+        status, status.replace("_", " ").capitalize()
+    )
 
 
 def status_bg_color(status: str) -> str:
@@ -94,10 +130,10 @@ class StatusIndicator(QWidget):
         self._dot.setFixedSize(self._DOT_SIZE, self._DOT_SIZE)
         self._dot.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
-        self._label = QLabel(text.upper(), self)
-        font = QFont(FONT_MONO)
-        font.setPointSize(10)
-        font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 108)
+        self._label = QLabel(text, self)
+        font = QFont(ui_family())
+        font.setPointSizeF(10)
+        font.setWeight(QFont.Weight.DemiBold)
         self._label.setFont(font)
 
         layout = QHBoxLayout(self)
@@ -109,7 +145,7 @@ class StatusIndicator(QWidget):
         self.set_status("skipped")
 
     def set_text(self, text: str) -> None:
-        self._label.setText(text.upper())
+        self._label.setText(text)
 
     def set_status(self, status: str) -> None:
         color = status_color(status)

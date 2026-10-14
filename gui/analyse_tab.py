@@ -11,6 +11,7 @@ the analysis runs with the mountpoint as disk_root, and the helper unmounts afte
 from __future__ import annotations
 
 import shutil
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -26,7 +27,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -47,9 +47,17 @@ from gui.analysis_request import (
     summary_rows,
     validate,
 )
-from gui.history import scan_history
+from gui.history import format_relative_time, scan_history
 from gui.processes import AnalysisProcess, MountSession, mount_support
-from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style, repolish
+from gui.theme import (
+    COLORS,
+    StatusIndicator,
+    apply_eyebrow_style,
+    apply_heading_style,
+    mono_css,
+    repolish,
+    status_text,
+)
 
 FORM_MAX_WIDTH = 720
 RUN_BUTTON_WIDTH = 240
@@ -137,10 +145,10 @@ class AnalyseTab(QWidget):
 
         self._recent_cases_box = self._build_recent_cases_box()
         self._log_box = self._build_log_box()
-        self._bottom_stack = QStackedWidget(self)
-        self._bottom_stack.addWidget(self._recent_cases_box)
-        self._bottom_stack.addWidget(self._log_box)
-        content_layout.addWidget(self._bottom_stack)
+        # Shown one at a time; not a QStackedWidget, which is always as tall as the log.
+        self._log_box.setVisible(False)
+        content_layout.addWidget(self._recent_cases_box)
+        content_layout.addWidget(self._log_box)
         content_layout.addStretch(1)
 
         centered = QWidget(self)
@@ -223,7 +231,7 @@ class AnalyseTab(QWidget):
         )
 
         self._onion_field = QLineEdit(self)
-        self._onion_field.setPlaceholderText("e.g. sitename.onion — optional")
+        self._onion_field.setPlaceholderText("e.g. sitename.onion (optional)")
         layout.addLayout(
             labelled(
                 field_label("Site under investigation", self),
@@ -268,6 +276,7 @@ class AnalyseTab(QWidget):
     def _build_recent_cases_box(self) -> QGroupBox:
         box, self._recent_cases_layout = card(self)
         self._recent_cases_layout.setSpacing(10)
+        self._recent_cases_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._recent_cases_layout.addWidget(field_label("Recent cases", self))
         self._recent_cases_empty_label = QLabel("No analyses run yet.", self)
         self._recent_cases_empty_label.setStyleSheet("color: #8b969c;")
@@ -283,9 +292,8 @@ class AnalyseTab(QWidget):
         self._log_view.setMaximumBlockCount(500)
         self._log_view.setMinimumHeight(220)
         self._log_view.setStyleSheet(
-            "QPlainTextEdit { font-family: 'Cascadia Code', Consolas, monospace; "
-            "font-size: 11.5px; background: #14181b; border: none; color: #8b969c; "
-            "padding: 8px; }"
+            f"QPlainTextEdit {{ {mono_css(12)} background: #14181b; border: none; "
+            "color: #8b969c; padding: 8px; }"
         )
         layout.addWidget(self._log_view)
         return box
@@ -335,11 +343,12 @@ class AnalyseTab(QWidget):
 
         for summary in recent:
             row = QLabel(
-                f"{summary.case_name} — {summary.overall_status} — "
-                f"{summary.generated_at or 'unknown time'}",
+                f"<b>{escape(summary.case_name)}</b>"
+                f"<span style='color:{COLORS['ink_muted']}'> · {status_text(summary.overall_status)}"
+                f" · {format_relative_time(summary.generated_at)}</span>",
                 self,
             )
-            row.setStyleSheet("font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px;")
+            row.setToolTip(summary.generated_at or "")
             self._recent_cases_layout.addWidget(row)
 
     def _build_request(self) -> AnalysisRequest:
@@ -508,7 +517,8 @@ class AnalyseTab(QWidget):
         self._stamp.set_status("skipped")
         self._stamp.set_text("Running")
         self._log_view.clear()
-        self._bottom_stack.setCurrentWidget(self._log_box)
+        self._recent_cases_box.setVisible(False)
+        self._log_box.setVisible(True)
 
     def _reset_ui(self, status: str, stamp: str, message: str) -> None:
         self._progress_timer.stop()
@@ -521,7 +531,8 @@ class AnalyseTab(QWidget):
         self._stamp.set_text(stamp)
         apply_eyebrow_style(self._status_label, message)
         if status == "ok":
-            self._bottom_stack.setCurrentWidget(self._recent_cases_box)
+            self._log_box.setVisible(False)
+            self._recent_cases_box.setVisible(True)
 
     def _animate_progress(self) -> None:
         """Eases the displayed value toward the last confirmed checkpoint instead of

@@ -91,7 +91,7 @@ def format_relative_time(iso_timestamp: str | None, *, now: datetime | None = No
     """ "2 hours ago" style, for a compact History column -- the full ISO timestamp
     stays available separately (as a tooltip) for anyone who wants the exact time."""
     if not iso_timestamp:
-        return "—"
+        return "unknown"
     try:
         then = datetime.fromisoformat(iso_timestamp)
     except ValueError:

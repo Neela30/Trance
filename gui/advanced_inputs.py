@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 from core.config import CASE_INFO_FIELDS
 from core.safety import default_limits, limits_supported
 from gui.analysis_request import INPUT_SPECS, SummaryRow, display_path
-from gui.theme import COLORS, apply_eyebrow_style
+from gui.theme import COLORS
 
 # Breathing room, in px -- used consistently across the tab.
 FIELD_GAP = 8  # label -> its field
@@ -67,13 +67,13 @@ DOT_COLORS = {"found": COLORS["confirm"], "missing": COLORS["ink_muted"], "off":
 def help_label(text: str, parent: QWidget) -> QLabel:
     label = QLabel(text, parent)
     label.setWordWrap(True)
-    label.setStyleSheet(f"color: {COLORS['ink_muted']}; font-size: 12px; padding-top: 2px;")
+    label.setStyleSheet(f"color: {COLORS['ink_muted']}; font-size: 12.5px;")
     return label
 
 
 def field_label(text: str, parent: QWidget) -> QLabel:
     label = QLabel(text, parent)
-    apply_eyebrow_style(label)
+    label.setStyleSheet(f"color: {COLORS['ink']}; font-weight: 600;")
     return label
 
 
@@ -315,9 +315,9 @@ class TargetPage(_Page):
         self.username = QLineEdit(self)
         self.username.setPlaceholderText("e.g. admin")
         self.cookie_names = QLineEdit(self)
-        self.cookie_names.setPlaceholderText("e.g. sid, csrf_token — blank uses the built-in names")
+        self.cookie_names.setPlaceholderText("e.g. sid, csrf_token (blank uses the built-in names)")
         self.report_timezone = QLineEdit(self)
-        self.report_timezone.setPlaceholderText("e.g. Asia/Colombo — blank uses this computer's")
+        self.report_timezone.setPlaceholderText("e.g. Asia/Colombo (blank uses this computer's)")
         self.body.addLayout(
             labelled(
                 field_label("Host and port", self),
@@ -361,7 +361,7 @@ class InputsPage(_Page):
     def __init__(self, parent=None):
         super().__init__(
             "These were found in the evidence folder. Change one to analyse a different "
-            "file — for example a Tor data folder from a mounted disk.",
+            "file, for example a Tor data folder from a mounted disk.",
             parent,
         )
         self._evidence_dir: str | None = None
@@ -487,7 +487,7 @@ class DiskPage(_Page):
             option(
                 self.mount_box,
                 (
-                    "Opened read-only — nothing on the image can change. Your computer asks "
+                    "Opened read-only, so nothing on the image can change. Your computer asks "
                     "for your password once."
                     if mount_supported
                     else mount_reason
@@ -554,9 +554,7 @@ class MemoryPage(_Page):
             labelled(field_label("Memory image type", self), self.source_type, None, self)
         )
 
-        self.vol3 = PathPicker(
-            "Not set — the structural pass is skipped", is_dir=False, parent=self
-        )
+        self.vol3 = PathPicker("Not set: the structural pass is skipped", is_dir=False, parent=self)
         self.vol3.set_path(shutil.which("vol") or "")
         self.body.addLayout(
             labelled(
@@ -655,7 +653,7 @@ class OptionsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(FIELD_GAP)
-        self._toggle = QPushButton("+ More options", self)
+        self._toggle = QPushButton("More options", self)
         self._toggle.setProperty("class", "link")
         self._toggle.clicked.connect(lambda: self.set_expanded(not self._card.isVisible()))
         layout.addWidget(self._toggle, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -684,4 +682,4 @@ class OptionsPanel(QWidget):
 
     def set_expanded(self, expanded: bool) -> None:
         self._card.setVisible(expanded)
-        self._toggle.setText("− Fewer options" if expanded else "+ More options")
+        self._toggle.setText("Fewer options" if expanded else "More options")

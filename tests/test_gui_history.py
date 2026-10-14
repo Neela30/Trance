@@ -97,8 +97,8 @@ def test_scan_history_report_and_custody_paths_only_set_when_files_exist(tmp_pat
 
 
 def test_format_relative_time_handles_missing_timestamp():
-    assert format_relative_time(None) == "—"
-    assert format_relative_time("") == "—"
+    assert format_relative_time(None) == "unknown"
+    assert format_relative_time("") == "unknown"
 
 
 def test_format_relative_time_handles_malformed_timestamp():

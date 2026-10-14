@@ -1,13 +1,11 @@
 /* TRANCE desktop UI theme -- mirrors report_template.html.j2's CSS custom properties
    (dark theme) so the native app and the embedded report read as one system. See
-   gui/theme.py for the color tokens and for what Qt Style Sheets can't express
-   (letter-spacing, CSS transforms) -- those are applied there via QFont/QPainter. */
+   gui/theme.py for the color tokens and the fonts. No font-family here: a QSS font
+   overrides QWidget.setFont, which is how theme.py sets the serif headings. */
 
 QMainWindow, QWidget {
     background: #14181b;
     color: #dce2e6;
-    font-family: "Segoe UI", -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
-    font-size: 13px;
 }
 
 QLabel {
@@ -29,25 +27,26 @@ QLabel[class="status-error"] { color: #e2694f; }
 /* ---- Tab bar ---- */
 
 QTabWidget::pane {
-    border: 1px solid #313a40;
-    border-radius: 6px;
-    top: -1px;
+    border: none;
+    border-top: 1px solid #313a40;
     background: #14181b;
 }
+
+QTabWidget::tab-bar { left: 16px; }
 
 QTabBar::tab {
     background: transparent;
     color: #8b969c;
-    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
-    font-size: 11px;
-    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 600;
+    padding: 12px 18px 10px;
     border: none;
     border-bottom: 2px solid transparent;
     margin-right: 4px;
 }
 
 QTabBar::tab:selected {
-    color: #e2694f;
+    color: #dce2e6;
     border-bottom: 2px solid #e2694f;
 }
 
@@ -60,7 +59,7 @@ QTabBar::tab:hover:!selected {
 QGroupBox {
     background: #1b2126;
     border: 1px solid #313a40;
-    border-radius: 6px;
+    border-radius: 10px;
     margin-top: 14px;
     padding: 18px 14px 14px;
 }
@@ -70,9 +69,7 @@ QGroupBox::title {
     left: 12px;
     padding: 0 6px;
     color: #8b969c;
-    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
-    font-size: 10.5px;
-    font-style: normal;
+    font-weight: 600;
     background: #14181b;
 }
 
@@ -83,7 +80,8 @@ QLineEdit {
     color: #dce2e6;
     border: 1px solid #313a40;
     border-radius: 6px;
-    padding: 7px 10px;
+    padding: 8px 11px;
+    font-size: 14px;
     selection-background-color: #e2694f;
     selection-color: #14181b;
 }
@@ -116,7 +114,7 @@ QPushButton {
     border: 1px solid #313a40;
     border-radius: 6px;
     padding: 8px 16px;
-    font-size: 13px;
+    font-size: 14px;
 }
 
 QPushButton:hover {
@@ -187,8 +185,8 @@ QPushButton[class="link"] {
     border: none;
     padding: 4px 0;
     text-align: left;
-    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
-    font-size: 11px;
+    font-size: 13.5px;
+    font-weight: 600;
 }
 
 QPushButton[class="link"]:hover {
@@ -207,8 +205,7 @@ QProgressBar {
     border-radius: 6px;
     text-align: center;
     color: #dce2e6;
-    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
-    font-size: 10.5px;
+    font-size: 12px;
     min-height: 20px;
 }
 
@@ -234,15 +231,15 @@ QTableWidget {
 QHeaderView::section {
     background: #232a2f;
     color: #8b969c;
-    font-family: "Cascadia Code", Consolas, "Liberation Mono", monospace;
-    font-size: 10.5px;
-    padding: 8px 10px;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 9px 10px 9px 18px;
     border: none;
     border-bottom: 1px solid #313a40;
 }
 
 QTableWidget::item {
-    padding: 6px 10px 6px 13px;
+    padding: 8px 10px 8px 13px;
     border-bottom: 1px solid #232a2f;
     border-left: 3px solid transparent;
 }

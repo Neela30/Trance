@@ -814,16 +814,24 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
   Keep new logic Qt-free where possible; CI does not install PySide6.
 - `theme.qss` + `theme.py` — styling matching the report's CSS tokens (`--bg #14181b`,
   `--surface #1b2126`, `--accent #e2694f`, `--confirm #4fae84`, `--noise #c9a552`, …).
+  Type (2026-10-14, same rules as the report): one sans set on the QApplication by
+  `theme.apply_app_font()` (first installed of Segoe UI, Inter, Noto Sans, Cantarell, Ubuntu,
+  DejaVu Sans -- never Roboto), Georgia for page headings, `theme.mono_css()` only for the logs.
+  Labels are sentence case (no uppercase monospace eyebrows); `theme.status_text()` words a
+  case status. The Build tab scrolls like the Analyse tab.
 
 Qt gotchas already hit (don't rediscover them):
-- QSS has no `letter-spacing`, `text-transform`, or `transform` — done via `QFont`/`QPainter`
-  in `theme.py`.
+- QSS has no `letter-spacing`, `text-transform`, or `transform` — use `QFont`/`QPainter`.
 - `QTableWidgetItem` aliases `DisplayRole` and `EditRole` to one slot — use a subclass with
   `__lt__` (`_GeneratedItem`) for display-vs-sort-key splits.
 - `setCellWidget()` widgets don't move with `sortItems()` — use a delegate.
 - Row → data lookups must go through `item.data(UserRole)`, not a parallel Python list
   (breaks after sorting).
 - A read-only `QLineEdit` still takes focus by default (showed a permanent accent border).
+- A `font-family`/`font-size` on `QWidget` in QSS overrides every `setFont()` (the serif
+  headings rendered as small sans) -- `theme.qss` sets no font-family; the app font does.
+- Any QSS `padding` on a `QLabel` also indents its text ~3 px (hints sat right of labels).
+- A `QStackedWidget` is as tall as its tallest page, shown or not.
 - The GUI has been verified **offscreen** (`QT_QPA_PLATFORM=offscreen`, incl. full and
   cancelled runs) and by the user on Linux/Wayland (incl. the in-app mount); never on
   Windows. On Wayland without GBM, QtWebEngine segfaulted on page load until `gui_main.py`

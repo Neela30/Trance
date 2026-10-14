@@ -217,7 +217,7 @@ class BuildJob:
             if sha256_of(target) != sha256_of(source):
                 raise BuildError(
                     f"The copy of {source.name} on {self.copy_dir} does not match the "
-                    "original -- the drive may be failing."
+                    "original; the drive may be failing."
                 )
             result.copied_files.append(target)
         result.copy_dir = self.copy_dir

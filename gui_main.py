@@ -42,7 +42,7 @@ def _run_gui(argv: list[str]) -> int:
     from PySide6.QtWidgets import QApplication
 
     from gui.main_window import MainWindow
-    from gui.theme import load_stylesheet
+    from gui.theme import apply_app_font, load_stylesheet
 
     parser = argparse.ArgumentParser(description="TRANCE desktop GUI.")
     parser.add_argument(
@@ -51,6 +51,7 @@ def _run_gui(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
+    apply_app_font(app)
     app.setStyleSheet(load_stylesheet())
     window = MainWindow(output_dir=args.output_dir)
     window.show()
