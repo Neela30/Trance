@@ -1203,7 +1203,7 @@ class TestPipelineIntegrity:
         result = _run_pipeline_with_mocks(tmp_path, output_dir)
 
         # Amcache mock timestamp is "2026-07-10T09:01:47+00:00" (install), UserAssist
-        # mock's later timestamp is "2026-07-14T14:15:22+00:00" (last run) -- both
+        # mock's later timestamp is "2026-07-14T14:15:22+00:00" (last opened) -- both
         # should read as "YYYY-MM-DD HH:MM:SS UTC", not the raw ISO +00:00 offset.
         assert "2026-07-10 09:01:47 UTC" in result.summary
         assert "2026-07-14 14:15:22 UTC" in result.summary

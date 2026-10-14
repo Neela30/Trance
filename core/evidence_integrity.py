@@ -15,7 +15,7 @@ record names but that is not there, a file no record covers, or a folder with no
 all is reported but does not block: those are incomplete copies or hand-built folders, not
 altered bytes -- and the modules report missing inputs themselves.
 
-Stdlib only, no Qt: also used by the GUI's evidence import (gui/evidence_import.py).
+Stdlib only, no Qt.
 """
 
 from __future__ import annotations

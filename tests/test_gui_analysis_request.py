@@ -66,7 +66,13 @@ def test_every_cli_only_option_reaches_module_kwargs(tmp_path):
 
 
 def test_request_round_trips_through_json(tmp_path):
-    request = _request(tmp_path, overrides={"tor_dir": "/t"}, vol3_extract_pid=5, mount_image=True)
+    request = _request(
+        tmp_path,
+        overrides={"tor_dir": "/t"},
+        vol3_extract_pid=5,
+        mount_image=True,
+        case_info={"examiner": "A. Perera"},
+    )
     assert AnalysisRequest.from_json(request.to_json()) == request
     assert json.loads(request.to_json())["case_name"] == "c1"
 

@@ -73,7 +73,8 @@ Requirements are split on purpose:
 - `requirements-dev.txt` — pytest, pytest-cov, mypy, ruff, black.
 - `requirements-gui.txt` — `PySide6` only. Kept separate so the CLI exes stay lean.
 
-Style: black + ruff, line length 100, target py310 (`pyproject.toml`). Several ruff rules are
+Style: black + ruff, line length 100, target py310 (`pyproject.toml`). No em dash ("—", `&mdash;`) in any text the
+user sees (report, GUI, console): use a comma, colon or semicolon; empty table cells print "n/a". Several ruff rules are
 intentionally ignored with written justification in `pyproject.toml` — read it before
 "fixing" them.
 
@@ -138,6 +139,64 @@ modules/<name>/__init__.py:
 **Report** (`report.py`): `PRESENTERS = {module_name: build_context}` from each module's own
 `report.py`. A module with status `ok` and a presenter gets a dedicated section; otherwise a
 generic artifact table (capped at 200 rows). Everything is deterministic, offline, no LLM.
+
+**Provenance and court-readiness** (added 2026-10-12, for reports that go to court):
+`core/provenance.py` adds `findings.json["provenance"]`. It holds the tool version
+(`core/version.py`, kept equal to pyproject by a test), the git commit and a "dirty" flag
+(both `None` in a packaged exe), the examiner host and library versions, the facts from
+`acquire_manifest.json` (`acquired_by` is written by `acquire_all.py` since then), and one
+`evidence_items` row per input file. Each row checks the file's SHA-256 against the
+acquisition-time `.sha256` sidecar or the folder's `hashes.sha256`. Hashes that modules
+already computed are reused (Module C's image hash, Module B's own manifest checks, incl.
+`details["ntfs_export_verification"]`), so multi-GB files are not read twice. The report
+shows "Evidence examined" and "Analysis provenance" sections, and prints `findings.json`'s
+SHA-256 in the footer and on every printed page. Print/PDF: `@page` A4 with margin boxes
+(case, page X of Y, findings hash), a light palette and all `<details>` opened. The GUI
+Report tab's "Save as PDF…" (`gui/pdf_export.py`) appends an `exported_pdf` entry to
+`custody.json`. Qt's `printToPdf` margins override the CSS ones, so keep the two equal.
+Report structure (2026-10-13): a "How to read this report" note; narrative sections carry an
+`Interpretation` chip (opinion, not fact); Methodology (per module that ran); Limitations
+(`report._limitations()`: failed/skipped steps, warnings, unverified evidence, no-target
+memory, dirty checkout, plus `METHOD_LIMITS`); Tool validation (the §10 numbers, hardcoded
+in the template -- update them when the evaluation is re-run); and a blank examiner
+declaration/signature block as the last page. The stamp reads "Forensic examination report /
+Becomes final when the examiner signs it". **Tor-only printing** (2026-10-13): the report prints only
+Tor-related data; findings.json keeps everything. Volatility tables show only firefox.exe/
+tor.exe PIDs (psscan/netscan/cmdline) and distinct files in `TorBrowser\Data` (filescan),
+hivelist is not printed (`module_c_memory/report._tor_rows`); empty memory sections collapse
+to one line; NTFS journal events are grouped per file (`module_b_disk/report._group_events`);
+verified evidence folders are one row (`report._evidence_rows`); the glossary lists only
+terms the report uses; no "Filtered as noise" or device/profile appendices; Module A drops
+the network/interface tables and the technical lines that repeat "What happened". Per-module summaries
+(Module A's key finding, B/C summary tiles) are folded into one "Summary of findings" (now at the start). nc-01:
+40 -> 16 pages, c3: 35 -> 20, c4: 38 -> 23.
+**Evidence-quality round** (2026-10-14, from the course's legal/forensics material): acquisition
+captures memory first and records `acquisition_order` and the target clock (`clock_status()`,
+w32tm); Module B's `clock_consistent` checks tor's last state write against the signed consensus
+window; `tests/test_reproducibility.py` runs the pipeline twice; cookie values and password-like
+fields print shortened (`report._mask`); case details (`core.config.CASE_INFO_FIELDS`: CLI
+`--examiner/--organisation/--reference/--requested-by/--purpose/--exhibit-prefix`, GUI "Case" tab)
+go to `findings.json["case"]["info"]`, page 1 and the declaration; evidence rows carry exhibit
+numbers (`<prefix>-01`). Each interpretation prints a "Based on:" line (Evidence Ordinance s.51):
+Module A `narrative["basis"]` (same findings the sentences used), Module B `daemon["basis"]`, Module C
+`basis`; `report._cite()` maps each source file to its exhibit number (file name if none). "How to read" names the report a
+conversion under ESPA s.5(2). `exhibit_list.html` (s.7 list of evidence, inline template
+`report.EXHIBIT_LIST_TEMPLATE`) is written beside report.html and recorded in custody.json; the GUI
+Report tab's "Exhibit list" button shows it, and "Save as PDF…" saves `<case>_exhibit_list.pdf`. `--s6-certificate` / the GUI Case tab's checkbox
+(`case_info["s6_certificate"]`) adds a DRAFT certificate under ESPA s.6 after the declaration,
+pre-filled with examiner, case, exhibit range, TRANCE version and hash results -- its wording has
+NOT been checked by a lawyer; the page says so.
+**Readability round** (2026-10-14): the report opens with the answer. Order: masthead, "Summary of
+findings" (key finding as the lead, one row per module with its status in plain words -- this
+replaced the Module status tiles), How to read, What happened / How reliable / What we could not
+determine, then per-layer detail ("What Windows recorded", "What was on the disk", "What was in
+memory"), Recommendations, and an "About this examination" appendix (Evidence examined -- hash
+under the file name --, provenance, Methodology, Limitations, Tool validation, Glossary) before
+the declaration. Labels and table headers are sans, sentence case; body font no longer lists
+Roboto (on one Linux box it resolved to Roboto Black and printed every paragraph bold).
+Volatility tables and the long journal lists are collapsed on screen (printed open, their
+"Show" labels hidden in print), offset columns are not printed (`report._is_offset_column`), and
+cells go through `report._format_cell`.
 
 ---
 
@@ -740,12 +799,10 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
   WinPMEM (+ its `.sha256`), optional verified copy to a tools drive. Disabled off Windows
   and in a frozen app; warns (Yes/No) when elevated. Never overwrites: refuses non-empty
   destination folders, files opened with `"x"`, removes only folders it created.
-- `evidence_import.py` (Qt-free) + `import_worker.py`: Analyse tab **Import from drive…**
-  copies a folder to `<output-dir>/imported-evidence/<name>_<UTC>/evidence/` (+
-  `import_record.json`), source opened read-only (`O_NOFOLLOW`), links skipped, each copy
-  re-hashed, then `verify_evidence`, then made read-only; says "safe to unplug". Case name
-  `imported-evidence` is rejected. Module B's `working_copy()` now makes its temp copy
-  writable, since `copytree` carries the read-only bit over (sqlite needs it writable).
+- The Analyse tab's **Import from drive…** (copy off the drive, re-hash, make read-only) was
+  removed on 2026-10-14 at the user's request: the evidence folder is picked with Browse… only.
+  Module B's `working_copy()` still makes its temp copy writable, since `copytree` carries a
+  read-only bit over (sqlite needs it writable) -- `tests/test_disk_evidence.py` covers it.
 - `advanced_inputs.LimitsPage` ("Limits" tab): `AnalysisRequest.memory_limit_mb` /
   `cpu_limit_seconds` → `core.safety.apply_resource_limits` at the top of the child
   (`analysis_runner.run`), Linux only.
@@ -758,16 +815,24 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
   Keep new logic Qt-free where possible; CI does not install PySide6.
 - `theme.qss` + `theme.py` — styling matching the report's CSS tokens (`--bg #14181b`,
   `--surface #1b2126`, `--accent #e2694f`, `--confirm #4fae84`, `--noise #c9a552`, …).
+  Type (2026-10-14, same rules as the report): one sans set on the QApplication by
+  `theme.apply_app_font()` (first installed of Segoe UI, Inter, Noto Sans, Cantarell, Ubuntu,
+  DejaVu Sans -- never Roboto), Georgia for page headings, `theme.mono_css()` only for the logs.
+  Labels are sentence case (no uppercase monospace eyebrows); `theme.status_text()` words a
+  case status. The Build tab scrolls like the Analyse tab.
 
 Qt gotchas already hit (don't rediscover them):
-- QSS has no `letter-spacing`, `text-transform`, or `transform` — done via `QFont`/`QPainter`
-  in `theme.py`.
+- QSS has no `letter-spacing`, `text-transform`, or `transform` — use `QFont`/`QPainter`.
 - `QTableWidgetItem` aliases `DisplayRole` and `EditRole` to one slot — use a subclass with
   `__lt__` (`_GeneratedItem`) for display-vs-sort-key splits.
 - `setCellWidget()` widgets don't move with `sortItems()` — use a delegate.
 - Row → data lookups must go through `item.data(UserRole)`, not a parallel Python list
   (breaks after sorting).
 - A read-only `QLineEdit` still takes focus by default (showed a permanent accent border).
+- A `font-family`/`font-size` on `QWidget` in QSS overrides every `setFont()` (the serif
+  headings rendered as small sans) -- `theme.qss` sets no font-family; the app font does.
+- Any QSS `padding` on a `QLabel` also indents its text ~3 px (hints sat right of labels).
+- A `QStackedWidget` is as tall as its tallest page, shown or not.
 - The GUI has been verified **offscreen** (`QT_QPA_PLATFORM=offscreen`, incl. full and
   cancelled runs) and by the user on Linux/Wayland (incl. the in-app mount); never on
   Windows. On Wayland without GBM, QtWebEngine segfaulted on page load until `gui_main.py`
@@ -1103,5 +1168,5 @@ version (two-drive workflow, one-drive caveat, build-on-Windows rule).
 
 Not done / open: no GPG/Authenticode signing of the built exe (the `.sha256` only protects
 against corruption, not a swap of both files); free-space check before WinPMEM; the GUI
-Build tool and Import flows were exercised offscreen and through their Qt-free logic, not
+Build tool flow was exercised offscreen and through its Qt-free logic, not
 clicked through by a person.

@@ -6,6 +6,7 @@ import pytest
 import acquire_all
 from core.exceptions import AcquisitionError
 from core.hashing import hash_bytes
+from core.version import __version__
 
 
 def test_acquire_refuses_on_non_windows(tmp_path, monkeypatch):
@@ -50,6 +51,9 @@ def test_acquire_writes_manifest_with_one_section_per_category(tmp_path, monkeyp
 
     written = json.loads((tmp_path / "acquire_manifest.json").read_text())
     assert written["registry"]["SYSTEM"]["path"] == "registry/SYSTEM_x"
+    assert written["acquired_by"]["tool"] == "trance-acquire"
+    assert written["acquired_by"]["version"] == __version__
+    assert written["acquired_by"]["hostname"]
 
 
 def test_acquire_writes_paths_relative_to_the_evidence_folder(tmp_path, monkeypatch):
@@ -218,3 +222,36 @@ def test_acquire_memory_hash_failure_does_not_stop_capture(tmp_path, monkeypatch
 
     assert full_image["status"] == "ok"
     assert full_image["winpmem_sha256"] is None
+
+
+def test_acquire_captures_memory_before_registry_and_disk(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(acquire_all, "is_admin", lambda: True)
+    monkeypatch.setattr(acquire_all, "_acquire_registry", lambda *a: calls.append("registry") or {})
+    monkeypatch.setattr(acquire_all, "_acquire_memory", lambda *a: calls.append("memory") or {})
+    monkeypatch.setattr(acquire_all, "_acquire_disk", lambda *a: calls.append("disk") or {})
+
+    manifest = acquire_all.acquire(tmp_path, include_ntfs=False)
+
+    assert calls == ["memory", "registry", "disk"]
+    assert manifest["acquisition_order"] == ["memory", "registry", "disk"]
+
+
+def test_clock_status_parses_w32tm_and_survives_its_failure(monkeypatch):
+    out = "Leap Indicator: 0(no warning)\nSource: time.windows.com,0x9\nLast Successful Sync Time: 10/9/2026 1:15:00 PM\n"
+    monkeypatch.setattr(
+        acquire_all.subprocess,
+        "run",
+        lambda *a, **k: acquire_all.subprocess.CompletedProcess(a, 0, stdout=out, stderr=""),
+    )
+    clock = acquire_all.clock_status()
+    assert clock["source"] == "time.windows.com,0x9"
+    assert clock["last_sync"] == "10/9/2026 1:15:00 PM"
+    assert clock["target_utc"]
+
+    def missing(*a, **k):
+        raise FileNotFoundError("w32tm")
+
+    monkeypatch.setattr(acquire_all.subprocess, "run", missing)
+    assert "w32tm" in acquire_all.clock_status()["error"]

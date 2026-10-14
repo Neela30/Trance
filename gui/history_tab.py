@@ -27,11 +27,12 @@ from PySide6.QtWidgets import (
 from gui.history import CaseSummary, format_relative_time, scan_history
 from gui.theme import (
     COLORS,
-    FONT_MONO,
     apply_eyebrow_style,
     apply_heading_style,
     status_bg_color,
     status_color,
+    status_text,
+    ui_family,
 )
 
 _COLUMNS = ("Case", "Generated", "Status", "Artifacts")
@@ -82,9 +83,9 @@ class _StatusChipDelegate(QStyledItemDelegate):
             bar = QRect(option.rect.left(), option.rect.top(), 3, option.rect.height())
             painter.fillRect(bar, QColor(COLORS["accent"]))
 
-        font = QFont(FONT_MONO)
-        font.setPointSize(9)
-        font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 106)
+        font = QFont(ui_family())
+        font.setPointSizeF(9.5)
+        font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
         metrics = painter.fontMetrics()
         pad_x, pad_y = 10, 4
@@ -110,7 +111,7 @@ class HistoryTab(QWidget):
         super().__init__(parent)
         self._output_dir = output_dir
 
-        eyebrow = QLabel("Trance · Case Archive", self)
+        eyebrow = QLabel("Trance", self)
         apply_eyebrow_style(eyebrow)
         heading = QLabel("Past analyses", self)
         apply_heading_style(heading)
@@ -127,6 +128,14 @@ class HistoryTab(QWidget):
             _CASE_COLUMN, QHeaderView.ResizeMode.Stretch
         )
         self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.horizontalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        for column in (_GENERATED_COLUMN, _STATUS_COLUMN, _ARTIFACTS_COLUMN):
+            self._table.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.ResizeMode.ResizeToContents
+            )
+        self._table.setShowGrid(False)
         self._table.verticalHeader().setVisible(False)
         self._table.setItemDelegateForColumn(_STATUS_COLUMN, _StatusChipDelegate(self._table))
         self._table.doubleClicked.connect(self._open_selected_report)
@@ -151,9 +160,11 @@ class HistoryTab(QWidget):
         button_row.addStretch(1)
 
         self._footer_label = QLabel("", self)
-        self._footer_label.setStyleSheet("color: #8b969c; font-size: 11.5px;")
+        self._footer_label.setStyleSheet("color: #8b969c;")
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 28, 32, 20)
+        layout.setSpacing(10)
         layout.addWidget(eyebrow)
         layout.addWidget(heading)
         layout.addSpacing(12)
@@ -193,7 +204,7 @@ class HistoryTab(QWidget):
     @staticmethod
     def _status_item(summary: CaseSummary) -> QTableWidgetItem:
         item = QTableWidgetItem()
-        item.setData(Qt.ItemDataRole.DisplayRole, summary.overall_status.upper())
+        item.setData(Qt.ItemDataRole.DisplayRole, status_text(summary.overall_status))
         item.setData(Qt.ItemDataRole.UserRole, summary.overall_status)
         return item
 

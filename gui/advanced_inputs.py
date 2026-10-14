@@ -2,6 +2,7 @@
 
   EvidenceSummary  the "Evidence found" checklist -- what this run will analyse
   OptionsPanel     one "More options" toggle over a tabbed card:
+                     Case    examiner, case number, purpose, exhibit prefix (report)
                      Target  host / username (the onion lives on the main card)
                      Inputs  each auto-discovered input, overridable (main.py's
                              --system/--ntuser/--amcache/--dump/--disk-profile/
@@ -40,9 +41,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.config import CASE_INFO_FIELDS
 from core.safety import default_limits, limits_supported
 from gui.analysis_request import INPUT_SPECS, SummaryRow, display_path
-from gui.theme import COLORS, apply_eyebrow_style
+from gui.theme import COLORS
 
 # Breathing room, in px -- used consistently across the tab.
 FIELD_GAP = 8  # label -> its field
@@ -65,13 +67,13 @@ DOT_COLORS = {"found": COLORS["confirm"], "missing": COLORS["ink_muted"], "off":
 def help_label(text: str, parent: QWidget) -> QLabel:
     label = QLabel(text, parent)
     label.setWordWrap(True)
-    label.setStyleSheet(f"color: {COLORS['ink_muted']}; font-size: 12px; padding-top: 2px;")
+    label.setStyleSheet(f"color: {COLORS['ink_muted']}; font-size: 12.5px;")
     return label
 
 
 def field_label(text: str, parent: QWidget) -> QLabel:
     label = QLabel(text, parent)
-    apply_eyebrow_style(label)
+    label.setStyleSheet(f"color: {COLORS['ink']}; font-weight: 600;")
     return label
 
 
@@ -253,6 +255,54 @@ class _Page(QWidget):
         self.body.addStretch(1)
 
 
+CASE_PLACEHOLDERS = {
+    "examiner": "e.g. A. Perera",
+    "organisation": "e.g. CID Cyber Crimes Unit",
+    "reference": "e.g. CCD/2026/0142",
+    "requested_by": "e.g. OIC, Colombo Fort Police",
+    "purpose": "e.g. Establish whether Tor Browser was used on exhibit E-01 and which sites",
+    "exhibit_prefix": "e.g. E (exhibits become E-01, E-02, …)",
+}
+
+
+class CasePage(_Page):
+    """Who examined what, and why -- printed on the report's first page and declaration."""
+
+    def __init__(self, parent=None):
+        super().__init__(
+            "Printed on the report's first page and in the examiner's declaration. "
+            "All optional.",
+            parent,
+        )
+        self.fields: dict[str, QLineEdit] = {}
+        for key, label, _flag in CASE_INFO_FIELDS:
+            line = QLineEdit(self)
+            line.setPlaceholderText(CASE_PLACEHOLDERS.get(key, ""))
+            self.fields[key] = line
+            self.body.addLayout(labelled(field_label(label, self), line, None, self))
+        self.s6_certificate = QCheckBox(
+            "Add a draft certificate under section 6 of the Evidence (Special Provisions) Act",
+            self,
+        )
+        self.body.addWidget(self.s6_certificate)
+        self.body.addWidget(
+            help_label(
+                "A template page after the declaration. Its wording must be confirmed by an "
+                "attorney-at-law before use.",
+                self,
+            )
+        )
+        self.finish()
+
+    def values(self) -> dict[str, str]:
+        values = {
+            key: line.text().strip() for key, line in self.fields.items() if line.text().strip()
+        }
+        if self.s6_certificate.isChecked():
+            values["s6_certificate"] = "yes"
+        return values
+
+
 class TargetPage(_Page):
     def __init__(self, parent=None):
         super().__init__(
@@ -265,9 +315,9 @@ class TargetPage(_Page):
         self.username = QLineEdit(self)
         self.username.setPlaceholderText("e.g. admin")
         self.cookie_names = QLineEdit(self)
-        self.cookie_names.setPlaceholderText("e.g. sid, csrf_token — blank uses the built-in names")
+        self.cookie_names.setPlaceholderText("e.g. sid, csrf_token (blank uses the built-in names)")
         self.report_timezone = QLineEdit(self)
-        self.report_timezone.setPlaceholderText("e.g. Asia/Colombo — blank uses this computer's")
+        self.report_timezone.setPlaceholderText("e.g. Asia/Colombo (blank uses this computer's)")
         self.body.addLayout(
             labelled(
                 field_label("Host and port", self),
@@ -311,7 +361,7 @@ class InputsPage(_Page):
     def __init__(self, parent=None):
         super().__init__(
             "These were found in the evidence folder. Change one to analyse a different "
-            "file — for example a Tor data folder from a mounted disk.",
+            "file, for example a Tor data folder from a mounted disk.",
             parent,
         )
         self._evidence_dir: str | None = None
@@ -437,7 +487,7 @@ class DiskPage(_Page):
             option(
                 self.mount_box,
                 (
-                    "Opened read-only — nothing on the image can change. Your computer asks "
+                    "Opened read-only, so nothing on the image can change. Your computer asks "
                     "for your password once."
                     if mount_supported
                     else mount_reason
@@ -504,9 +554,7 @@ class MemoryPage(_Page):
             labelled(field_label("Memory image type", self), self.source_type, None, self)
         )
 
-        self.vol3 = PathPicker(
-            "Not set — the structural pass is skipped", is_dir=False, parent=self
-        )
+        self.vol3 = PathPicker("Not set: the structural pass is skipped", is_dir=False, parent=self)
         self.vol3.set_path(shutil.which("vol") or "")
         self.body.addLayout(
             labelled(
@@ -596,7 +644,7 @@ class LimitsPage(_Page):
 
 
 class OptionsPanel(QWidget):
-    """'More options' toggle + a tabbed card with the four pages."""
+    """'More options' toggle + a tabbed card of option pages."""
 
     changed = Signal()
 
@@ -605,11 +653,12 @@ class OptionsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(FIELD_GAP)
-        self._toggle = QPushButton("+ More options", self)
+        self._toggle = QPushButton("More options", self)
         self._toggle.setProperty("class", "link")
         self._toggle.clicked.connect(lambda: self.set_expanded(not self._card.isVisible()))
         layout.addWidget(self._toggle, alignment=Qt.AlignmentFlag.AlignLeft)
 
+        self.case = CasePage(self)
         self.target = TargetPage(self)
         self.inputs = InputsPage(self)
         self.disk = DiskPage(mount_supported, mount_reason, self)
@@ -621,6 +670,7 @@ class OptionsPanel(QWidget):
         # The tab pane is the card itself (styled in theme.qss) -- no frame inside a frame.
         self._card = QTabWidget(self)
         self._card.setObjectName("optionsTabs")
+        self._card.addTab(self.case, "Case")
         self._card.addTab(self.target, "Target")
         self._card.addTab(self.inputs, "Inputs")
         self._card.addTab(self.disk, "Disk image")
@@ -632,4 +682,4 @@ class OptionsPanel(QWidget):
 
     def set_expanded(self, expanded: bool) -> None:
         self._card.setVisible(expanded)
-        self._toggle.setText("− Fewer options" if expanded else "+ More options")
+        self._toggle.setText("Fewer options" if expanded else "More options")

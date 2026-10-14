@@ -141,7 +141,7 @@ class TestDescribeInstallLocation:
         assert folder == r"E:\Tor Browser\Browser"
         assert note == (
             "E: is not the main system drive and may be a USB drive or a second "
-            "disk — files there may not remain on this machine."
+            "disk, so files there may not remain on this machine."
         )
 
     def test_no_device_match_falls_back_to_generic_wording(self):
@@ -151,7 +151,7 @@ class TestDescribeInstallLocation:
         assert folder == r"E:\Tor Browser\Browser"
         assert note == (
             "E: is not the main system drive and may be a USB drive or a second "
-            "disk — files there may not remain on this machine."
+            "disk, so files there may not remain on this machine."
         )
 
 
@@ -381,7 +381,7 @@ class TestBuildNarrativeEndToEnd:
             ),
             (
                 "Tor Browser was set up in E:\\Tor Browser. E: is not the main system "
-                "drive and may be a USB drive or a second disk — files there may not "
+                "drive and may be a USB drive or a second disk, so files there may not "
                 "remain on this machine."
             ),
             (
@@ -433,7 +433,7 @@ class TestBuildNarrativeEndToEnd:
 
         assert (
             "The installer window was visible on screen for about 48 seconds in total, "
-            "across 2 separate occasions — this is a running total Windows keeps for "
+            "across 2 separate occasions; this is a running total Windows keeps for "
             "this program, not a single-visit duration, so it may be longer than just "
             "the most recent time it was open."
         ) in result["timeline"]
@@ -725,9 +725,9 @@ class TestDescribeNotDetermined:
         bullets = describe_not_determined(None, multiple_launches=True)
         assert any("dates of earlier uses" in b for b in bullets)
 
-    def test_always_points_to_modules_b_and_c_for_browsing_content(self):
-        bullets = describe_not_determined("2026-09-01T00:00:00+00:00", multiple_launches=False)
-        assert any("disk and memory sections" in b for b in bullets)
+    def test_nothing_unknown_gives_no_bullets(self):
+        # Browsing content is covered once in the report's Limitations, not repeated here.
+        assert describe_not_determined("2026-09-01T00:00:00+00:00", multiple_launches=False) == []
 
 
 class TestBuildKeyFinding:

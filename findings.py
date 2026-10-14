@@ -3,14 +3,15 @@
 Shape:
     {
       "schema_version": 1,
-      "case": {"name", "output_dir", "evidence_dir"},
+      "case": {"name", "output_dir", "evidence_dir", "info"},
       "generated_at": "<UTC ISO-8601>",
       "evidence_integrity": {"status", "message", "checked", "verified", "mismatched",
                              "missing", "invalid", "unhashed"}  (core.evidence_integrity),
       "modules": {
         "<module>": {"status", "message", "artifact_count", "warnings", "details": {...module-specific...}}
       },
-      "artifacts": [ ...every core.schema.Artifact from every module, flattened... ]
+      "artifacts": [ ...every core.schema.Artifact from every module, flattened... ],
+      "provenance": {...}   # added by main.run_pipeline -- see core/provenance.py
     }
 
 `artifacts` is the cross-module, uniform list (each entry carries its `module`), so
@@ -43,6 +44,7 @@ def build_findings(
             "name": config.case_name,
             "output_dir": str(config.output_dir),
             "evidence_dir": str(config.evidence_dir) if config.evidence_dir else None,
+            "info": dict(config.case_info),
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
         # Checked before any module ran; "failed" means no module parsed the evidence.

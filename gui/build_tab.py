@@ -16,6 +16,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -37,7 +39,7 @@ from gui.build_inputs import (
 )
 from gui.build_runner import BuildJob
 from gui.build_worker import BuildWorker
-from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style
+from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style, mono_css
 
 FORM_MAX_WIDTH = 720
 RUN_BUTTON_WIDTH = 240
@@ -70,10 +72,19 @@ class BuildTab(QWidget):
         content_layout.addWidget(self._build_log_box())
         content_layout.addStretch(1)
 
-        outer = QHBoxLayout(self)
-        outer.addStretch(1)
-        outer.addWidget(content)
-        outer.addStretch(1)
+        centered = QWidget(self)
+        row = QHBoxLayout(centered)
+        row.setContentsMargins(24, 0, 24, 0)
+        row.addStretch(1)
+        row.addWidget(content, 100)
+        row.addStretch(1)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(centered)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
 
         if not self._supported:
             self._build_button.setEnabled(False)
@@ -138,10 +149,10 @@ class BuildTab(QWidget):
         self._output_picker = PathPicker("Choose a folder", is_dir=True, parent=self)
         self._output_picker.set_path(str(DEFAULT_BUILDS_DIR))
         self._copy_picker = PathPicker(
-            "Not set — the build stays in the save folder", is_dir=True, parent=self
+            "Not set: the build stays in the save folder", is_dir=True, parent=self
         )
         self._winpmem_picker = PathPicker(
-            "Not set — memory imaging needs one on the target",
+            "Not set: memory imaging needs one on the target",
             is_dir=False,
             file_filter=EXE_FILTER,
             parent=self,
@@ -221,8 +232,8 @@ class BuildTab(QWidget):
         self._log_view.setReadOnly(True)
         self._log_view.setMaximumBlockCount(2000)
         self._log_view.setStyleSheet(
-            "QPlainTextEdit { font-family: 'Cascadia Code', Consolas, monospace; "
-            "font-size: 11.5px; background: #14181b; border: none; color: #8b969c; }"
+            f"QPlainTextEdit {{ {mono_css(12)} background: #14181b; border: none; "
+            "color: #8b969c; }"
         )
 
         layout = QVBoxLayout()

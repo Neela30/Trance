@@ -22,16 +22,18 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
-from core.config import TranceConfig
+from core.config import CASE_INFO_FIELDS, TranceConfig
 from core.custody_log import CustodyEntry, CustodyLog
 from core.evidence_integrity import STATUS_FAILED, evidence_inputs, verify_evidence
 from core.hashing import hash_file
+from core.provenance import build_provenance
 from core.safety import UnsafeEnvironmentError, refuse_root
 from core.schema import ModuleResult
 from findings import build_findings, write_findings
-from report import write_report
+from report import EXHIBIT_LIST_FILENAME, write_report
 
 MODULES = ("module_a_registry", "module_b_disk", "module_c_memory")
 CUSTODY_FILENAME = "custody.json"
@@ -109,7 +111,7 @@ def _run_modules(
 
     def finished(name: str, result: ModuleResult, step: int) -> None:
         by_name[name] = result
-        suffix = f" — {result.message}" if result.message else ""
+        suffix = f": {result.message}" if result.message else ""
         print(f"[*] {name}: {result.status} ({len(result.artifacts)} artifacts){suffix}")
         if progress_cb:
             progress_cb(name, step, total_steps)
@@ -126,6 +128,17 @@ def _run_modules(
             for step, future in enumerate(as_completed(futures), start=1):
                 finished(futures[future], future.result(), step)
     return [by_name[name] for name in MODULES]
+
+
+def case_info_from_args(args: argparse.Namespace) -> dict[str, str]:
+    info = {
+        key: value.strip()
+        for key, _label, _flag in CASE_INFO_FIELDS
+        if (value := getattr(args, f"case_{key}", None)) and value.strip()
+    }
+    if getattr(args, "s6_certificate", False):
+        info["s6_certificate"] = "yes"
+    return info
 
 
 def run_pipeline(
@@ -146,8 +159,9 @@ def run_pipeline(
     """
     refuse_root()
     total_steps = len(MODULES) + 1
+    started_at = datetime.now(timezone.utc).isoformat()
     integrity = verify_evidence(config.evidence_dir, evidence_inputs(module_kwargs))
-    print(f"[*] evidence integrity: {integrity['status']} — {integrity['message']}")
+    print(f"[*] evidence integrity: {integrity['status']} ({integrity['message']})")
     if integrity["status"] == STATUS_FAILED:
         for item in integrity["mismatched"]:
             print(f"[!] hash mismatch: {item['path']}", file=sys.stderr)
@@ -168,8 +182,17 @@ def run_pipeline(
         results = _run_modules(config, module_kwargs, progress_cb, total_steps)
 
     findings = build_findings(config, results, integrity=integrity)
+    findings["provenance"] = build_provenance(
+        module_kwargs, results, config.evidence_dir, started_at
+    )
     findings_path = write_findings(findings, config.output_dir)
-    report_path = write_report(findings, config.output_dir, config.report_timezone)
+    # The report prints findings.json's hash so a printed copy can be matched to the file.
+    report_path = write_report(
+        findings,
+        config.output_dir,
+        config.report_timezone,
+        findings_sha256=hash_file(findings_path),
+    )
 
     custody = CustodyLog(config.output_dir / CUSTODY_FILENAME)
     disk_result = next((r for r in results if r.module == "module_b_disk"), None)
@@ -234,7 +257,8 @@ def run_pipeline(
                 notes=f"integrity_verified={dump['integrity_verified']}",
             )
         )
-    for path in (findings_path, report_path):
+    exhibit_list = report_path.with_name(EXHIBIT_LIST_FILENAME)
+    for path in (findings_path, report_path, *([exhibit_list] if exhibit_list.is_file() else [])):
         custody.record(
             CustodyEntry(artifact_path=str(path), sha256=hash_file(path), action="generated")
         )
@@ -271,6 +295,16 @@ def main(argv: list[str] | None = None) -> int:
         "--report-timezone",
         help="IANA zone name (e.g. Asia/Colombo) the report's plain-English section shows "
         "local times in, alongside UTC. Omit to auto-detect this machine's own timezone",
+    )
+
+    case = parser.add_argument_group("case details (printed on the report)")
+    for key, label, flag in CASE_INFO_FIELDS:
+        case.add_argument(flag, dest=f"case_{key}", help=label)
+    case.add_argument(
+        "--s6-certificate",
+        action="store_true",
+        help="Add a draft certificate under s.6 of the Evidence (Special Provisions) Act "
+        "after the declaration (wording to be confirmed by an attorney-at-law)",
     )
 
     registry = parser.add_argument_group("module_a_registry")
@@ -349,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("process", "full-memory"),
         default="process",
         help="Which acquisition path produced --dump: dumper.py's live-process dump, or "
-        "winpmem_acquire.py's full physical-memory image. Provenance/labeling only — this "
+        "winpmem_acquire.py's full physical-memory image. Provenance/labeling only: this "
         "does not run either acquisition tool (both need a separate elevated Windows "
         "session); it only tells the analyzer which one already produced --dump (default: %(default)s)",
     )
@@ -407,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         evidence_dir=args.evidence_dir,
         verbose=args.verbose,
         report_timezone=args.report_timezone,
+        case_info=case_info_from_args(args),
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

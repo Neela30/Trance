@@ -6,15 +6,12 @@ is reused as-is, no separate GUI-side path-discovery logic.
 
 Run order when a disk image is to be mounted: MountSession (pkexec helper) mounts it,
 the analysis runs with the mountpoint as disk_root, and the helper unmounts afterwards
--- on success, failure, cancel, or the app closing.
-
-"Import from drive..." copies an evidence folder off removable media into case storage
-(gui/evidence_import.py: hash-verified, made read-only) and then analyses that copy, so the
-untrusted drive can be unplugged before any parsing starts."""
+-- on success, failure, cancel, or the app closing."""
 
 from __future__ import annotations
 
 import shutil
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -30,7 +27,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -51,11 +47,17 @@ from gui.analysis_request import (
     summary_rows,
     validate,
 )
-from gui.evidence_import import store_root
-from gui.history import scan_history
-from gui.import_worker import ImportWorker
+from gui.history import format_relative_time, scan_history
 from gui.processes import AnalysisProcess, MountSession, mount_support
-from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style, repolish
+from gui.theme import (
+    COLORS,
+    StatusIndicator,
+    apply_eyebrow_style,
+    apply_heading_style,
+    mono_css,
+    repolish,
+    status_text,
+)
 
 FORM_MAX_WIDTH = 720
 RUN_BUTTON_WIDTH = 240
@@ -107,7 +109,6 @@ class AnalyseTab(QWidget):
         self._request: AnalysisRequest | None = None
         self._case_dir_existed = False
         self._finish_state: tuple | None = None  # set when the analysis ends, shown after unmount
-        self._import: ImportWorker | None = None
 
         self._analysis = AnalysisProcess(self)
         self._analysis.progress.connect(self._on_progress)
@@ -144,10 +145,10 @@ class AnalyseTab(QWidget):
 
         self._recent_cases_box = self._build_recent_cases_box()
         self._log_box = self._build_log_box()
-        self._bottom_stack = QStackedWidget(self)
-        self._bottom_stack.addWidget(self._recent_cases_box)
-        self._bottom_stack.addWidget(self._log_box)
-        content_layout.addWidget(self._bottom_stack)
+        # Shown one at a time; not a QStackedWidget, which is always as tall as the log.
+        self._log_box.setVisible(False)
+        content_layout.addWidget(self._recent_cases_box)
+        content_layout.addWidget(self._log_box)
         content_layout.addStretch(1)
 
         centered = QWidget(self)
@@ -205,23 +206,15 @@ class AnalyseTab(QWidget):
         self._folder_field.folder_dropped.connect(self._set_evidence_folder)
         browse_button = QPushButton("Browse…", self)
         browse_button.clicked.connect(self._browse)
-        self._import_button = QPushButton("Import from drive…", self)
-        self._import_button.setToolTip(
-            "Copy the evidence folder off the drive into case storage, check its hashes and "
-            "make the copy read-only -- then the drive can be unplugged before analysis."
-        )
-        self._import_button.clicked.connect(self._import_from_drive)
         folder_row = QHBoxLayout()
         folder_row.setSpacing(FIELD_GAP)
         folder_row.addWidget(self._folder_field, 1)
         folder_row.addWidget(browse_button)
-        folder_row.addWidget(self._import_button)
         layout.addLayout(
             labelled(
                 field_label("Evidence folder", self),
                 folder_row,
-                "The folder trance-acquire created on the suspect machine. Prefer Import "
-                "from drive: the analysis then never reads the evidence drive itself.",
+                "The folder trance-acquire created on the suspect machine.",
                 self,
             )
         )
@@ -238,7 +231,7 @@ class AnalyseTab(QWidget):
         )
 
         self._onion_field = QLineEdit(self)
-        self._onion_field.setPlaceholderText("e.g. sitename.onion — optional")
+        self._onion_field.setPlaceholderText("e.g. sitename.onion (optional)")
         layout.addLayout(
             labelled(
                 field_label("Site under investigation", self),
@@ -283,6 +276,7 @@ class AnalyseTab(QWidget):
     def _build_recent_cases_box(self) -> QGroupBox:
         box, self._recent_cases_layout = card(self)
         self._recent_cases_layout.setSpacing(10)
+        self._recent_cases_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._recent_cases_layout.addWidget(field_label("Recent cases", self))
         self._recent_cases_empty_label = QLabel("No analyses run yet.", self)
         self._recent_cases_empty_label.setStyleSheet("color: #8b969c;")
@@ -298,9 +292,8 @@ class AnalyseTab(QWidget):
         self._log_view.setMaximumBlockCount(500)
         self._log_view.setMinimumHeight(220)
         self._log_view.setStyleSheet(
-            "QPlainTextEdit { font-family: 'Cascadia Code', Consolas, monospace; "
-            "font-size: 11.5px; background: #14181b; border: none; color: #8b969c; "
-            "padding: 8px; }"
+            f"QPlainTextEdit {{ {mono_css(12)} background: #14181b; border: none; "
+            "color: #8b969c; padding: 8px; }"
         )
         layout.addWidget(self._log_view)
         return box
@@ -350,11 +343,12 @@ class AnalyseTab(QWidget):
 
         for summary in recent:
             row = QLabel(
-                f"{summary.case_name} — {summary.overall_status} — "
-                f"{summary.generated_at or 'unknown time'}",
+                f"<b>{escape(summary.case_name)}</b>"
+                f"<span style='color:{COLORS['ink_muted']}'> · {status_text(summary.overall_status)}"
+                f" · {format_relative_time(summary.generated_at)}</span>",
                 self,
             )
-            row.setStyleSheet("font-family: 'Cascadia Code', Consolas, monospace; font-size: 12px;")
+            row.setToolTip(summary.generated_at or "")
             self._recent_cases_layout.addWidget(row)
 
     def _build_request(self) -> AnalysisRequest:
@@ -369,17 +363,13 @@ class AnalyseTab(QWidget):
             username=self._username_field.text().strip(),
             cookie_names=self._cookie_names_field.text().strip(),
             report_timezone=self._report_timezone_field.text().strip(),
+            case_info=self._options.case.values(),
             **self._options.disk.values(),
             **self._options.memory.values(),
             **self._options.limits.values(),
         )
 
     def _run(self) -> None:
-        if self._import is not None:
-            self._run_button.setEnabled(False)
-            apply_eyebrow_style(self._status_label, "Cancelling import…")
-            self._import.cancel()
-            return
         if self._analysis.is_running() or self._mount.is_active:
             self._cancel()
             return
@@ -422,10 +412,7 @@ class AnalyseTab(QWidget):
             self._mount.unmount()
 
     def shutdown(self) -> None:
-        """Called when the window closes: stop an import or the analysis, then unmount."""
-        if self._import is not None:
-            self._import.cancel()
-            self._import.wait(30000)
+        """Called when the window closes: stop the analysis, then unmount."""
         self._analysis.kill_and_wait()
         self._mount.unmount_and_wait()
 
@@ -516,79 +503,6 @@ class AnalyseTab(QWidget):
         self._log_view.appendPlainText(f"[*] cancelled.{removed}")
         self._reset_ui("skipped", "Cancelled", f"Cancelled.{removed}")
 
-    # -- evidence import ---------------------------------------------------------
-
-    def _import_from_drive(self) -> None:
-        if self._import is not None or self._analysis.is_running() or self._mount.is_active:
-            return
-        source = QFileDialog.getExistingDirectory(
-            self, "Select the evidence folder on the drive (trance-acquire output)"
-        )
-        if not source:
-            return
-        store = store_root(self._output_dir)
-        self._import = ImportWorker(Path(source), store, self)
-        self._import.progress.connect(self._on_import_progress)
-        self._import.finished_ok.connect(self._on_import_finished)
-        self._import.failed.connect(self._on_import_failed)
-        self._import.cancelled.connect(self._on_import_cancelled)
-        self._set_running_ui()
-        self._progress_timer.stop()
-        self._run_button.setText("Cancel import")
-        self._import_button.setEnabled(False)
-        self._log_view.appendPlainText(f"[*] importing {source} into {store} (read only)")
-        self._import.start()
-
-    def _on_import_progress(self, name: str, done: int, total: int) -> None:
-        if total:
-            self._progress.setValue(min(99, int(done * 100 / total)))
-        shown = f"{done / 2**30:.2f} of {total / 2**30:.2f} GB" if total >= 2**30 else ""
-        apply_eyebrow_style(self._status_label, f"Copying {name} {shown}".strip())
-
-    def _import_ended(self) -> None:
-        self._import = None
-        self._import_button.setEnabled(True)
-
-    def _on_import_finished(self, result) -> None:
-        self._import_ended()
-        self._progress.setValue(100)
-        integrity = result.integrity
-        self._log_view.appendPlainText(
-            f"[*] copied {result.files_copied} file(s), {result.bytes_copied / 2**20:.1f} MB "
-            f"to {result.evidence_dir} (read-only)"
-        )
-        for entry in result.skipped:
-            self._log_view.appendPlainText(f"[!] not copied: {entry}")
-        self._log_view.appendPlainText(f"[*] evidence integrity: {integrity.get('message')}")
-        self._set_evidence_folder(str(result.evidence_dir))
-        unplug = "The copy is complete -- it is now safe to unplug the evidence drive."
-        if result.integrity_failed:
-            self._reset_ui("error", "Integrity failed", "Imported; hash check FAILED.")
-            QMessageBox.critical(
-                self,
-                "Evidence integrity check failed",
-                f"{integrity.get('message')}\n\n{unplug}\n\nDo not analyse this copy; "
-                "take a fresh copy from the original acquisition media.",
-            )
-            return
-        self._reset_ui("ok", "Imported", "Imported and verified. Safe to unplug the drive.")
-        QMessageBox.information(
-            self,
-            "Evidence imported",
-            f"Copied {result.files_copied} file(s) into\n{result.evidence_dir}\nand made the "
-            f"copy read-only.\n\n{integrity.get('message')}\n\n{unplug}",
-        )
-
-    def _on_import_failed(self, message: str) -> None:
-        self._import_ended()
-        self._reset_ui("error", "Failed", "Import failed. Nothing was kept.")
-        QMessageBox.critical(self, "Import failed", message)
-
-    def _on_import_cancelled(self) -> None:
-        self._import_ended()
-        self._log_view.appendPlainText("[*] import cancelled; the partial copy was removed.")
-        self._reset_ui("skipped", "Cancelled", "Import cancelled. Nothing was kept.")
-
     # -- ui state ----------------------------------------------------------------
 
     def _set_running_ui(self) -> None:
@@ -603,7 +517,8 @@ class AnalyseTab(QWidget):
         self._stamp.set_status("skipped")
         self._stamp.set_text("Running")
         self._log_view.clear()
-        self._bottom_stack.setCurrentWidget(self._log_box)
+        self._recent_cases_box.setVisible(False)
+        self._log_box.setVisible(True)
 
     def _reset_ui(self, status: str, stamp: str, message: str) -> None:
         self._progress_timer.stop()
@@ -616,7 +531,8 @@ class AnalyseTab(QWidget):
         self._stamp.set_text(stamp)
         apply_eyebrow_style(self._status_label, message)
         if status == "ok":
-            self._bottom_stack.setCurrentWidget(self._recent_cases_box)
+            self._log_box.setVisible(False)
+            self._recent_cases_box.setVisible(True)
 
     def _animate_progress(self) -> None:
         """Eases the displayed value toward the last confirmed checkpoint instead of

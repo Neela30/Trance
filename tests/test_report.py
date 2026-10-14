@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
+import report
 from core.config import TranceConfig
 from core.schema import ModuleResult
 from findings import build_findings
@@ -8,9 +9,9 @@ from report import _format_timestamp, _resolve_local_tz, _wrap_path, render_repo
 
 
 class TestFormatTimestamp:
-    def test_none_and_empty_become_dash(self):
-        assert _format_timestamp(None) == "—"
-        assert _format_timestamp("") == "—"
+    def test_none_and_empty_become_n_a(self):
+        assert _format_timestamp(None) == "n/a"
+        assert _format_timestamp("") == "n/a"
 
     def test_iso_string_with_microseconds_and_offset_is_simplified(self):
         assert _format_timestamp("2026-09-03T04:41:53.211000+00:00") == "2026-09-03 04:41:53 UTC"
@@ -39,9 +40,9 @@ class TestWrapPath:
         assert "<script>" not in result
         assert "&lt;script&gt;" in result
 
-    def test_none_and_empty_become_a_dash(self):
-        assert _wrap_path(None) == "—"
-        assert _wrap_path("") == "—"
+    def test_none_and_empty_become_n_a(self):
+        assert _wrap_path(None) == "n/a"
+        assert _wrap_path("") == "n/a"
 
     def test_result_is_marked_safe_for_the_template(self):
         from markupsafe import Markup
@@ -109,6 +110,17 @@ def test_render_report_includes_glossary_for_a_module_a_case(tmp_path):
     assert "NTUSER.DAT" in html
 
 
+def test_key_finding_is_only_in_the_opening_summary(tmp_path):
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    findings = build_findings(config, [_module_a_result_with_one_launch()])
+
+    html = render_report(findings, local_tz="Asia/Colombo")
+
+    key = "The evidence shows Tor Browser was installed"
+    assert html.count(key) == 1
+    assert html.index("Summary of findings") < html.index(key) < html.index("What happened")
+
+
 def test_render_report_narrative_uses_the_given_timezone(tmp_path):
     config = TranceConfig(case_name="case", output_dir=tmp_path)
     findings = build_findings(config, [_module_a_result_with_one_launch()])
@@ -116,7 +128,8 @@ def test_render_report_narrative_uses_the_given_timezone(tmp_path):
     html = render_report(findings, local_tz="Asia/Colombo")
 
     assert "What happened" in html
-    assert "10:11 AM Asia/Colombo" in html
+    # Plain-English timeline: local time first, UTC in brackets.
+    assert "10:11 AM (04:41 UTC)" in html
 
 
 def _module_a_result_partial_status() -> ModuleResult:
@@ -263,3 +276,158 @@ def test_no_notes_without_both_modules():
 
     assert _relate_processes_to_registry(None, {"volatility3": {}}) == []
     assert _relate_processes_to_registry({"component_timeline": []}, None) == []
+
+
+def _court_findings(**modules):
+    return {
+        "schema_version": 1,
+        "case": {"name": "c1", "output_dir": "out", "evidence_dir": None},
+        "generated_at": "2026-10-13T00:00:00+00:00",
+        "modules": modules,
+        "artifacts": [],
+    }
+
+
+def test_limitations_name_failed_steps_unverified_evidence_and_method_limits():
+    findings = _court_findings(
+        module_a_registry={
+            "status": "partial",
+            "message": None,
+            "details": {},
+            "warnings": [{"artifact_type": "ShellBags", "source": "UsrClass", "reason": "boom"}],
+        },
+        module_b_disk={"status": "skipped", "message": "no disk evidence supplied", "details": {}},
+        module_c_memory={
+            "status": "ok",
+            "message": None,
+            "details": {"host_anchoring": {"no_target": True}},
+        },
+    )
+    findings["provenance"] = {
+        "tool": {"git_dirty": True},
+        "acquisition": None,
+        "evidence_items": [
+            {"label": "SYSTEM registry hive", "path": "S", "status": "unrecorded"},
+            {"label": "Memory image", "path": "M", "status": "MISMATCH"},
+        ],
+    }
+    notes = " ".join(report._limitations(findings))
+    assert "ShellBags could not be read (UsrClass): boom" in notes
+    assert "module_b_disk was not run (no disk evidence supplied)" in notes
+    assert "without a target onion address" in notes
+    assert "Memory image (M) did not verify: MISMATCH" in notes
+    assert "no hash recorded at acquisition" in notes
+    assert "No acquisition manifest" in notes
+    assert "uncommitted changes" in notes
+    assert report.METHOD_LIMITS["module_c_memory"][0] in notes
+    assert report.METHOD_LIMITS["module_b_disk"][0] not in notes  # B did not run
+
+
+def test_report_has_method_limits_validation_and_declaration_sections():
+    html = report.render_report(_court_findings())
+    for heading in (
+        "How to read this report",
+        "Methodology",
+        "Limitations of this examination",
+        "Tool validation",
+        "Examiner's declaration",
+    ):
+        assert heading in html
+    assert "Authorized security exercise" not in html
+
+
+def test_evidence_rows_fold_verified_folders_but_list_failures():
+    def item(path, status):
+        return {"label": "Tor Browser profile", "path": path, "size_bytes": 10, "status": status}
+
+    rows = report._evidence_rows(
+        [
+            item("/e/disk/profile/a", "verified"),
+            item("/e/disk/profile/b", "verified"),
+            item("/e/disk/profile/c", "MISMATCH"),
+            {"label": "Memory image", "path": "/e/m.raw", "size_bytes": 5, "status": "verified"},
+        ]
+    )
+    assert [(r["path"], r["status"]) for r in rows] == [
+        ("/e/disk/profile", "verified"),
+        ("/e/disk/profile/c", "MISMATCH"),
+        ("/e/m.raw", "verified"),
+    ]
+    assert rows[0]["size_bytes"] == 20 and "2 files" in rows[0]["note"]
+    assert [r["exhibit"] for r in rows] == ["E-01", "E-02", "E-03"]
+    assert report._evidence_rows(rows[:1], "X")[0]["exhibit"] == "X-01"
+
+
+def test_glossary_lists_only_terms_the_report_uses(tmp_path):
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    html = render_report(build_findings(config, [_module_a_result_with_one_launch()]))
+    glossary = html[html.index("<h2>Glossary</h2>") :]
+    assert "<dt>UserAssist</dt>" in glossary
+    assert "<dt>SSID</dt>" not in glossary  # no network section in this report
+
+
+def test_secrets_are_shortened_in_print():
+    from report import _is_secret_field, _mask
+
+    assert _mask("eyJhbGciOiJIUzI1NiJ9.payload.sig") == "ey…ig (32 chars)"
+    assert _mask("dark") == "•••• (4 chars)"
+    assert _is_secret_field("password") and _is_secret_field("csrf_token")
+    assert not _is_secret_field("username")
+
+
+def test_interpretations_cite_the_exhibits_they_rest_on(tmp_path):
+    rows = report._evidence_rows(
+        [
+            {"label": "NTUSER.DAT registry hive", "path": "/e/NTUSER.DAT", "status": "verified"},
+            {"label": "Tor data folder", "path": "/e/tor/state", "status": "verified"},
+            {"label": "Tor data folder", "path": "/e/tor/lock", "status": "verified"},
+            {"label": "SOFTWARE registry hive", "path": "/e/SOFTWARE", "status": "verified"},
+        ]
+    )
+    items = [
+        {"what": "UserAssist: launches", "source": "/e/NTUSER.DAT"},
+        {"what": "state: last write", "source": "/e/tor/state"},
+        {"what": "profile list", "source": None, "hive": "SOFTWARE"},
+        {"what": "lock: daemon start", "source": "/elsewhere/lock"},
+    ]
+    assert report._cite(items, rows) == [
+        "UserAssist: launches (E-01)",
+        "state: last write (E-02)",
+        "profile list (E-03)",
+        "lock: daemon start",
+    ]
+
+    config = TranceConfig(case_name="case", output_dir=tmp_path)
+    html = render_report(build_findings(config, [_module_a_result_with_one_launch()]))
+    what_happened = html[html.index("What happened") : html.index("How reliable")]
+    assert "Based on:</strong> UserAssist: times opened and last opened" in what_happened
+
+
+def test_exhibit_list_is_written_beside_the_report_and_escapes_paths(tmp_path):
+    findings = {
+        "case": {"name": "c1", "info": {"reference": "R/1", "exhibit_prefix": "X"}},
+        "generated_at": "2026-10-14T00:00:00+00:00",
+        "provenance": {
+            "evidence_items": [
+                {
+                    "label": "SYSTEM registry hive",
+                    "path": "/e/<b>SYSTEM",
+                    "size_bytes": 3,
+                    "sha256": "a" * 64,
+                    "status": "verified",
+                }
+            ]
+        },
+    }
+    page = report.render_exhibit_list(findings, "f" * 64)
+    assert "X-01" in page and "a" * 64 in page and "R/1" in page and "f" * 64 in page
+    assert "/e/&lt;b&gt;SYSTEM" in page
+    assert report.render_exhibit_list({"case": {"name": "c1"}}) is None
+
+
+def test_volatility_cells_are_formatted_and_offsets_not_printed():
+    assert report._format_cell("2026-10-09T13:17:30+00:00") == "2026-10-09 13:17:30 UTC"
+    assert report._format_cell(None) == "n/a"
+    assert "<wbr>" in report._format_cell("\\Users\\a\\b.txt")
+    assert report._format_cell(2844) == "2844"
+    assert report._is_offset_column("Offset(V)") and not report._is_offset_column("PID")

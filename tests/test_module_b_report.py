@@ -210,7 +210,7 @@ def test_report_renders_module_b_section(tmp_path):
     config = TranceConfig("case", tmp_path)
     result = ModuleResult(module="module_b_disk", status="ok", artifacts=[], details=_details())
     html = render_report(build_findings(config, [result]))
-    assert "Disk — Tor Browser profile, Tor daemon &amp; downloaded files" in html
+    assert "What was on the disk" in html
     assert "Internet-origin files" in html
     assert "Users/u/Downloads/a.txt" in html
     assert "Tor Browser deliberately omits" in html
@@ -382,8 +382,8 @@ def test_report_renders_residue_and_ntfs_sections(tmp_path):
     )
     html = render_report(build_findings(config, [result]))
     assert "Memory residue on disk" in html
-    assert "hiberfil.sys" in html and "compressed — lower bound" in html
-    assert "NTFS metadata" in html
+    assert "hiberfil.sys" in html and "compressed, lower bound" in html
+    assert "File system records" in html
     assert "Deleted internet-origin files" in html
     assert "gone.txt" in html and "live.txt" not in html
     assert "examiner's own transfer files" in html
@@ -396,3 +396,44 @@ def test_report_renders_residue_and_ntfs_sections(tmp_path):
         )
     )
     assert "Not analyzed" in html and "Remount the volume" in html
+
+
+def test_journal_events_grouped_one_row_per_file():
+    from modules.module_b_disk.report import _group_events
+
+    rows = _group_events(
+        [
+            {
+                "time_utc": "2026-10-09T13:32:35+00:00",
+                "path": "C:\\t\\a",
+                "reasons": ["FILE_CREATE"],
+            },
+            {"time_utc": "2026-10-09T13:34:36+00:00", "path": "C:\\t\\a", "reasons": ["CLOSE"]},
+            {"time_utc": "2026-10-09T13:33:00+00:00", "path": "C:\\t\\b", "reasons": ["CLOSE"]},
+        ]
+    )
+    assert [(r["path"], r["count"]) for r in rows] == [("C:\\t\\a", 2), ("C:\\t\\b", 1)]
+    assert rows[0]["actions"] == ["file create", "close"]
+    assert rows[0]["first"] < rows[0]["last"]
+
+
+def test_clock_check_against_the_signed_consensus_window():
+    from modules.module_b_disk.report import _clock_consistent
+
+    window = {"valid_after_utc": "2026-09-19 07:00:00", "valid_until_utc": "2026-09-19 10:00:00"}
+    assert _clock_consistent({"last_written_utc": "2026-09-19 08:32:51"}, window) is True
+    assert _clock_consistent({"last_written_utc": "2026-09-21 08:32:51"}, window) is False
+    assert _clock_consistent({}, window) is None
+    assert build_context(_details())["daemon"]["clock_consistent"] is True
+
+
+def test_daemon_basis_names_only_the_files_that_were_read():
+    details = _details()
+    basis = build_context(details)["daemon"]["basis"]
+    assert [b["what"].split(":")[0] for b in basis] == [
+        "lock",
+        "state",
+        "cached-microdesc-consensus",
+    ]
+    details["tor_daemon"]["daemon_start_utc"] = None
+    assert all(not b["what"].startswith("lock") for b in build_context(details)["daemon"]["basis"])

@@ -13,7 +13,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from analyze_evidence import resolve_evidence, with_volume_inputs
 from core.safety import default_limits, limits_supported, running_as_root
-from gui.evidence_import import IMPORT_DIRNAME
 from main import CUSTODY_FILENAME, no_target_warning
 
 SOURCE_TYPES = ("process", "full-memory")
@@ -53,6 +52,7 @@ class AnalysisRequest:
     username: str = ""
     cookie_names: str = ""  # comma-separated; blank = the analyzer's defaults
     report_timezone: str = ""  # IANA zone name; blank = auto-detect this machine's own
+    case_info: dict[str, str] = field(default_factory=dict)  # core.config.CASE_INFO_FIELDS
     disk_image: str | None = None
     mount_image: bool = False  # mount disk_image read-only and analyse the volume
     carve_image: bool = False  # raw byte carve of disk_image
@@ -169,8 +169,6 @@ def validate(request: AnalysisRequest, inputs: dict) -> Issues:
 
     if not _is_single_component(request.case_name.strip()):
         errors.append("Case name must be a single folder name, without path separators.")
-    elif request.case_name.strip().casefold() == IMPORT_DIRNAME:
-        errors.append(f"'{IMPORT_DIRNAME}' is where imported evidence is kept; pick another name.")
     elif any((request.case_dir / name).exists() for name in OUTPUT_FILES):
         errors.append(
             f"This case already has outputs; choose a new case name ({request.case_dir})."
@@ -328,7 +326,7 @@ def summary_rows(request: AnalysisRequest, inputs: dict) -> list[SummaryRow]:
             SummaryRow("Disk volume", "found", f"{request.disk_root} (mounted)", request.disk_root)
         )
     else:
-        rows.append(SummaryRow("Disk image", "off", "optional — add one under More options"))
+        rows.append(SummaryRow("Disk image", "off", "optional, add one under More options"))
     if request.report_timezone:
         rows.append(SummaryRow("Report timezone", "found", request.report_timezone))
     return rows

@@ -16,6 +16,7 @@ raw_carve into flat, display-ready structures. Two presentation rules matter:
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 from modules.module_b_disk.acquire_downloads import SKIP_DIR_NAMES
 from modules.module_b_disk.onion import is_v3_onion
@@ -122,6 +123,52 @@ def _profile_context(profile: dict) -> dict:
     }
 
 
+def _clock_consistent(state: dict, consensus: dict) -> bool | None:
+    """Was the target's clock inside the validity window of the consensus tor held when
+    tor last wrote its state file? The window is signed by the Tor directory authorities,
+    so it is a time reference the target cannot set. None when either side is missing."""
+    try:
+        written, after, until = (
+            dt.datetime.fromisoformat(v)
+            for v in (
+                state["last_written_utc"],
+                consensus["valid_after_utc"],
+                consensus["valid_until_utc"],
+            )
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    if len({v.tzinfo is None for v in (written, after, until)}) != 1:
+        return None
+    return after <= written <= until
+
+
+def _daemon_basis(daemon: dict) -> list[dict]:
+    """The Tor data-folder files the daemon section's statements come from, only those
+    that were actually read (Evidence Ordinance s.51: the grounds of an opinion)."""
+    folder = daemon.get("tor_data_dir")
+    if not folder:
+        return []
+    files = (
+        ("lock", "daemon start", daemon.get("daemon_start_utc")),
+        (
+            "state",
+            "last write, entry guards, circuits",
+            daemon.get("state", {}).get("last_written_utc"),
+        ),
+        (
+            "cached-microdesc-consensus",
+            "signed validity window",
+            daemon.get("consensus", {}).get("valid_after_utc"),
+        ),
+    )
+    return [
+        {"what": f"{name}: {what}", "source": str(Path(folder) / name)}
+        for name, what, present in files
+        if present
+    ]
+
+
 def _daemon_context(daemon: dict) -> dict:
     state = daemon.get("state", {})
     consensus = daemon.get("consensus", {})
@@ -171,6 +218,8 @@ def _daemon_context(daemon: dict) -> dict:
                 "fetched": _iso(consensus.get("file_mtime_utc")),
             }
         ),
+        "clock_consistent": _clock_consistent(state, consensus),
+        "basis": _daemon_basis(daemon),
         "credentials": credentials,
         "ignored_auth_files": [f.get("filename") for f in auth.get("ignored_files", [])],
         "errors": {
@@ -386,6 +435,7 @@ def _ntfs_context(ntfs: dict) -> dict:
             }
             for e in usn.get("tor_events", [])
         ],
+        "event_files": _group_events(usn.get("tor_events", [])),
         "downloads": [
             {
                 "path": d["path"],
@@ -410,6 +460,27 @@ SECTIONS = (
     ("memory_residue", _residue_context),
     ("ntfs", _ntfs_context),
 )
+
+
+def _group_events(events: list[dict]) -> list[dict]:
+    """One row per file: the journal logs every write separately (Firefox's telemetry
+    file alone makes dozens), which buries the files themselves."""
+    by_path: dict[str, dict] = {}
+    for e in events:
+        row = by_path.setdefault(
+            e["path"], {"path": e["path"], "count": 0, "first": None, "last": None, "actions": []}
+        )
+        row["count"] += 1
+        t = _iso(e.get("time_utc"))
+        if t and (row["first"] is None or t < row["first"]):
+            row["first"] = t
+        if t and (row["last"] is None or t > row["last"]):
+            row["last"] = t
+        for r in e["reasons"]:
+            action = r.replace("_", " ").lower()
+            if action not in row["actions"]:
+                row["actions"].append(action)
+    return list(by_path.values())
 
 
 def build_context(details: dict, local_tz: str | None = None) -> dict:

@@ -344,7 +344,7 @@ def format_summary(report: dict) -> str:
         if result["status"] == "ok":
             lines.append(f"--- {plugin}: {result['row_count']} row(s) ---")
         else:
-            lines.append(f"--- {plugin}: FAILED — {result['message']} ---")
+            lines.append(f"--- {plugin}: FAILED: {result['message']} ---")
     return "\n".join(lines)
 
 

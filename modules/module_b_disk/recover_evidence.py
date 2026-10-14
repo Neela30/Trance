@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    print("=== TRANCE Module B — Disk Evidence Recovery ===")
+    print("=== TRANCE Module B: Disk Evidence Recovery ===")
     print(f"Analysis: {report['analysis_status']}")
     print(f"Acquisition manifest: {report['integrity']['manifest_status']}")
     print(f"Source files unchanged: {report['integrity']['source_unchanged']}")

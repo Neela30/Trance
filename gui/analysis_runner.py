@@ -92,6 +92,7 @@ def run(request_path: Path) -> int:
             output_dir=request.case_dir,
             evidence_dir=Path(request.evidence_dir) if request.evidence_dir else None,
             report_timezone=request.report_timezone or None,
+            case_info={k: v.strip() for k, v in request.case_info.items() if v.strip()},
         )
         result = main.run_pipeline(
             config,

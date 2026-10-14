@@ -38,15 +38,20 @@ volume_warnings) -- it never blocks an acquisition.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import ntpath
 import os
+import platform
+import socket
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from core.exceptions import AcquisitionError
 from core.hashing import hash_file
+from core.version import __version__
 from core.winadmin import is_admin
 from modules.module_a_registry import acquire as registry_acquire
 from modules.module_b_disk import acquire as disk_acquire
@@ -250,7 +255,51 @@ def _print_category(name: str, result: dict) -> None:
             continue
         status = entry.get("status", "?")
         detail = entry.get("path") or entry.get("message") or ""
-        print(f"[*] {name}.{key}: {status}{' — ' + detail if detail else ''}")
+        print(f"[*] {name}.{key}: {status}{': ' + detail if detail else ''}")
+
+
+def acquisition_context() -> dict:
+    """Which tool, machine and account made this capture -- printed in the analysis report's
+    provenance section next to the evidence it produced."""
+    try:
+        user = getpass.getuser()
+    except Exception:  # no login name available
+        user = None
+    return {
+        "tool": "trance-acquire",
+        "version": __version__,
+        "packaged": bool(getattr(sys, "frozen", False)),
+        "hostname": socket.gethostname(),
+        "os": platform.platform(),
+        "user": user,
+        "python": platform.python_version(),
+    }
+
+
+def clock_status() -> dict:
+    """The target's clock at capture and its last time sync (``w32tm /query /status``,
+    read-only), so the report can say how far the target's own timestamps can be trusted.
+    The labels are parsed for English Windows only; the raw output is always kept."""
+    status: dict = {"target_utc": datetime.now(timezone.utc).isoformat()}
+    try:
+        out = subprocess.run(
+            ["w32tm", "/query", "/status"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {**status, "error": str(exc)}
+    if out.returncode != 0:
+        return {**status, "error": (out.stderr or out.stdout).strip() or f"exit {out.returncode}"}
+    fields = {
+        key.strip(): value.strip()
+        for key, sep, value in (line.partition(":") for line in out.stdout.splitlines())
+        if sep
+    }
+    return {
+        **status,
+        "last_sync": fields.get("Last Successful Sync Time"),
+        "source": fields.get("Source"),
+        "raw": out.stdout.strip(),
+    }
 
 
 def acquire(
@@ -284,24 +333,37 @@ def acquire(
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: dict = {
         "acquired_at": datetime.now(timezone.utc).isoformat(),
+        "acquired_by": acquisition_context(),
+        "clock": clock_status(),
         "tool": tool,
         "warnings": warnings,
+        "acquisition_order": [
+            name
+            for name, included in (
+                ("memory", include_memory),
+                ("registry", include_registry),
+                ("disk", include_disk),
+                ("ntfs", include_ntfs),
+            )
+            if included
+        ],
         "registry": {},
         "memory": {},
         "disk": {},
     }
+
+    # Order of volatility: RAM first -- reg save, VSS and file copies all change memory.
+    if include_memory:
+        manifest["memory"] = _acquire_memory(output_dir, winpmem_path)
+        _print_category("memory", manifest["memory"])
+    else:
+        print("[*] memory: skipped (--skip-memory)")
 
     if include_registry:
         manifest["registry"] = _acquire_registry(output_dir, ntuser_user)
         # registry_acquire.acquire_all() already prints its own per-hive lines
     else:
         print("[*] registry: skipped (--skip-registry)")
-
-    if include_memory:
-        manifest["memory"] = _acquire_memory(output_dir, winpmem_path)
-        _print_category("memory", manifest["memory"])
-    else:
-        print("[*] memory: skipped (--skip-memory)")
 
     if include_disk:
         manifest["disk"] = _acquire_disk(output_dir, tor_browser_dir, disk_profile_src, tor_dir_src)
@@ -319,7 +381,7 @@ def acquire(
             print(f"[!] disk.ntfs: {ntfs.get('message')}", file=sys.stderr)
         for drive, volume in ntfs.get("volumes", {}).items():
             detail = volume.get("path") or volume.get("message") or ""
-            print(f"[*] disk.ntfs.{drive}: {volume['status']}{' — ' + detail if detail else ''}")
+            print(f"[*] disk.ntfs.{drive}: {volume['status']}{': ' + detail if detail else ''}")
     else:
         print("[*] disk.ntfs: skipped (--skip-ntfs)")
 

@@ -23,6 +23,8 @@ def test_run_pipeline_matches_cli_main_for_the_same_inputs(tmp_path):
     direct_findings = json.loads(pipeline.findings_path.read_text())
     cli_findings["generated_at"] = direct_findings["generated_at"] = None
     cli_findings["case"]["output_dir"] = direct_findings["case"]["output_dir"] = None
+    for f in (cli_findings, direct_findings):
+        f["provenance"]["analysis_started_at"] = f["provenance"]["analysis_finished_at"] = None
     assert cli_findings == direct_findings
 
 
@@ -115,3 +117,40 @@ def test_cli_warns_that_a_full_memory_image_without_target_gives_observations_on
 def test_no_target_warning_for_a_process_dump_is_about_urls_only():
     assert "targeted URLs will be empty" in main.no_target_warning("process")
     assert "observations only" not in main.no_target_warning("process")
+
+
+def test_case_details_reach_findings_and_the_report(tmp_path):
+    argv = ["--case", "c1", "--output-dir", str(tmp_path)]
+    argv += [
+        "--examiner",
+        "A. Perera",
+        "--reference",
+        "CCD/2026/0142",
+        "--purpose",
+        "Was Tor used?",
+    ]
+    assert main.main(argv) == 0
+
+    findings = json.loads((tmp_path / "c1" / "findings.json").read_text())
+    assert findings["case"]["info"] == {
+        "examiner": "A. Perera",
+        "reference": "CCD/2026/0142",
+        "purpose": "Was Tor used?",
+    }
+    html = (tmp_path / "c1" / "report.html").read_text()
+    assert "Was Tor used?" in html
+    declaration = html[html.index("Examiner's declaration") :]
+    assert "<dt>Name</dt><dd>A. Perera</dd>" in declaration
+    assert "<dt>Case reference</dt><dd>CCD/2026/0142</dd>" in declaration
+
+
+def test_s6_certificate_only_when_asked_for(tmp_path):
+    assert main.main(["--case", "plain", "--output-dir", str(tmp_path)]) == 0
+    assert "Certificate under section 6" not in (tmp_path / "plain" / "report.html").read_text()
+
+    argv = ["--case", "c1", "--output-dir", str(tmp_path), "--examiner", "A. Perera"]
+    assert main.main([*argv, "--s6-certificate"]) == 0
+    html = (tmp_path / "c1" / "report.html").read_text()
+    certificate = html[html.index("Certificate under section 6") :]
+    assert "Draft template." in certificate
+    assert "I, <strong>A. Perera</strong>" in certificate

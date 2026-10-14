@@ -187,23 +187,53 @@ def _vol3_process_corroboration(psscan_rows: list[dict]) -> list[str]:
     """Note, don't score: when psscan independently confirms a browser process existed,
     that's worth surfacing next to the string-carver evidence that assumed one did --
     not merged into it. See module docstring / task spec: juxtaposition only, no
-    automated confidence blending."""
-    notes = []
+    automated confidence blending. One note for all of them (psscan can list a PID twice)."""
+    seen: dict = {}
     for row in psscan_rows:
-        name = (row.get("ImageFileName") or "").lower()
-        if "firefox" not in name:
-            continue
-        exited = (
-            f", exited {row['ExitTime']}"
-            if row.get("ExitTime")
-            else " — still running at capture time"
-        )
-        notes.append(
-            f"windows.psscan independently confirms a firefox.exe process existed "
-            f"(PID {row.get('PID')}, created {row.get('CreateTime')}{exited}). Structural "
-            f"corroboration of the process the string-carver evidence below was extracted from."
-        )
-    return notes
+        if "firefox" in (row.get("ImageFileName") or "").lower():
+            seen.setdefault(row.get("PID"), row)
+    if not seen:
+        return []
+    procs = "; ".join(
+        f"PID {pid}, created {row.get('CreateTime')}"
+        + (f", exited {row['ExitTime']}" if row.get("ExitTime") else ", still running")
+        for pid, row in seen.items()
+    )
+    count = len(seen)
+    note = (
+        f"windows.psscan independently confirms {count} firefox.exe process"
+        f"{'es' if count != 1 else ''} ({procs}). Structural corroboration of the process the "
+        f"string-carver evidence was extracted from."
+    )
+    return [note]
+
+
+# Only Tor Browser's own rows are printed; every row stays in findings.json.
+_TOR_INSTALL_MARKER = "\\browser\\"
+_TOR_DATA_MARKER = "\\torbrowser\\data\\"
+_TOR_PATH_MARKERS = ("tor browser", "torbrowser", "\\tor\\", "/tor/", "tor.exe")
+
+
+def _tor_rows(plugin: str, rows: list[dict], tor_pids: set[str]) -> list[dict] | None:
+    """The rows of one plugin that belong to Tor Browser; None = plugin not printed."""
+    if plugin.endswith("HiveList"):
+        return None  # the machine's registry hives, never Tor-specific
+    if plugin.endswith("FileScan"):
+        # Tor Browser's data (profile, tor state, onion keys) and Tor-named files elsewhere;
+        # not the program's own fonts and libraries, which only repeat that it was running.
+        seen, kept = set(), []
+        for r in rows:
+            name = (r.get("Name") or "").lower()
+            if name in seen or not any(m in name for m in _TOR_PATH_MARKERS):
+                continue
+            if _TOR_INSTALL_MARKER in name and _TOR_DATA_MARKER not in name:
+                continue
+            seen.add(name)
+            kept.append(r)
+        return kept
+    if plugin.endswith(("PsScan", "NetScan", "CmdLine")):
+        return [r for r in rows if str(r.get("PID")) in tor_pids]
+    return rows
 
 
 def _vol3_network_corroboration(netscan_rows: list[dict], host_target: str | None) -> list[str]:
@@ -343,16 +373,23 @@ def _vol3_context(details: dict) -> dict:
     vol3 = details.get("volatility3") or {"status": "skipped", "message": None, "plugins": {}}
     plugins = vol3.get("plugins", {})
 
+    tor_pids = {
+        str(r.get("PID"))
+        for r in _vol3_rows(plugins, "PsScan")
+        if (r.get("ImageFileName") or "").lower() in BROWSER_PROCESS_NAMES
+    }
     plugin_views = []
     for name, result in plugins.items():
-        rows = result.get("rows", [])
+        rows = _tor_rows(name, result.get("rows", []), tor_pids)
+        if rows is None:
+            continue
         plugin_views.append(
             {
                 "name": name,
                 "label": VOL3_PLUGIN_LABELS.get(name, name),
                 "status": result.get("status"),
                 "message": result.get("message"),
-                "total_rows": result.get("row_count", len(rows)),
+                "total_rows": result.get("row_count", len(result.get("rows", []))),
                 "rows": rows[:VOL3_TABLE_CAP],
                 "truncated": len(rows) > VOL3_TABLE_CAP,
             }
@@ -385,6 +422,22 @@ def _vol3_context(details: dict) -> dict:
     }
 
 
+def _basis(details: dict) -> dict[str, list[dict]]:
+    """What each memory statement rests on (Evidence Ordinance s.51)."""
+    dump = details["dump"]["path"]
+    targeting = details.get("targeting", {})
+    target = " / ".join(t for t in (targeting.get("onion"), targeting.get("host")) if t)
+    return {
+        "strings": [
+            {
+                "what": f"string search tied to {target}" if target else "string search, no target",
+                "source": dump,
+            }
+        ],
+        "processes": [{"what": "Volatility windows.psscan", "source": dump}],
+    }
+
+
 def build_context(details: dict, local_tz: str | None = None) -> dict:
     """Presentation context for the memory section of the case report.
 
@@ -411,4 +464,5 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
         "any_far_from_start": any(e["far_from_start"] for e in events),
         "cluster_gap_bytes": CLUSTER_GAP_BYTES,
         "volatility3": _vol3_context(details),
+        "basis": _basis(details),
     }

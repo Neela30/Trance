@@ -363,3 +363,18 @@ def test_build_argv_passes_each_cookie_name_through():
 
 def test_build_argv_omits_cookie_name_when_none_given():
     assert "--cookie-name" not in analyze_evidence.build_argv(_base_args(), {})
+
+
+def test_build_argv_forwards_case_details(tmp_path):
+    args = _base_args(evidence_dir=tmp_path, case_examiner="A. Perera", case_reference="R/1")
+
+    argv = analyze_evidence.build_argv(args, {})
+
+    assert argv[argv.index("--examiner") + 1] == "A. Perera"
+    assert argv[argv.index("--reference") + 1] == "R/1"
+    assert "--purpose" not in argv
+
+
+def test_build_argv_forwards_the_s6_certificate_switch(tmp_path):
+    argv = analyze_evidence.build_argv(_base_args(evidence_dir=tmp_path, s6_certificate=True), {})
+    assert "--s6-certificate" in argv
