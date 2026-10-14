@@ -33,7 +33,7 @@ from core.provenance import build_provenance
 from core.safety import UnsafeEnvironmentError, refuse_root
 from core.schema import ModuleResult
 from findings import build_findings, write_findings
-from report import write_report
+from report import EXHIBIT_LIST_FILENAME, write_report
 
 MODULES = ("module_a_registry", "module_b_disk", "module_c_memory")
 CUSTODY_FILENAME = "custody.json"
@@ -254,7 +254,8 @@ def run_pipeline(
                 notes=f"integrity_verified={dump['integrity_verified']}",
             )
         )
-    for path in (findings_path, report_path):
+    exhibit_list = report_path.with_name(EXHIBIT_LIST_FILENAME)
+    for path in (findings_path, report_path, *([exhibit_list] if exhibit_list.is_file() else [])):
         custody.record(
             CustodyEntry(artifact_path=str(path), sha256=hash_file(path), action="generated")
         )

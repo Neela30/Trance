@@ -166,6 +166,10 @@ def test_pipeline_writes_provenance_and_report_prints_findings_hash(tmp_path):
     assert hash_file(pipeline.findings_path) in html
     assert "Evidence examined" in html
     assert "Analysis provenance" in html
+    exhibit_list = pipeline.report_path.with_name("exhibit_list.html")
+    assert "E-01" in exhibit_list.read_text()
+    custody = json.loads(pipeline.report_path.with_name("custody.json").read_text())
+    assert str(exhibit_list) in {entry["artifact_path"] for entry in custody}
 
 
 def test_report_flags_an_evidence_item_that_did_not_verify():

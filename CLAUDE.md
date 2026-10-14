@@ -179,7 +179,10 @@ fields print shortened (`report._mask`); case details (`core.config.CASE_INFO_FI
 go to `findings.json["case"]["info"]`, page 1 and the declaration; evidence rows carry exhibit
 numbers (`<prefix>-01`). Each interpretation prints a "Based on:" line (Evidence Ordinance s.51):
 Module A `narrative["basis"]` (same findings the sentences used), Module B `daemon["basis"]`, Module C
-`basis`; `report._cite()` maps each source file to its exhibit number (file name if none).
+`basis`; `report._cite()` maps each source file to its exhibit number (file name if none). "How to read" names the report a
+conversion under ESPA s.5(2). `exhibit_list.html` (s.7 list of evidence, inline template
+`report.EXHIBIT_LIST_TEMPLATE`) is written beside report.html and recorded in custody.json; the GUI
+Report tab's "Exhibit list" button shows it, and "Save as PDF…" saves `<case>_exhibit_list.pdf`.
 
 ---
 

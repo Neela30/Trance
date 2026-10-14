@@ -403,3 +403,25 @@ def test_interpretations_cite_the_exhibits_they_rest_on(tmp_path):
     html = render_report(build_findings(config, [_module_a_result_with_one_launch()]))
     what_happened = html[html.index("What happened") : html.index("How reliable")]
     assert "Based on:</strong> UserAssist: times opened and last opened" in what_happened
+
+
+def test_exhibit_list_is_written_beside_the_report_and_escapes_paths(tmp_path):
+    findings = {
+        "case": {"name": "c1", "info": {"reference": "R/1", "exhibit_prefix": "X"}},
+        "generated_at": "2026-10-14T00:00:00+00:00",
+        "provenance": {
+            "evidence_items": [
+                {
+                    "label": "SYSTEM registry hive",
+                    "path": "/e/<b>SYSTEM",
+                    "size_bytes": 3,
+                    "sha256": "a" * 64,
+                    "status": "verified",
+                }
+            ]
+        },
+    }
+    page = report.render_exhibit_list(findings, "f" * 64)
+    assert "X-01" in page and "a" * 64 in page and "R/1" in page and "f" * 64 in page
+    assert "/e/&lt;b&gt;SYSTEM" in page
+    assert report.render_exhibit_list({"case": {"name": "c1"}}) is None

@@ -16,8 +16,8 @@ from core.hashing import hash_file
 
 CUSTODY_FILENAME = "custody.json"
 
-# Run in the page before printing: report_template.html.j2's beforeprint handler does the
-# same for a browser's Ctrl+P, but printToPDF is not guaranteed to fire that event.
+# Run in the page before printing so collapsed <details> print open (the report's print
+# CSS does the same for a browser's Ctrl+P).
 OPEN_ALL_DETAILS_JS = """
 document.querySelectorAll("details:not([open])").forEach(function (d) {
   d.setAttribute("data-print-opened", "");
@@ -33,9 +33,10 @@ document.querySelectorAll("details[data-print-opened]").forEach(function (d) {
 
 
 def default_pdf_path(report_path: Path) -> Path:
-    """<case dir>/<case>_report.pdf, next to report.html."""
-    case_dir = Path(report_path).resolve().parent
-    return case_dir / f"{case_dir.name}_report.pdf"
+    """<case dir>/<case>_<page>.pdf next to the page: <case>_report.pdf for report.html,
+    <case>_exhibit_list.pdf for exhibit_list.html."""
+    page = Path(report_path).resolve()
+    return page.parent / f"{page.parent.name}_{page.stem}.pdf"
 
 
 def record_pdf_export(report_path: Path, pdf_path: Path) -> str:

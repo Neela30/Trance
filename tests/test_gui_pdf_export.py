@@ -33,3 +33,10 @@ def test_record_pdf_export_starts_custody_when_missing(tmp_path):
     pdf.write_bytes(b"%PDF")
     record_pdf_export(report, pdf)
     assert len(json.loads((tmp_path / "custody.json").read_text())) == 1
+
+
+def test_pdf_is_named_after_the_page_shown(tmp_path):
+    from gui.pdf_export import default_pdf_path
+
+    assert default_pdf_path(tmp_path / "c1" / "report.html").name == "c1_report.pdf"
+    assert default_pdf_path(tmp_path / "c1" / "exhibit_list.html").name == "c1_exhibit_list.pdf"

@@ -27,6 +27,49 @@ from modules.module_c_memory.report import build_context as memory_context
 TEMPLATE_DIR = Path(__file__).parent
 TEMPLATE_NAME = "report_template.html.j2"
 REPORT_FILENAME = "report.html"
+EXHIBIT_LIST_FILENAME = "exhibit_list.html"
+
+# A one-page list of the evidence for filing with the court (Evidence (Special Provisions)
+# Act No. 14 of 1995, s.7). Inline so packaging needs no second template file.
+EXHIBIT_LIST_TEMPLATE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Exhibit list · {{ case.name }}</title>
+<style>
+  @page { size: A4; margin: 18mm 14mm 20mm; }
+  body { font: 10.5pt/1.45 system-ui, sans-serif; color: #111518; background: #fff; margin: 24px; }
+  h1 { font-size: 18pt; margin: 0 0 4px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 12px 0; }
+  dt { color: #4a535c; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  th, td { border-bottom: 1px solid #b9c0bf; padding: 6px 6px; text-align: left; vertical-align: top; }
+  th { font-size: 9pt; text-transform: uppercase; letter-spacing: .04em; color: #4a535c; }
+  .mono { font-family: ui-monospace, monospace; font-size: 8.5pt; word-break: break-all; }
+  .note { color: #4a535c; font-size: 9.5pt; }
+</style></head><body>
+<h1>List of evidence</h1>
+<p class="note">Evidence (Special Provisions) Act No. 14 of 1995, section 7 · produced by TRANCE</p>
+<dl>
+  <dt>Case</dt><dd>{{ case.name }}</dd>
+  {% if case.evidence_dir %}<dt>Evidence folder</dt><dd class="mono">{{ case.evidence_dir }}</dd>{% endif %}
+  {% for key, label in labels if info[key] %}<dt>{{ label }}</dt><dd>{{ info[key] }}</dd>{% endfor %}
+  <dt>Report generated</dt><dd>{{ generated_at }}</dd>
+</dl>
+<table>
+  <thead><tr><th>Exhibit</th><th>Description</th><th>File</th><th>Size</th><th>SHA-256</th><th>Check</th></tr></thead>
+  <tbody>
+  {% for row in rows %}
+    <tr><td class="mono" style="white-space:nowrap;">{{ row.exhibit }}</td><td>{{ row.label }}{% if row.note %}<div class="note">{{ row.note }}</div>{% endif %}</td>
+    <td class="mono">{{ row.path|relative_to(case.evidence_dir) }}</td><td style="white-space:nowrap;">{{ row.size_bytes|fmt_bytes }}</td>
+    <td class="mono">{{ row.sha256 or "per file, in findings.json" }}</td><td>{{ checks.get(row.status, row.status) }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="note">Every SHA-256 was checked against the hash recorded when the evidence was acquired.
+Copies of the exhibits are available on request. Prepared from findings.json{% if findings_sha256 %}
+(SHA-256 <span class="mono">{{ findings_sha256 }}</span>){% endif %}.</p>
+</body></html>
+"""
 GENERIC_TABLE_CAP = 200
 
 PRESENTERS: dict[str, Callable[[dict, str | None], dict]] = {
@@ -322,6 +365,32 @@ def _cite(items: list[dict], rows: list[dict]) -> list[str]:
     return [f"{what} ({', '.join(refs)})" if refs else what for what, refs in cited.items()]
 
 
+def render_exhibit_list(findings: dict, findings_sha256: str | None = None) -> str | None:
+    """The s.7 list of evidence, or None when the findings have no evidence items."""
+    provenance = findings.get("provenance") or {}
+    if not provenance.get("evidence_items"):
+        return None
+    info = findings.get("case", {}).get("info") or {}
+    env = Environment(autoescape=True)
+    env.filters["fmt_bytes"] = _format_bytes
+    env.filters["relative_to"] = _relative_to
+    return env.from_string(EXHIBIT_LIST_TEMPLATE).render(
+        case=findings.get("case", {}),
+        info=info,
+        labels=[(key, label) for key, label, _flag in CASE_INFO_FIELDS if key != "exhibit_prefix"],
+        generated_at=findings.get("generated_at"),
+        rows=_evidence_rows(provenance["evidence_items"], info.get("exhibit_prefix") or "E"),
+        checks={
+            "verified": "matches acquisition",
+            "MISMATCH": "HASH DIFFERS",
+            "unrecorded": "no acquisition hash",
+            "missing": "missing",
+            "not_hashed": "not hashed",
+        },
+        findings_sha256=findings_sha256,
+    )
+
+
 def render_report(
     findings: dict, local_tz: str | None = None, findings_sha256: str | None = None
 ) -> str:
@@ -424,8 +493,15 @@ def write_report(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / REPORT_FILENAME
-    text = render_report(findings, local_tz, findings_sha256)
-    fd, tmp = tempfile.mkstemp(dir=output_dir, prefix=".report-")
+    _write_atomic(path, render_report(findings, local_tz, findings_sha256))
+    exhibit_list = render_exhibit_list(findings, findings_sha256)
+    if exhibit_list is not None:
+        _write_atomic(output_dir / EXHIBIT_LIST_FILENAME, exhibit_list)
+    return path
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".report-")
     try:
         os.write(fd, text.encode())
         os.close(fd)
@@ -434,4 +510,3 @@ def write_report(
         os.close(fd)
         os.unlink(tmp)
         raise
-    return path
