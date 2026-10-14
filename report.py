@@ -150,6 +150,22 @@ def _css_string(value: object) -> Markup:
     return Markup(f'"{escaped}"')
 
 
+_SECRET_FIELD_RE = re.compile(r"pass|pwd|secret|token|key|pin", re.IGNORECASE)
+
+
+def _mask(value: object) -> str:
+    """A secret shortened for print (data minimisation): enough to match it against the
+    full value in findings.json, not enough to reuse it."""
+    text = str(value or "")
+    if len(text) <= 6:
+        return f"•••• ({len(text)} chars)"
+    return f"{text[:2]}…{text[-2:]} ({len(text)} chars)"
+
+
+def _is_secret_field(name: object) -> bool:
+    return bool(_SECRET_FIELD_RE.search(str(name or "")))
+
+
 def _format_bytes(value: int | None) -> str:
     if value is None:
         return "—"
@@ -288,6 +304,8 @@ def render_report(
     env.filters["fmt_bytes"] = _format_bytes
     env.filters["relative_to"] = _relative_to
     env.filters["css_string"] = _css_string
+    env.filters["mask"] = _mask
+    env.tests["secret_field"] = _is_secret_field
     template = env.get_template(TEMPLATE_NAME)
 
     resolved_tz = _resolve_local_tz(local_tz)

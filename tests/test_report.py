@@ -364,3 +364,12 @@ def test_glossary_lists_only_terms_the_report_uses(tmp_path):
     glossary = html[html.index("<h2>Glossary</h2>") :]
     assert "<dt>UserAssist</dt>" in glossary
     assert "<dt>SSID</dt>" not in glossary  # no network section in this report
+
+
+def test_secrets_are_shortened_in_print():
+    from report import _is_secret_field, _mask
+
+    assert _mask("eyJhbGciOiJIUzI1NiJ9.payload.sig") == "ey…ig (32 chars)"
+    assert _mask("dark") == "•••• (4 chars)"
+    assert _is_secret_field("password") and _is_secret_field("csrf_token")
+    assert not _is_secret_field("username")

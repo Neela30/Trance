@@ -206,7 +206,8 @@
       unless a local time is shown beside them. The methods, their limits and the tool's tested
       accuracy follow the findings. Only Tor-related data is printed; everything TRANCE
       recorded, including the rest of the machine's processes, networks and devices, is in
-      findings.json, whose SHA-256 is printed on every page.
+      findings.json, whose SHA-256 is printed on every page. Session cookies and password-like
+      values are shortened in print (e.g. <span class="mono">ey…J9 (212 chars)</span>); the full values are in findings.json.
     </div>
   </section>
 
@@ -1001,7 +1002,7 @@
           {% for c in memory.session_cookies %}
           <tr>
             <td class="val">{{ c.name }}</td>
-            <td class="val">{{ c.value }}{% if c.decoded_payload %}<br><span style="color:var(--ink-muted)">↳ decodes to {{ c.decoded_payload }}</span>{% endif %}</td>
+            <td class="val">{{ c.value|mask }}{% if c.decoded_payload %}<br><span style="color:var(--ink-muted)">↳ decodes to {{ c.decoded_payload }}</span>{% endif %}</td>
             <td class="off">{{ c.offset }}</td>
             <td class="mono">{{ c.occurrences }}</td>
           </tr>
@@ -1023,7 +1024,7 @@
         <thead><tr><th>Field</th><th>Value</th><th>Shape</th><th>First offset</th><th>Occ.</th></tr></thead>
         <tbody>
           {% for c in d.key_findings.credentials %}
-          <tr><td class="val">{{ c.field }}</td><td class="val">{{ c.value }}</td><td class="mono">{{ c.shape }}</td><td class="off">{{ c.offset }}</td><td class="mono">{{ c.occurrences }}</td></tr>
+          <tr><td class="val">{{ c.field }}</td><td class="val">{{ c.value|mask if c.field is secret_field else c.value }}</td><td class="mono">{{ c.shape }}</td><td class="off">{{ c.offset }}</td><td class="mono">{{ c.occurrences }}</td></tr>
           {% endfor %}
         </tbody>
       </table>
