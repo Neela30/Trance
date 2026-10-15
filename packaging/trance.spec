@@ -86,7 +86,25 @@ def _wanted(entry) -> bool:
     return match is None or match.group(1) in QT_KEEP
 
 
-a.binaries = [entry for entry in a.binaries if _wanted(entry)]
+# Linux: libraries that must come from the user's own system, as they do from a source venv.
+# Copies from the build machine (Ubuntu 22.04) are older than a newer system's graphics
+# drivers and GTK modules need: with the bundled libstdc++, Mesa's driver failed to load
+# (GLIBCXX_3.4.32 not found), Qt got no OpenGL context and the window died as soon as the
+# report view opened. Every desktop distribution has these.
+HOST_LIBS = re.compile(
+    r"^lib(stdc\+\+|gcc_s|glib-2\.0|gobject-2\.0|gio-2\.0|gmodule-2\.0|gthread-2\.0|gtk-3|gdk-3"
+    r"|gdk_pixbuf-2\.0|atk-1\.0|atk-bridge-2\.0|atspi|cairo|cairo-gobject|pango-1\.0"
+    r"|pangocairo-1\.0|pangoft2-1\.0|harfbuzz|fontconfig|freetype|gbm|epoxy|drm|EGL|GL|GLX"
+    r"|glapi|wayland-.*|xkbcommon|asound|dbus-1|systemd|udev|nss3|nssutil3|smime3|nspr4|plc4"
+    r"|plds4|freebl3|freeblpriv3)\.so"
+)
+
+
+def _from_host(entry) -> bool:
+    return sys.platform.startswith("linux") and bool(HOST_LIBS.match(Path(entry[0]).name))
+
+
+a.binaries = [entry for entry in a.binaries if _wanted(entry) and not _from_host(entry)]
 a.datas = [entry for entry in a.datas if _wanted(entry)]
 
 # Volatility3 finds its plugins and symbol tables by walking its own folders on disk
@@ -102,6 +120,7 @@ vol = Analysis(  # noqa: F821
     excludes=EXCLUDED,
     module_collection_mode=VOL_MODE,
 )
+vol.binaries = [entry for entry in vol.binaries if not _from_host(entry)]
 
 pyz = PYZ(a.pure)  # noqa: F821
 exe = EXE(  # noqa: F821

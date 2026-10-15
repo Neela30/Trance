@@ -20,6 +20,19 @@ scenarios.
 
 **Status:** In development · **Platform:** Windows 10/11 (target) · 
 
+## Download
+
+**[Download the latest TRANCE](https://github.com/Neela30/Trance/releases/latest)**: on that page,
+under **Assets**, take the file for your computer:
+
+| Your computer | Download |
+|---|---|
+| Windows 10 or 11 | `TRANCE-<version>-windows-x64.zip` |
+| Linux, 64-bit (Ubuntu 22.04 or newer, or similar) | `TRANCE-<version>-linux-x64.tar.gz` |
+
+Unzip it and run `TRANCE.exe` / `TRANCE`. The acquisition tool for the suspect machine comes
+with the app (Build tool tab). Details: [Install (release download)](#install-release-download).
+
 ## Install (release download)
 
 Releases are on the repository's **Releases** page, built by

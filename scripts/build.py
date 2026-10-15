@@ -161,10 +161,22 @@ def smoke(app_dir: Path) -> None:
             if missing:
                 problems.append(f"no version recorded for {', '.join(missing)} (metadata)")
         problems += _gui_starts(exe, tmp / "out")
+        problems += _no_host_libs(app_dir)
         problems += _vol_finds_plugins(exe.with_name(exe.name.replace("TRANCE", "vol")))
         if problems:
             sys.exit("Smoke test FAILED: " + "; ".join(problems))
     print("Smoke test passed.")
+
+
+def _no_host_libs(app_dir: Path) -> list[str]:
+    """Linux: the build machine's C++ runtime and GTK/graphics libraries must not be shipped
+    (packaging/trance.spec HOST_LIBS); with them the report view crashed on a newer system.
+    The offscreen GUI check above can't catch that: it never uses the graphics driver."""
+    if not sys.platform.startswith("linux"):
+        return []
+    shipped = [n for n in ("libstdc++.so.6", "libglib-2.0.so.0", "libgbm.so.1")
+               if (app_dir / "_internal" / n).exists()]  # fmt: skip
+    return [f"host libraries shipped in _internal: {', '.join(shipped)}"] if shipped else []
 
 
 def _vol_finds_plugins(vol: Path) -> list[str]:

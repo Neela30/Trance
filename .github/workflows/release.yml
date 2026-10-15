@@ -86,6 +86,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4  # for .github/release-notes.md
       - uses: actions/download-artifact@v4
         with:
           path: assets
@@ -100,4 +101,5 @@ jobs:
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease";; esac
           gh release create "$GITHUB_REF_NAME" assets/* --repo "$GITHUB_REPOSITORY" \
-            --draft $prerelease --title "TRANCE ${GITHUB_REF_NAME#v}" --generate-notes
+            --draft $prerelease --title "TRANCE ${GITHUB_REF_NAME#v}" \
+            --notes-file .github/release-notes.md --generate-notes
