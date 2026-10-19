@@ -12,7 +12,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Iterator, Sequence
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,7 +20,9 @@ from urllib.parse import parse_qsl
 
 from core.exceptions import IntegrityError, ParsingError
 from core.hashing import hash_file
+from core.progress import report as report_progress
 from core.schema import Artifact
+from modules.module_b_disk.onion import is_v3_onion
 
 CHUNK_SIZE = 8 * 1024 * 1024
 OVERLAP = 4096
@@ -103,6 +105,25 @@ ONION_DOMAIN_RE = re.compile(r"[a-z2-7]{16,56}\.onion", re.IGNORECASE)
 # Cookie names to look for. Defaults to the control site's names so existing runs behave the
 # same; a real target's names come in through analyze(cookie_names=...) / --cookie-name.
 DEFAULT_COOKIE_NAMES = ("session", "trance_user", "trance_pref")
+# Tor Browser's own onion services: on the negative-control capture (Tor running, nothing
+# browsed) each was in RAM about 20 times, more than the site actually visited in other runs.
+# torproject.org's www, support, community, blog, bridges and Tor Browser manual services,
+# DuckDuckGo (the default search engine) and Cloudflare. Never a lead, never a suggestion.
+# Update when Tor Browser changes its bundled services.
+BUILTIN_ONIONS = frozenset(
+    {
+        "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion",
+        "rzuwtpc4wb3xdzrj3yeajsvm3fkq4vbeubm2tdxaqruzzzgs5dwemlad.onion",
+        "xmrhfasfg5suueegrnc4gsgyi2tyclcy5oz7f5drnrodmdtob6t2ioyd.onion",
+        "pzhdfe7jraknpj2qgu5cz2u3i4deuyfwmonvzu5i3nyw4t4bmg7o5pad.onion",
+        "yq5jjvr7drkjrelzhut7kgclfuro65jjlivyzfmxiq2kyv5lickrl4qd.onion",
+        "v236xhqtyullodhf26szyjepvkbv6iitrhjgrqj4avaoukebkk6n6syd.onion",
+        "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
+        "cflareki4v3lh674hq55k3n7xd4ibkwx3pnw67rr3gkpsonjmxbktxyd.onion",
+    }
+)
+# Login field names whose value names the account (shown as the lead's user names).
+USERNAME_FIELDS = frozenset({"username", "user", "uname", "login", "email"})
 
 
 @functools.lru_cache(maxsize=8)
@@ -241,6 +262,16 @@ def _matches_target(host: str, targets: list[str]) -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=4096)
+def _is_lead_host(host: str) -> bool:
+    """A valid v3 onion that is not one of Tor Browser's own services: a possible target.
+    The checksum drops pieces of a real address (string extraction can cut one anywhere:
+    on one capture 25 fragments of the visited site's address looked like 25 more sites)
+    and v2 addresses, which Tor Browser cannot open since 2021."""
+    base = host.split(":", 1)[0].lower()
+    return base not in BUILTIN_ONIONS and is_v3_onion(base)
+
+
 def _ascii_pattern(min_len: int) -> re.Pattern[bytes]:
     return re.compile(rb"[\x20-\x7e]{%d,}" % min_len)
 
@@ -375,6 +406,127 @@ def _near_any(sorted_offsets: list[int], offset: int, window: int) -> bool:
     return i < len(sorted_offsets) and sorted_offsets[i] <= offset + window
 
 
+def _nearest_lead(marks: list[tuple[int, str]], offsets: list[int], offset: int) -> str | None:
+    """The onion mentioned closest to `offset`, if one is within PROXIMITY_WINDOW."""
+    i = bisect.bisect_left(offsets, offset)
+    near = [marks[j] for j in (i - 1, i) if 0 <= j < len(marks)]
+    near = [m for m in near if abs(m[0] - offset) <= PROXIMITY_WINDOW]
+    return min(near, key=lambda m: abs(m[0] - offset))[1] if near else None
+
+
+def _build_leads(
+    urls: list[dict],
+    credentials: list[dict],
+    search_queries: list[dict],
+    form_submissions: list[dict],
+    title_candidates: list[dict],
+    lead_marks: list[tuple[int, str]],
+    onion_hits: Counter,
+) -> dict:
+    """Group what anchored to an onion, with no target given, into one lead per onion.
+
+    Each hit goes to the onion it was tied to by the same rules a named target uses: a URL
+    by its host, a credential or search by the onion in the same string, a login pair or
+    form by the nearest onion mention, a page title by the site whose paths its links share.
+    An onion only becomes a lead with activity on it (a page, login, form or title), not
+    for being mentioned: Tor Browser's own services are mentioned constantly.
+    """
+    marks = sorted(lead_marks)
+    offsets = [m[0] for m in marks]
+    sites: dict[str, dict] = {}
+
+    def site(host: str) -> dict:
+        return sites.setdefault(
+            host,
+            {
+                "paths": set(),
+                "pages": set(),
+                "logins": {},
+                "forms": {},
+                "titles": {},
+                "searches": set(),
+            },
+        )
+
+    for u in urls:
+        host = u["host"].split(":", 1)[0]
+        path = u["path"].split("?", 1)[0]
+        site(host)["paths"].add(path)
+        if not u["asset"]:
+            site(host)["pages"].add(u["path"])
+    for c in credentials:
+        if c.get("confidence") != "high":
+            continue
+        host = c.get("anchor_host") or _nearest_lead(marks, offsets, int(c["offset"], 16))
+        if host:
+            site(host)["logins"].setdefault((c["field"], c["value"]), None)
+    for q in search_queries:
+        if q.get("anchor_host") and not is_timeline_noise(q["value"]):
+            site(q["anchor_host"])["searches"].add(q["value"])
+    for f in form_submissions:
+        host = _nearest_lead(marks, offsets, int(f["offset"], 16))
+        if host:
+            fields = tuple((x["name"], x["value"]) for x in f["fields"])
+            site(host)["forms"].setdefault(fields, None)
+    for cand in title_candidates:
+        if not cand["title"]:
+            continue
+        overlap = {
+            h: len(cand["links"] & (s["paths"] - {"/"})) for h, s in sites.items() if s["paths"]
+        }
+        best = max(overlap, key=overlap.get, default=None)
+        if best and overlap[best] >= MIN_TITLE_LINKS:
+            sites[best]["titles"].setdefault(cand["title"], None)
+
+    leads = []
+    for host, s in sites.items():
+        # Visiting a site requests more than one address: even a home page loads its
+        # stylesheet. Antivirus signature data in RAM names ransomware onions with one
+        # address each, "http://<onion>/" or a detection name as the path
+        # ("/btRansom:Linux/Filecoder.V!MTB"): on the C3/C4 captures 22 such sites, none with
+        # a second path, a login, a form or a page title; the site actually used had 8 and 43
+        # pages. So a lead needs a path besides "/" and either a second one or a login, form
+        # or page title (ransom protocol text near a bare address looked like a form post).
+        real_paths = len(s["paths"] - {"/"})
+        if not real_paths or (real_paths < 2 and not (s["logins"] or s["forms"] or s["titles"])):
+            continue
+        logins = [{"field": f, "value": v} for f, v in s["logins"]]
+        leads.append(
+            {
+                "onion": host,
+                "mentions": onion_hits.get(host, 0),
+                "page_count": len(s["pages"]),
+                "pages": sorted(s["pages"])[:50],
+                "logins": logins,
+                "usernames": sorted({x["value"] for x in logins if x["field"] in USERNAME_FIELDS}),
+                "form_submissions": [
+                    [{"name": n, "value": v} for n, v in fields] for fields in s["forms"]
+                ],
+                "page_titles": list(s["titles"]),
+                "search_queries": sorted(s["searches"]),
+            }
+        )
+    leads.sort(
+        key=lambda x: (
+            -(len(x["logins"]) + len(x["form_submissions"]) + len(x["page_titles"])),
+            -x["page_count"],
+            -x["mentions"],
+        )
+    )
+    return {
+        "note": "No target was given, so nothing in memory is a finding. These onion sites "
+        "show activity in memory and are grouped by the same anchoring rules a named target "
+        "uses. They were picked by TRANCE, not confirmed by the examiner: re-run with one as "
+        "the target to report it as findings.",
+        "builtin_onions_excluded": sorted(BUILTIN_ONIONS),
+        "sites": leads,
+        "lead_count": sum(
+            x["page_count"] + len(x["logins"]) + len(x["form_submissions"]) + len(x["page_titles"])
+            for x in leads
+        ),
+    }
+
+
 def _build_timeline(
     urls: list[dict],
     cookies: list[dict],
@@ -463,6 +615,7 @@ def _scan_segment(
     require_host_anchor: bool,
     anchor_enabled: bool,
     cookie_names: tuple[str, ...],
+    lead_mode: bool = False,
 ) -> dict:
     """String-carve [start, end) of the dump and return the raw, unmerged partial results.
 
@@ -503,6 +656,9 @@ def _scan_segment(
 
     # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
     target_offsets: list[int] = []
+    # Lead mode (no target on a full-memory image): any onion that is not one of Tor
+    # Browser's own is the anchor, and each anchor remembers which onion it was.
+    lead_marks: list[tuple[int, str]] = []
     pending_field: tuple[str, int] | None = None
     adjacent_pairs: list[dict] = []
     form_candidates: list[dict] = []
@@ -536,10 +692,23 @@ def _scan_segment(
         has_eq = "=" in s
         has_scheme = "://" in s
         has_onion = ".onion" in s_low
-        mentions_target = bool(targets) and any(t in s_low for t in targets)
+        lead_host = None
+        if lead_mode and has_onion:
+            lead_host = next(
+                (
+                    h
+                    for h in (m.group().lower() for m in ONION_DOMAIN_RE.finditer(s))
+                    if _is_lead_host(h)
+                ),
+                None,
+            )
+        mentions_target = (bool(targets) and any(t in s_low for t in targets)) or bool(lead_host)
         s_matches_target = require_host_anchor and mentions_target
+        lead_extra = {"anchor_host": lead_host} if lead_mode else {}
         if owned and mentions_target:
             target_offsets.append(offset)
+            if lead_host:
+                lead_marks.append((offset, lead_host))
 
         if anchor_enabled:
             if s in CREDENTIAL_FIELD_NAMES:
@@ -607,7 +776,9 @@ def _scan_segment(
             unfiltered_url_count += 1
             if len(unfiltered_url_sample) < SAMPLE_CAP:
                 unfiltered_url_sample.append(url)
-            if targets and _matches_target(url_host, targets):
+            if (targets and _matches_target(url_host, targets)) or (
+                lead_mode and _is_lead_host(url_host)
+            ):
                 append_capped(
                     urls,
                     {
@@ -662,7 +833,12 @@ def _scan_segment(
             matches_username = bool(username) and username.lower() in value.lower()
             append_capped(
                 search_queries,
-                {"offset": hex(match_offset), "value": value, "matches_username": matches_username},
+                {
+                    "offset": hex(match_offset),
+                    "value": value,
+                    "matches_username": matches_username,
+                    **lead_extra,
+                },
                 "search_queries",
             )
 
@@ -681,6 +857,7 @@ def _scan_segment(
                     "value": value,
                     "shape": "form",
                     "confidence": confidence,
+                    **lead_extra,
                 },
                 "credentials",
             )
@@ -699,6 +876,7 @@ def _scan_segment(
                     "value": value,
                     "shape": "json",
                     "confidence": confidence,
+                    **lead_extra,
                 },
                 "credentials",
             )
@@ -732,6 +910,7 @@ def _scan_segment(
         "unanchored_counts": unanchored_counts,
         "unanchored_samples": unanchored_samples,
         "target_offsets": target_offsets,
+        "lead_marks": lead_marks,
         "adjacent_pairs": adjacent_pairs,
         "form_candidates": form_candidates,
         "title_candidates": title_candidates,
@@ -774,14 +953,23 @@ def _run_segments(
     pool = ProcessPoolExecutor(max_workers=min(workers, len(segments) + 1))
     try:
         hash_future = pool.submit(hash_file, dump_path)
-        futures = [pool.submit(_scan_segment, dump_path, a, b, **scan_args) for a, b in segments]
+        futures = {
+            pool.submit(_scan_segment, dump_path, a, b, **scan_args): b - a for a, b in segments
+        }
         sha: str | None = None
-        parts: list[dict] = []
-        for future in futures:
-            parts.append(future.result())
+        scanned = 0
+        # Segments finish in any order; results are put back in offset order below.
+        for future in as_completed(futures):
+            future.result()  # a failed segment stops the run here
+            scanned += futures[future]
+            report_progress(
+                f"memory scan {100 * scanned // size}% "
+                f"({scanned / 1e9:.1f} of {size / 1e9:.1f} GB)"
+            )
             if sha is None and hash_future.done():
                 sha = hash_future.result()
                 _check_sidecar(dump_path, sha)
+        parts = [future.result() for future in futures]
         if sha is None:
             sha = hash_future.result()
     except BaseException:
@@ -804,6 +992,7 @@ def _merge_partials(parts: list[dict], record_cap: int) -> dict:
             "unfiltered_url_sample",
             "unfiltered_cookie_sample",
             "target_offsets",
+            "lead_marks",
             "adjacent_pairs",
             "form_candidates",
             "title_candidates",
@@ -826,6 +1015,7 @@ def _merge_partials(parts: list[dict], record_cap: int) -> dict:
             "credentials",
             "downloads",
             "target_offsets",
+            "lead_marks",
             "adjacent_pairs",
             "form_candidates",
             "title_candidates",
@@ -888,8 +1078,14 @@ def analyze(
     # Without --onion/--host nothing on a whole-RAM image can be tied to Tor Browser at all:
     # cookies and downloads (which are never host-anchored) are then observations too.
     unattributed = source_type == "full-memory" and not targets
+    # ...but an examiner without a target still needs to know what was there: every onion
+    # that is not one of Tor Browser's own becomes an anchor, and what anchors to it is
+    # reported per onion as a lead (details["leads"]), never as a finding.
+    # A --username alone already anchors login pairs as findings (unchanged), so leads are
+    # for runs with no target of any kind.
+    lead_mode = unattributed and not username
     # Proximity anchoring (see PROXIMITY_WINDOW): needs at least one target to anchor to.
-    anchor_enabled = bool(targets) or bool(username)
+    anchor_enabled = bool(targets) or bool(username) or lead_mode
 
     parts, dump_sha256 = _run_segments(
         dump_path,
@@ -902,6 +1098,7 @@ def analyze(
             "require_host_anchor": require_host_anchor,
             "anchor_enabled": anchor_enabled,
             "cookie_names": tuple(cookie_names) if cookie_names else DEFAULT_COOKIE_NAMES,
+            "lead_mode": lead_mode,
         },
     )
     integrity_verified = _check_sidecar(dump_path, dump_sha256)
@@ -1080,6 +1277,22 @@ def analyze(
             f"Page title '{cand['title']}' (HTML page linking to {len(shared)} paths seen on the target)",
         )
 
+    leads = None
+    if lead_mode:
+        leads = _build_leads(
+            urls,
+            credentials,
+            search_queries,
+            form_submissions,
+            title_candidates,
+            merged["lead_marks"],
+            onion_domain_hits,
+        )
+        # Not examiner-confirmed, so none of it is a finding: no artifacts, no key findings,
+        # no activity sequence. Everything is under details["leads"], grouped by onion.
+        artifacts = []
+        urls, search_queries, credentials, form_submissions, page_titles = [], [], [], [], []
+
     # Tor Browser itself talks to a handful of bundled default onion services
     # (search engine, connectivity checks) whether or not the user does
     # anything — those show up here too and are expected background noise,
@@ -1088,9 +1301,11 @@ def analyze(
     suggestion_min_hits = SOURCE_TYPE_SUGGESTION_MIN_HITS.get(source_type, SUGGESTION_MIN_HITS)
     targeting_suggestions = [
         {"onion": domain, "hit_count": count}
-        for domain, count in onion_domain_hits.most_common(10)
-        if count >= suggestion_min_hits and not any(domain in t for t in targets)
-    ]
+        for domain, count in onion_domain_hits.most_common(10 + len(BUILTIN_ONIONS))
+        if count >= suggestion_min_hits
+        and not any(domain in t for t in targets)
+        and domain not in BUILTIN_ONIONS
+    ][:10]
 
     def _dedup_high_confidence(items: list[dict], value_key: str) -> list[dict]:
         seen: dict[str, dict] = {}
@@ -1159,6 +1374,7 @@ def analyze(
             "cookie_like": {"count": unfiltered_cookie_count, "sample": unfiltered_cookie_sample},
         },
         "artifacts": artifacts,
+        **({"leads": leads} if leads is not None else {}),
         "truncated": truncated,
         "host_anchoring": {
             "applied": require_host_anchor,

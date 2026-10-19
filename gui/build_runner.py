@@ -97,8 +97,11 @@ class BuildJob:
         exe_name: str = DEFAULT_EXE_NAME,
         popen: Callable[..., subprocess.Popen] = subprocess.Popen,
         now: datetime | None = None,
+        prebuilt: Path | None = None,
     ):
         self.script = Path(script)
+        # A packaged TRANCE's own trance-acquire.exe: copied instead of running PyInstaller.
+        self.prebuilt = Path(prebuilt) if prebuilt else None
         self.exe_name = exe_name
         self.winpmem = Path(winpmem) if winpmem else None
         name = bundle_name(now)
@@ -111,7 +114,10 @@ class BuildJob:
     def preflight(self) -> list[str]:
         """Blocking problems with the chosen folders/files; empty = OK to build."""
         problems = []
-        if not self.script.is_file():
+        if self.prebuilt is not None:
+            if not self.prebuilt.is_file():
+                problems.append(f"Bundled acquisition exe not found: {self.prebuilt}")
+        elif not self.script.is_file():
             problems.append(f"Acquisition script not found: {self.script}")
         for folder in (self.output_dir, self.copy_dir):
             if folder is not None and (conflict := _folder_conflict(folder)):
@@ -137,7 +143,9 @@ class BuildJob:
         work = Path(tempfile.mkdtemp(prefix="trance_build_"))
         created: list[Path] = []
         try:
-            exe = self._pyinstaller(work, on_line)
+            exe = (
+                self._check_prebuilt(on_line) if self.prebuilt else self._pyinstaller(work, on_line)
+            )
             result = self._bundle(exe, created, on_line)
             if self.copy_dir is not None:
                 self._copy_bundle(result, created, on_line)
@@ -150,6 +158,21 @@ class BuildJob:
             shutil.rmtree(work, ignore_errors=True)
 
     # -- steps --------------------------------------------------------------------
+
+    def _check_prebuilt(self, on_line: Callable[[str], None]) -> Path:
+        """The shipped exe must still match the SHA-256 recorded when it was built."""
+        sidecar = self.prebuilt.with_name(self.prebuilt.name + ".sha256")
+        try:
+            expected = sidecar.read_text(encoding="utf-8").split()[0].lower()
+        except (OSError, IndexError) as exc:
+            raise BuildError(f"No SHA-256 record for the bundled exe: {sidecar}") from exc
+        if sha256_of(self.prebuilt) != expected:
+            raise BuildError(
+                "The copy of trance-acquire.exe inside TRANCE does not match its SHA-256; "
+                "the TRANCE installation is damaged. Download it again."
+            )
+        on_line(f"[*] using the trance-acquire.exe shipped with TRANCE, SHA-256 {expected}")
+        return self.prebuilt
 
     def _pyinstaller(self, work: Path, on_line: Callable[[str], None]) -> Path:
         dist = work / "dist"

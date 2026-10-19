@@ -1,0 +1,105 @@
+name: Release
+
+# Push a tag equal to core/version.py's version (v0.1.0; v0.1.0-rc1 for a test build) to
+# build the Windows and Linux packages plus trance-acquire.exe and attach them to a DRAFT
+# GitHub release. A person checks the draft and publishes it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Tag matches core/version.py
+        run: |
+          version=$(python -c "from core.version import __version__; print(__version__)")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "${tag%%-*}" != "$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match core/version.py ($version)"; exit 1
+          fi
+      - run: ruff check .
+      - run: black --check .
+      - run: pytest -q
+
+  acquire:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python scripts/build.py acquire
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trance-acquire
+          path: packaging/acquire/
+          if-no-files-found: error
+
+  app:
+    needs: acquire
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.04: the bundle carries the build machine's system libraries, so an older
+        # glibc (2.35) lets it run on more distributions.
+        os: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon0 libxcb-cursor0 libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libasound2
+      - uses: actions/download-artifact@v4
+        with:
+          name: trance-acquire
+          path: packaging/acquire/
+      - run: pip install -r requirements.txt -r requirements-gui.txt -r requirements-dev.txt
+      - run: python scripts/build.py app
+      - run: python scripts/build.py smoke dist/TRANCE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ runner.os }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  release:
+    needs: app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4  # for .github/release-notes.md
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums
+        working-directory: assets
+        run: sha256sum TRANCE-* trance-acquire.exe > SHA256SUMS && cat SHA256SUMS
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" assets/* --repo "$GITHUB_REPOSITORY" \
+            --draft $prerelease --title "TRANCE ${GITHUB_REF_NAME#v}" \
+            --notes-file .github/release-notes.md --generate-notes

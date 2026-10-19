@@ -109,3 +109,26 @@ def format_relative_time(iso_timestamp: str | None, *, now: datetime | None = No
         if count >= 1:
             return f"{count} {unit}{'s' if count != 1 else ''} ago"
     return "just now"
+
+
+@dataclass
+class CaseLeads:
+    """A no-target memory analysis's leads, for re-running with one as the target."""
+
+    case_name: str
+    evidence_dir: str | None
+    onions: list[str]
+
+
+def case_leads(report_path: Path) -> CaseLeads | None:
+    """The leads of the case whose report.html this is, or None when it has none."""
+    try:
+        findings = json.loads((Path(report_path).parent / FINDINGS_FILENAME).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    memory = findings.get("modules", {}).get("module_c_memory", {}).get("details", {})
+    onions = [site["onion"] for site in (memory.get("leads") or {}).get("sites", [])]
+    if not onions:
+        return None
+    case = findings.get("case", {})
+    return CaseLeads(case.get("name", ""), case.get("evidence_dir"), onions)

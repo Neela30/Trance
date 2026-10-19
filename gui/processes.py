@@ -18,7 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, Signal
 
 from gui.analysis_request import AnalysisRequest
-from gui.analysis_runner import ROOT, parse_line, runner_command, summary_from
+from gui.analysis_runner import ROOT, parse_activity, parse_line, runner_command, summary_from
 
 CANCEL_GRACE_MS = 3000
 MOUNT_TOOLS = ("pkexec", "qemu-nbd", "ntfs-3g", "lsblk", "udevadm")
@@ -34,7 +34,9 @@ def _split_lines(buffer: str) -> tuple[list[str], str]:
 class AnalysisProcess(QObject):
     progress = Signal(str, int, int)  # step name, step, total steps
     log = Signal(str)
-    activity = Signal(str)  # transient status (e.g. carve progress), not worth a log line
+    # Transient status (memory scan, Volatility, carve progress), not worth a log line:
+    # the text for under the bar and the bar percent it stands for (None = text only).
+    activity = Signal(str, object)
     finished_ok = Signal(object)  # gui.analysis_runner.RunSummary
     failed = Signal(str)
     cancelled = Signal()
@@ -110,8 +112,9 @@ class AnalysisProcess(QObject):
         self._stderr += bytes(self._process.readAllStandardError()).decode(errors="replace")
         lines, self._stderr = _split_lines(self._stderr)
         for line in lines:
-            if line.lstrip().startswith("scanned "):
-                self.activity.emit(line.strip())
+            parsed = parse_activity(line)
+            if parsed is not None:
+                self.activity.emit(*parsed)
                 continue
             self._stderr_tail = (self._stderr_tail + [line])[-20:]
             self.log.emit(line)

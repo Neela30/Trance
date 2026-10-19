@@ -34,10 +34,11 @@ from gui.build_inputs import (
     ACQUIRE_SCRIPT,
     DEFAULT_BUILDS_DIR,
     build_support,
+    bundled_acquire_exe,
     check_prerequisites,
     elevation_warning,
 )
-from gui.build_runner import BuildJob
+from gui.build_runner import BuildJob, sha256_of
 from gui.build_worker import BuildWorker
 from gui.theme import StatusIndicator, apply_eyebrow_style, apply_heading_style, mono_css
 
@@ -52,6 +53,7 @@ class BuildTab(QWidget):
         self._worker: BuildWorker | None = None
         self._result = None
         self._supported, self._unsupported_reason = build_support()
+        self._prebuilt = bundled_acquire_exe()
 
         content = QWidget(self)
         content.setMaximumWidth(FORM_MAX_WIDTH)
@@ -96,7 +98,7 @@ class BuildTab(QWidget):
     def _build_masthead(self) -> QHBoxLayout:
         eyebrow = QLabel("Trance", self)
         apply_eyebrow_style(eyebrow)
-        heading = QLabel("Build acquisition tool", self)
+        heading = QLabel("Acquisition tool" if self._prebuilt else "Build acquisition tool", self)
         apply_heading_style(heading)
         heading_col = QVBoxLayout()
         heading_col.addWidget(eyebrow)
@@ -119,17 +121,28 @@ class BuildTab(QWidget):
         return masthead
 
     def _build_info_box(self) -> QGroupBox:
-        label = QLabel(
-            "Packages acquire_all.py into trance-acquire.exe, a single file you run as "
-            "Administrator on the suspect machine (no Python needed there). A SHA-256 file "
-            "is written next to it so the tools drive can be checked before use.",
-            self,
-        )
+        if self._prebuilt:
+            text = (
+                "Saves the trance-acquire.exe that came with this version of TRANCE: a single "
+                "file you run as Administrator on the suspect machine (no Python needed "
+                "there). A SHA-256 file is written next to it so the tools drive can be "
+                "checked before use."
+            )
+            source = f"SHA-256 {sha256_of(self._prebuilt)}"
+        else:
+            text = (
+                "Packages acquire_all.py into trance-acquire.exe, a single file you run as "
+                "Administrator on the suspect machine (no Python needed there). A SHA-256 "
+                "file is written next to it so the tools drive can be checked before use."
+            )
+            source = f"Script: {ACQUIRE_SCRIPT.name}"
+        label = QLabel(text, self)
         label.setWordWrap(True)
         label.setStyleSheet("color: #8b969c;")
 
-        script_label = QLabel(f"Script: {ACQUIRE_SCRIPT.name}", self)
-        apply_eyebrow_style(script_label, f"Script: {ACQUIRE_SCRIPT.name}")
+        script_label = QLabel(source, self)
+        script_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        apply_eyebrow_style(script_label, source)
 
         box = QGroupBox(self)
         layout = QVBoxLayout()
@@ -195,7 +208,9 @@ class BuildTab(QWidget):
         return box
 
     def _build_run_row(self) -> QHBoxLayout:
-        self._build_button = QPushButton("Build trance-acquire.exe", self)
+        self._build_button = QPushButton(
+            "Save trance-acquire.exe" if self._prebuilt else "Build trance-acquire.exe", self
+        )
         self._build_button.setProperty("class", "primary")
         self._build_button.setFixedWidth(RUN_BUTTON_WIDTH)
         self._build_button.clicked.connect(self._start_build)
@@ -249,20 +264,21 @@ class BuildTab(QWidget):
     def _start_build(self) -> None:
         if not self._supported:
             return
-        problems = check_prerequisites()
+        problems = [] if self._prebuilt else check_prerequisites()
         if not self._output_picker.path():
             problems.append("Choose a folder to save the build to.")
         job = BuildJob(
             Path(self._output_picker.path() or "."),
             copy_to=Path(self._copy_picker.path()) if self._copy_picker.path() else None,
             winpmem=Path(self._winpmem_picker.path()) if self._winpmem_picker.path() else None,
+            prebuilt=self._prebuilt,
         )
         problems += job.preflight() if self._output_picker.path() else []
         if problems:
-            QMessageBox.warning(self, "Can't build yet", "\n\n".join(problems))
+            QMessageBox.warning(self, "Can't start yet", "\n\n".join(problems))
             return
 
-        warning = elevation_warning()
+        warning = None if self._prebuilt else elevation_warning()
         if warning:
             answer = QMessageBox.warning(
                 self,
@@ -280,8 +296,9 @@ class BuildTab(QWidget):
         self._open_folder_button.setVisible(False)
         self._progress.setRange(0, 0)
         self._stamp.set_status("skipped")
-        self._stamp.set_text("Building")
-        apply_eyebrow_style(self._status_label, "Building…")
+        busy = "Saving" if self._prebuilt else "Building"
+        self._stamp.set_text(busy)
+        apply_eyebrow_style(self._status_label, f"{busy}…")
         self._log_view.clear()
         if warning:
             self._log_view.appendPlainText(f"[!] {warning}")

@@ -653,6 +653,19 @@ What follows describes the current state.
     the report opens the memory section with a callout naming the most-mentioned onion as a
     re-run command; `main.py` and the GUI warn up front (`main.no_target_warning()`). A
     full-memory image is now *always* host-anchored (username-only no longer turns it off).
+    **Leads (2026-10-19):** with no onion, host or username, the scan anchors to *any* valid v3
+    onion that is not one of Tor Browser's own (`analyzer.BUILTIN_ONIONS`: torproject.org's
+    services, DuckDuckGo, Cloudflare; each ~20x in RAM on the negative control) and
+    `_build_leads()` groups what anchored into `details["leads"]["sites"]` per onion (pages,
+    logins, forms, page titles, searches). Leads are never artifacts. A lead needs a path besides
+    `/` plus a second path or a login/form/title: Defender signature data names ransomware onions
+    with one address each (`/`, `/btRansom:Linux/Filecoder.V!MTB`). The checksum
+    (`module_b_disk.onion.is_v3_onion`) drops address fragments. Measured without a target: C3 ->
+    one lead, the planted site, 8 pages; C4 -> one lead, 43 pages, 2 logins (tessa.maricourt),
+    2 forms, 14 titles; same ~95 s scan. The report says "no target given · N onion sites with
+    activity · M leads" instead of "0 findings"; the GUI Report tab's "Analyse with a lead as
+    target" fills the Analyse form (`gui.history.case_leads`). The NC image is no longer on disk,
+    so NC has not been re-checked with leads.
     **Still open:** with a target given, downloads and cookies are still not anchored, so
     antivirus-signature paths (`c:\users\admin\downloads\…virus.exe`) and `session=`
     PowerShell text remain findings even in the negative control (19 + 5 there). Letter case
@@ -786,8 +799,15 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
 - `processes.py` — Qt wrappers: `AnalysisProcess` (QProcess, signals, terminate→kill cancel)
   and `MountSession`. Analyse tab order: mount → analyse with `disk_root=<mountpoint>` →
   unmount → show result; also unmounts on failure/cancel/window close.
-- Progress bar: 0–100 with a `QTimer` easing toward the last real checkpoint (25/50/75/100).
-  Honest limitation: there are only 4 real checkpoints; it's visual smoothing.
+- Progress bar: 0–100 with a `QTimer` easing toward the last reported position, never backwards.
+  Positions come from the 4 pipeline checkpoints (a finished registry/disk layer only nudges the
+  bar; all layers done = 90, report written = 100) and from `progress: ...` lines the long steps
+  print on stderr (`core/progress.py`): the integrity hash check (4-10%, per 2% of bytes, via
+  `hash_file(on_chunk=)`), the memory scan (10-80%, per finished segment) and Volatility
+  (80-88%, per plugin). `gui.analysis_runner.parse_activity()` maps a line to (text, bar);
+  Module B's carve redraws its `scanned ...` line with a bare `\r`, so a progress line can arrive
+  glued to it and the parser takes the last `progress:` part. Before 2026-10-20 the bar sat at
+  50% for the whole memory scan (registry and disk finish in seconds).
 - `report_tab.py` — `QWebEngineView` loading the existing `report.html` (paths must be
   resolved to absolute before `QUrl.fromLocalFile`). Locked down via `report_policy.py`
   (Qt-free): JavaScript off, `LocalContentCanAccess{Remote,File}Urls` off, downloads
@@ -842,36 +862,51 @@ Qt gotchas already hit (don't rediscover them):
 
 ## 7. Packaging status
 
-**Nothing is fully packaged or released yet.** Current state:
+**Release pipeline built 2026-10-14** (Windows + Linux; macOS not packaged). Pushing a tag
+`v<core.version>` (or `-rcN`) runs `.github/workflows/release.yml`: tests -> `trance-acquire.exe`
+on windows-latest -> the app on windows-latest and ubuntu-22.04 (with that exe inside) ->
+`scripts/build.py smoke` on both -> a **draft** GitHub release with the archives, the exe +
+`.sha256` and `SHA256SUMS`. The tag must equal `core/version.py`'s version (the job checks).
+**The workflow has not run yet** -- first try an `-rc` tag.
 
-| Exe | Source | Status |
+| Package | Built by | Status |
 |---|---|---|
-| `trance-acquire` | `acquire_all.py` | Built 2026-10-13 through `gui.build_runner.BuildJob` on a Windows 11 dev machine (12.7 MB, sidecar checked with `sha256sum -c`); **not run** there. Before that: built ad hoc once on the Windows VM (`C:\forensics\TRANCE-new`); ran successfully 2026-09-29 (registry ✓, disk ✓ via auto-discovery, memory ✗ because Tor Browser wasn't running and WinPMEM auto-discovery didn't exist yet). **Not rebuilt/retested since commit `a544840`.** |
-| `trance-analyze` | `analyze_evidence.py` | Linux build only (dev proxy + a local `dist/` build). Never built/run on Windows. |
-| `trance-gui` | `gui_main.py` | Linux build only (~290 MB `--onefile`, QtWebEngine). Never built/run on Windows. |
+| `TRANCE-<v>-linux-x64.tar.gz` | `scripts/build.py app` (`packaging/trance.spec`) | Built and checked locally 2026-10-14: smoke passes; offscreen GUI start; a real c3 analysis gives findings identical to a source run. 489 MB unpacked / 193 MB archive. |
+| `TRANCE-<v>-windows-x64.zip` | same, on Windows | **Never built yet** (CI will be the first). |
+| `trance-acquire.exe` | `scripts/build.py acquire` (reuses `gui.build_inputs.build_pyinstaller_argv`) | Built 2026-10-13 via the Build tab on a Windows 11 machine, **not run**. Last real run 2026-09-29 on the VM (before `a544840`). |
 
-Build commands (from repo root; on Windows use `;` instead of `:` in `--add-data`):
-```bash
-pyinstaller --onefile --name trance-acquire acquire_all.py
-pyinstaller --onefile --name trance-analyze analyze_evidence.py \
-  --hidden-import modules.module_a_registry --hidden-import modules.module_b_disk \
-  --hidden-import modules.module_c_memory \
-  --collect-all tzdata \
-  --add-data "report_template.html.j2:." \
-  --add-data "modules/module_c_memory/report_template.html.j2:modules/module_c_memory"
-# trance-gui: same flags as trance-analyze plus --collect-all PySide6, entry gui_main.py
-```
-`--collect-all tzdata` is required on both trance-analyze and trance-gui: Windows has no
-OS-level tz database, so `zoneinfo` (report-timezone display, both CLI and GUI) depends
-entirely on the `tzdata` package's data files, which PyInstaller's default import analysis
-does not follow (they're not `.py` modules). Without it every zone name silently fails to
-resolve in the built exe even though it works fine from source.
-The memory scan now uses a process pool: a frozen exe re-launches itself per worker, which
-is why `multiprocessing.freeze_support()` is called at `main.py`, `analyze_evidence.py` and
-`gui_main.py`'s entry points -- **untested in a built Windows exe**; check it when the exes
-are next built.
-PyInstaller never cross-compiles: Windows exes must be built on Windows. `*.spec`, `build/`,
-`dist/` are gitignored.
+How the package works:
+- **One folder, not --onefile** (`TRANCE/TRANCE[.exe]` + `_internal/`): a 400+ MB onefile would
+  unpack on every start and again for each `--run-analysis` child. The same binary serves
+  `--run-analysis` / `--mount-helper` (`gui_main.py` dispatch). `console=False` on Windows; the
+  child's stdout is a QProcess pipe (the Windows smoke test is what proves this works).
+- `packaging/trance.spec`: hidden imports via `collect_submodules("modules")` + regipy plugins +
+  `pyfwsi`/`pyfwps`; tzdata data files (Windows has no tz database); **library metadata** for
+  `core.provenance.LIBRARIES` (without it every report's library versions are `None`; smoke
+  asserts them); Qt trimmed by an allow-list (`QT_KEEP`, the ldd closure of WebEngine Widgets)
+  plus QML modules, `.qm` translations and four plugins dropped -- 610 -> 477 MB.
+- **Volatility3 is bundled** as a second program `vol[.exe]` (`packaging/vol_entry.py`, its own
+  Analysis/EXE in the same COLLECT, +12 MB). It is kept as `.py` files on disk
+  (`module_collection_mode={"volatility3": "py"}`) because `volatility3.framework.import_files`
+  finds plugins with `os.walk`. `gui.advanced_inputs.default_vol3()` fills the Memory options
+  field with it when frozen (else `vol` on PATH, as from a venv). `console=False` so Windows
+  opens no console per plugin. Symbols: same as from source, downloaded on first use and cached
+  in `~/.cache/volatility3`. Smoke checks `vol -h` lists the windows plugins.
+- `packaging/acquire/trance-acquire.exe` (+ `.sha256`, gitignored) is shipped inside the app when
+  present. Frozen, `gui.build_inputs.bundled_acquire_exe()` finds it and the Build tab becomes
+  "Save trance-acquire.exe" on any OS: `BuildJob(prebuilt=...)` re-checks the shipped sidecar,
+  then does the usual bundle/sidecar/WinPMEM/tools-drive copy without PyInstaller.
+- Frozen default output dir is `~/TRANCE/cases` (source: `output/`).
+- **Linux build gotcha:** PyInstaller parses `ldd` lines `lib => /path (0x...)`; a `(` in the repo or
+  venv path (this checkout is under `UOM (Semester 05)`) makes it silently drop every Qt library,
+  and the app dies on start (`libshiboken6... cannot open`). `build.py app` refuses such paths;
+  build from a copy elsewhere (e.g. rsync to /tmp with its own venv).
+- PyInstaller is pinned (`requirements-dev.txt`); runtime deps aren't, so two releases can bundle
+  different library versions -- the report's provenance records which.
+- `freeze_support()` is called at the entry points; the smoke test's 96 MiB sparse image makes
+  the memory scan use its process pool, so the frozen pool is exercised (Linux: passes).
+- `trance-analyze` (a separate CLI exe) is no longer built; GUI-first. The README's per-script
+  `pyinstaller` lines for the standalone dumper etc. are still valid for ad-hoc builds.
 
 ---
 
@@ -888,7 +923,7 @@ PyInstaller never cross-compiles: Windows exes must be built on Windows. `*.spec
    the real VM manifest in `../vm-shared/`. A manifest entry whose file wasn't copied still
    resolves to a (missing) path inside the evidence folder on purpose — it never silently
    substitutes a different acquisition's file.
-2. Rebuild `trance-acquire.exe` from current `dev` and do a real run **with Tor Browser open
+2. Rebuild `trance-acquire.exe` (now: download it from an `-rc` release) and do a real run **with Tor Browser open
    and a WinPMEM binary present**, to verify the live dump and the full-image path for real.
    The acquire folder must be copied **whole** — the 2026-09-29 copy in `../vm-shared/` is
    missing its `registry/` subfolder (the `SYSTEM_20260918…` hives at its root are an older,
@@ -949,10 +984,9 @@ workflow on large changes):
 
 ### P1 — packaging
 
-- Commit curated `.spec` files or a build script (Makefile targets / `scripts/build.py`) so
-  the hidden-imports/add-data/collect-all flags aren't retyped by hand.
-- A `windows-latest` GitHub Actions job that builds the three exes and uploads artifacts.
-- Version stamping, code signing / AV-allowlisting guidance (onefile exes get flagged).
+- ~~Curated spec / build script; a windows-latest release job~~ -- **done** (§7); run the first
+  `-rc` tag and fix what the Windows job finds.
+- Code signing (none yet; README documents SmartScreen/AV allow-listing). macOS package.
 - Decide WinPMEM distribution: currently examiner-supplied and auto-discovered; check its
   license before bundling.
 - Build from a non-admin shell (PyInstaller warns and v7 will refuse elevated builds).

@@ -465,4 +465,6 @@ def build_context(details: dict, local_tz: str | None = None) -> dict:
         "cluster_gap_bytes": CLUSTER_GAP_BYTES,
         "volatility3": _vol3_context(details),
         "basis": _basis(details),
+        # No target given: onion sites with activity, picked by TRANCE (not findings).
+        "leads": details.get("leads"),
     }

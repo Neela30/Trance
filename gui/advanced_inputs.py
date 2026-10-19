@@ -18,6 +18,7 @@ every help line clear of the next control, so the form reads as steps, not a wal
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -45,6 +46,17 @@ from core.config import CASE_INFO_FIELDS
 from core.safety import default_limits, limits_supported
 from gui.analysis_request import INPUT_SPECS, SummaryRow, display_path
 from gui.theme import COLORS
+
+
+def default_vol3() -> str:
+    """The packaged app's own vol (next to TRANCE, see packaging/trance.spec), else a vol on
+    PATH, as in a source venv; blank = the structural pass is skipped."""
+    if getattr(sys, "frozen", False):
+        bundled = Path(sys.executable).with_name("vol.exe" if sys.platform == "win32" else "vol")
+        if bundled.is_file():
+            return str(bundled)
+    return shutil.which("vol") or ""
+
 
 # Breathing room, in px -- used consistently across the tab.
 FIELD_GAP = 8  # label -> its field
@@ -555,7 +567,7 @@ class MemoryPage(_Page):
         )
 
         self.vol3 = PathPicker("Not set: the structural pass is skipped", is_dir=False, parent=self)
-        self.vol3.set_path(shutil.which("vol") or "")
+        self.vol3.set_path(default_vol3())
         self.body.addLayout(
             labelled(
                 field_label("Volatility3", self),

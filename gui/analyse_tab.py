@@ -64,6 +64,11 @@ RUN_BUTTON_WIDTH = 240
 RECENT_CASES_SHOWN = 3
 PROGRESS_TICK_MS = 60
 PROGRESS_STARTUP_TARGET = 6  # nominal early crawl before the first real checkpoint
+LAYER_NAMES = {
+    "module_a_registry": "Registry",
+    "module_b_disk": "Disk",
+    "module_c_memory": "Memory",
+}
 
 
 class _EvidenceDropField(QLineEdit):
@@ -113,7 +118,7 @@ class AnalyseTab(QWidget):
         self._analysis = AnalysisProcess(self)
         self._analysis.progress.connect(self._on_progress)
         self._analysis.log.connect(self._on_log_line)
-        self._analysis.activity.connect(lambda text: apply_eyebrow_style(self._status_label, text))
+        self._analysis.activity.connect(self._on_activity)
         self._analysis.finished_ok.connect(self._on_finished)
         self._analysis.failed.connect(self._on_failed)
         self._analysis.cancelled.connect(self._on_cancelled)
@@ -313,6 +318,16 @@ class AnalyseTab(QWidget):
             self._discovered = {}
             QMessageBox.warning(self, "Evidence folder", f"Could not read the folder: {exc}")
         self._options.inputs.set_discovered(self._discovered, folder)
+        self._refresh_summary()
+
+    def prepare_lead_rerun(self, leads, onion: str) -> None:
+        """Fill the form to analyse a case again with one of its memory leads as the target:
+        same evidence folder, a new case name (outputs are never overwritten), the onion set.
+        The examiner checks the form and presses Run."""
+        if leads.evidence_dir and Path(leads.evidence_dir).is_dir():
+            self._set_evidence_folder(leads.evidence_dir)
+        self._case_field.setText(f"{leads.case_name}-{onion[:8]}")
+        self._onion_field.setText(onion)
         self._refresh_summary()
 
     def _refresh_summary(self) -> None:
@@ -535,10 +550,9 @@ class AnalyseTab(QWidget):
             self._recent_cases_box.setVisible(True)
 
     def _animate_progress(self) -> None:
-        """Eases the displayed value toward the last confirmed checkpoint instead of
-        snapping straight to it -- main.run_pipeline only reports 4 real checkpoints
-        (3 modules + finalize), so this is a visual smoothing of those, not finer-
-        grained data the pipeline doesn't actually have."""
+        """Eases the displayed value toward the last reported position instead of snapping
+        to it. Positions come from the 4 pipeline checkpoints (3 modules + report) and the
+        progress lines of the long steps (hash check, memory scan, Volatility)."""
         current = self._progress.value()
         if current >= self._progress_target:
             return
@@ -546,8 +560,25 @@ class AnalyseTab(QWidget):
         self._progress.setValue(min(self._progress_target, current + step))
 
     def _on_progress(self, name: str, step: int, total: int) -> None:
-        self._progress_target = int(step / total * 100)
-        apply_eyebrow_style(self._status_label, f"{name} ({step}/{total})")
+        """A module finished (steps 1..total-1, in finishing order) or the report is written
+        (step == total). Registry and disk usually finish within seconds while memory takes
+        minutes, so a finished module only nudges the bar; the memory scan's own progress
+        (_on_activity) carries it from there."""
+        layers = total - 1
+        if step >= total:
+            target, text = 100, "Report written"
+        elif step == layers:
+            target, text = 90, "All layers analysed; writing the report…"
+        else:
+            target = PROGRESS_STARTUP_TARGET + 5 * step
+            text = f"{LAYER_NAMES.get(name, name)} done ({step} of {layers})"
+        self._progress_target = max(self._progress_target, target)
+        apply_eyebrow_style(self._status_label, text)
+
+    def _on_activity(self, text: str, bar: int | None) -> None:
+        if bar is not None:
+            self._progress_target = max(self._progress_target, bar)
+        apply_eyebrow_style(self._status_label, text)
 
     def _on_log_line(self, line: str) -> None:
         self._log_view.appendPlainText(line)

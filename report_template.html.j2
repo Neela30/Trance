@@ -167,6 +167,7 @@
 </head>
 <body>
 <div class="page">
+{% macro lead_summary(l) %}{% set parts = [] %}{% if l.page_count %}{% set _ = parts.append(l.page_count ~ " page" ~ ("s" if l.page_count != 1 else "")) %}{% endif %}{% if l.logins %}{% set _ = parts.append(l.logins|length ~ " login value" ~ ("s" if l.logins|length != 1 else "") ~ ((" (user " ~ l.usernames|join(", ") ~ ")") if l.usernames else "")) %}{% endif %}{% if l.form_submissions %}{% set _ = parts.append(l.form_submissions|length ~ " form submission" ~ ("s" if l.form_submissions|length != 1 else "")) %}{% endif %}{% if l.page_titles %}{% set _ = parts.append(l.page_titles|length ~ " page title" ~ ("s" if l.page_titles|length != 1 else "")) %}{% endif %}{{ parts|join(", ") }}{% endmacro %}
 {% macro based_on(items) %}{% if items %}<p class="note basis"><strong>Based on:</strong> {{ cite(items)|join(" · ") }}</p>{% endif %}{% endmacro %}
 
   {% set modules = findings.modules %}
@@ -220,7 +221,7 @@
     <div class="layer">
       <div>
         <h3>{{ layer_names.get(name, name) }}</h3>
-        <span class="status"><span class="chip {{ m.status }}">{{ status_words.get(m.status, m.status) }}</span>{% if m.status in ['ok', 'partial'] %} · {{ m.artifact_count }} finding{{ 's' if m.artifact_count != 1 }}{% endif %}</span>
+        <span class="status"><span class="chip {{ m.status }}">{{ status_words.get(m.status, m.status) }}</span>{% if m.status in ['ok', 'partial'] %}{% if name == "module_c_memory" and memory and memory.leads is not none %}{% set ls = memory.leads.sites %} · no target given · {{ ls|length }} onion site{{ "s" if ls|length != 1 }} with activity · {{ memory.leads.lead_count }} lead{{ "s" if memory.leads.lead_count != 1 }}{% else %} · {{ m.artifact_count }} finding{{ 's' if m.artifact_count != 1 }}{% endif %}{% endif %}</span>
       </div>
       <div>
         {% if name == "module_a_registry" and registry %}
@@ -257,7 +258,11 @@
         {% set d = memory.details %}
         <ul>
       {% if d.host_anchoring.no_target %}
-      <li>No target was given, so nothing in memory is attributed to Tor Browser{% if d.targeting_suggestions %}; the onion address seen most often is {{ d.targeting_suggestions[0].onion }}{% endif %}.</li>
+      {% if memory.leads and memory.leads.sites %}
+      <li>No target was given, so nothing in memory is counted as a finding. TRANCE found activity in memory on {{ memory.leads.sites|length }} onion site{{ "s" if memory.leads.sites|length != 1 }}, shown as leads until the examiner confirms one as the target: {% for l in memory.leads.sites[:3] %}{{ l.onion }} ({{ lead_summary(l) }}){{ "; " if not loop.last }}{% endfor %}{% if memory.leads.sites|length > 3 %}; and {{ memory.leads.sites|length - 3 }} more{% endif %}.</li>
+      {% else %}
+      <li>No target was given, so nothing in memory is counted as a finding, and apart from Tor Browser's own built-in services no onion site shows activity in memory.</li>
+      {% endif %}
       {% endif %}
       {% set pa = memory.volatility3.process_activity %}
       {% if pa and pa.groups %}
@@ -266,10 +271,10 @@
       {% set mem_found = [] %}
       {% set mem_empty = [] %}
       {% for one, many, none_label, value in [("session cookie", "session cookies", "session cookies", memory.session_cookies), ("credential", "credentials", "credentials", d.key_findings.credentials), ("page on the target site", "pages on the target site", "pages on the target site", memory.site_map), ("download from the target site", "downloads from the target site", "downloads from the target site", memory.downloads.matched), ("search term", "search terms", "search terms", memory.search_terms), ("activity-sequence event", "activity-sequence events", "activity sequence", memory.events)] %}{% set _ = (mem_found if value else mem_empty).append((one if value|length == 1 else many, none_label, value|length)) %}{% endfor %}
-      {% if mem_found %}
+      {% if mem_found and not d.host_anchoring.no_target %}
       <li>Recovered: {% for label, _, n in mem_found %}{{ n }} {{ label }}{{ ", " if not loop.last }}{% endfor %}.</li>
       {% endif %}
-      {% if mem_empty %}
+      {% if mem_empty and not d.host_anchoring.no_target %}
       <li>Nothing recovered for: {% for _, label, n in mem_empty %}{{ label }}{{ ", " if not loop.last }}{% endfor %}.</li>
       {% endif %}
         </ul>
@@ -972,13 +977,34 @@
   {% set held = d.host_anchoring.unanchored.values()|map(attribute="count")|sum %}
   <section>
     <div class="callout">
-      <strong>No target was given, so nothing in this memory section is attributed to Tor Browser.</strong>
-      A full-memory image holds every process's memory (antivirus signatures, scripts and other programs' data), and without an <span class="mono">--onion</span> or <span class="mono">--host</span> there is nothing to tie a credential, cookie, search or download path to the browser. The {{ "{:,}".format(held) }} such match{{ "es" if held != 1 }} found are kept in <span class="mono">findings.json</span> as unattributed observations (<span class="mono">host_anchoring.unanchored</span>), not reported as findings.
-      {% if d.targeting_suggestions %}
-      The onion address mentioned most often in memory is <span class="mono">{{ d.targeting_suggestions[0].onion }}</span> ({{ d.targeting_suggestions[0].hit_count }}&times;). If it is the site under investigation, run the analysis again with <span class="mono">--onion {{ d.targeting_suggestions[0].onion }}</span>. Tor Browser's own built-in services can also appear in this list, so check it first.
-      {% endif %}
+      <strong>No target was given, so nothing in this memory section is counted as a finding.</strong>
+      A full-memory image holds every process's memory (antivirus signatures, scripts and other programs' data), so a credential, page or search in it only counts once it is tied to the site under investigation. Without a target, TRANCE tied what it could to each onion site found in memory, using the same rules a named target uses, and lists the results below as <strong>leads</strong>: found by TRANCE, not confirmed by the examiner. To report a lead as findings, analyse again with that onion as the target (in the TRANCE app: Report tab, <em>Analyse with a lead as target</em>). Tor Browser's own built-in onion services are left out. The {{ "{:,}".format(held) }} match{{ "es" if held != 1 }} not tied to any site are kept in <span class="mono">findings.json</span> (<span class="mono">host_anchoring.unanchored</span>).
     </div>
   </section>
+  {% if memory.leads %}
+  <section>
+    <div class="section-head"><h2>Leads: onion sites with activity in memory</h2><span class="count">{{ memory.leads.sites|length }} site{{ "s" if memory.leads.sites|length != 1 }} · {{ memory.leads.lead_count }} lead{{ "s" if memory.leads.lead_count != 1 }} · not confirmed</span></div>
+    {% if memory.leads.sites %}
+    {% for l in memory.leads.sites %}
+    <div class="callout">
+      <strong class="mono">{{ l.onion }}</strong>: {{ lead_summary(l) }}. Mentioned {{ l.mentions }} time{{ "s" if l.mentions != 1 }} in memory.
+      <ul style="margin:8px 0 0; padding-left:18px;">
+        {% if l.pages %}<li>Pages: <span class="mono">{{ l.pages[:12]|join(", ") }}</span>{% if l.page_count > 12 %} and {{ l.page_count - 12 }} more{% endif %}</li>{% endif %}
+        {% if l.logins %}<li>Login values: {% for x in l.logins %}<span class="mono">{{ x.field }}={{ x.value|mask if x.field is secret_field else x.value }}</span>{{ ", " if not loop.last }}{% endfor %}</li>{% endif %}
+        {% if l.form_submissions %}<li>Form submissions: {% for f in l.form_submissions %}<span class="mono">{% for x in f %}{{ x.name }}={{ x.value|mask if x.name is secret_field else x.value }}{{ "&" if not loop.last }}{% endfor %}</span>{{ "; " if not loop.last }}{% endfor %}</li>{% endif %}
+        {% if l.page_titles %}<li>Page titles: {{ l.page_titles|join(" · ") }}</li>{% endif %}
+        {% if l.search_queries %}<li>Searches: {{ l.search_queries|join(", ") }}</li>{% endif %}
+      </ul>
+    </div>
+    {% endfor %}
+    {% else %}
+    <p class="note">Apart from Tor Browser's own built-in services, no onion site shows activity (a page, login, form or page title) in memory.</p>
+    {% endif %}
+    {% if d.host_anchoring.unanchored.cookies and d.host_anchoring.unanchored.cookies.count %}
+    <p class="note">{{ d.host_anchoring.unanchored.cookies.count }} cookie value{{ "s" if d.host_anchoring.unanchored.cookies.count != 1 }} with the configured cookie names {{ "are" if d.host_anchoring.unanchored.cookies.count != 1 else "is" }} in memory; a cookie is not stored next to the site that set it, so it is not tied to any lead.</p>
+    {% endif %}
+  </section>
+  {% endif %}
   {% endif %}
 
   {% if d.targeting_suggestions %}
@@ -1287,7 +1313,9 @@
       {% if memory.search_terms and not memory.details.targeting.username %}
       <li>Re-run with <span class="mono">--username &lt;candidate&gt;</span> to confirm which search term was the real login via the <span class="mono">matches_username</span> flag.</li>
       {% endif %}
-      {% if memory.details.targeting_suggestions %}
+      {% if memory.leads and memory.leads.sites %}
+      <li>Confirm the lead{{ "s" if memory.leads.sites|length != 1 }} in the memory section: analyse again with the onion under investigation as the target (in the TRANCE app: Report tab, <em>Analyse with a lead as target</em>), so its pages, logins and cookies are reported as findings.</li>
+      {% elif memory.details.targeting_suggestions %}
       <li>Check the onion address(es) flagged in the memory section; re-run with <span class="mono">--onion</span> set to any that turn out to be a real missed target.</li>
       {% endif %}
       {% if (memory.session_cookies or memory.site_map) and not memory.details.key_findings.credentials %}

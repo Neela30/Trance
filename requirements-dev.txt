@@ -5,4 +5,4 @@ pytest-cov
 mypy
 ruff
 black
-pyinstaller
+pyinstaller==6.22.3  # pinned: release builds (scripts/build.py) must be repeatable

@@ -183,3 +183,34 @@ def test_mount_helper_refuses_to_run_without_root(capsys):
     assert mount_helper.main(["session", "/tmp/x.vdi"]) == 1
     assert "must run as root" in capsys.readouterr().out
     assert mount_helper.main(["bogus"]) == 2
+
+
+def test_progress_lines_move_the_bar_forward_through_a_run():
+    parse = analysis_runner.parse_activity
+    run = [
+        "progress: checking evidence hashes",
+        "progress: checking evidence hashes 40% (3.8 of 9.6 GB)",
+        "progress: memory scan 12% (1.0 of 8.6 GB)",
+        "progress: memory scan 100% (8.6 of 8.6 GB)",
+        "progress: memory: Volatility windows.psscan.PsScan (1 of 5)",
+        "progress: memory: Volatility windows.registry.hivelist.HiveList (5 of 5)",
+        "progress: writing the report",
+    ]
+    bars = [parse(line)[1] for line in run]
+    assert bars == sorted(bars) and bars[0] > 0 and bars[-1] < 100
+    assert parse(run[2])[0] == "Memory scan 12% (1.0 of 8.6 GB)"
+    assert parse(run[0])[0] == "Checking evidence hashes…"
+    # Module B's raw-carve lines are text only; ordinary log lines are not progress.
+    assert parse("  scanned   0.06 GiB / 1.88 GiB (  3.3%)") == (
+        "Disk: scanned 0.06 GiB / 1.88 GiB ( 3.3%)",
+        None,
+    )
+    # A progress line written right after the carve's carriage-return redraw is glued to it.
+    glued = (
+        "scanned 0.06 GiB / 1.88 GiB (3.3%)  auth creds: 0progress: memory scan 23% (2.1 of 9.1 GB)"
+    )
+    assert parse(glued) == (
+        "Memory scan 23% (2.1 of 9.1 GB)",
+        parse(run[2].replace("12%", "23%"))[1],
+    )
+    assert parse("[*] module_a_registry: ok (34 artifacts)") is None

@@ -30,13 +30,27 @@ def default_output_name() -> str:
     return f"{DEFAULT_EXE_NAME}.exe"
 
 
+def bundled_acquire_exe() -> Path | None:
+    """The trance-acquire.exe a packaged TRANCE ships inside itself (packaging/trance.spec),
+    or None from a source checkout or a build made without one."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    if not getattr(sys, "frozen", False) or not bundle:
+        return None
+    exe = Path(bundle) / "acquire" / default_output_name()
+    return exe if exe.is_file() else None
+
+
 def build_support(platform: str | None = None) -> tuple[bool, str]:
-    """Whether this machine can build trance-acquire.exe, and why not if it can't."""
+    """Whether this machine can build trance-acquire.exe (or, in a packaged app, save the
+    copy it ships with), and why not if it can't."""
+    if bundled_acquire_exe() is not None:
+        return True, ""  # only copied, never run here, so any OS will do
     if (platform or sys.platform) != "win32":
         return False, NOT_WINDOWS_REASON
     if getattr(sys, "frozen", False):
         return False, (
-            "The packaged app can't run PyInstaller. Build from a source checkout: "
+            "This copy of TRANCE was packaged without trance-acquire.exe and can't run "
+            "PyInstaller. Use an official release, or build from a source checkout: "
             "python gui_main.py, with requirements-dev.txt installed."
         )
     return True, ""

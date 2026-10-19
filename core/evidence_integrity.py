@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 
 from core.hashing import hash_file
+from core.progress import report as report_progress
 
 HASH_SUFFIX = ".sha256"
 HASH_LIST_NAME = "hashes.sha256"
@@ -194,8 +196,9 @@ def verify_evidence(
             expectations.append((record.parent / name, digest, record))
 
     targets = sorted({target for target, _, _ in expectations if target.is_file()})
+    counted = _ProgressCounter(sum(t.stat().st_size for t in targets))
     with ThreadPoolExecutor(max_workers=_hash_workers()) as pool:
-        actual = dict(zip(targets, pool.map(_safe_hash, targets)))
+        actual = dict(zip(targets, pool.map(lambda t: _safe_hash(t, counted.add), targets)))
 
     verified: list[str] = []
     mismatched: list[dict] = []
@@ -255,11 +258,31 @@ def verify_evidence(
     }
 
 
-def _safe_hash(path: Path) -> str | OSError:
+def _safe_hash(path: Path, on_chunk=None) -> str | OSError:
     try:
-        return hash_file(path)
+        return hash_file(path, on_chunk=on_chunk)
     except OSError as exc:
         return exc
+
+
+class _ProgressCounter:
+    """Bytes hashed so far across the hashing threads; a progress line every 2%. A multi-GB
+    memory image makes this check half a minute or more before any module starts."""
+
+    def __init__(self, total: int):
+        self.total, self.done, self.shown = max(total, 1), 0, -2
+        self.lock = threading.Lock()
+
+    def add(self, n: int) -> None:
+        with self.lock:
+            self.done += n
+            done, percent = self.done, 100 * self.done // self.total
+            if percent < self.shown + 2:
+                return
+            self.shown = percent
+        report_progress(
+            f"checking evidence hashes {percent}% ({done / 1e9:.1f} of {self.total / 1e9:.1f} GB)"
+        )
 
 
 def _message(status, verified, mismatched, missing, problems, unhashed) -> str:

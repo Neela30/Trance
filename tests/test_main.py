@@ -111,12 +111,12 @@ def test_cli_warns_that_a_full_memory_image_without_target_gives_observations_on
         ]
     )
     err = capsys.readouterr().err
-    assert "observations only" in err
+    assert "listed as leads, not findings" in err
 
 
 def test_no_target_warning_for_a_process_dump_is_about_urls_only():
     assert "targeted URLs will be empty" in main.no_target_warning("process")
-    assert "observations only" not in main.no_target_warning("process")
+    assert "leads" not in main.no_target_warning("process")
 
 
 def test_case_details_reach_findings_and_the_report(tmp_path):

@@ -29,6 +29,7 @@ from core.config import CASE_INFO_FIELDS, TranceConfig
 from core.custody_log import CustodyEntry, CustodyLog
 from core.evidence_integrity import STATUS_FAILED, evidence_inputs, verify_evidence
 from core.hashing import hash_file
+from core.progress import report as report_progress
 from core.provenance import build_provenance
 from core.safety import UnsafeEnvironmentError, refuse_root
 from core.schema import ModuleResult
@@ -86,9 +87,9 @@ def no_target_warning(source_type: str | None) -> str:
     GUI's form check, so the two never disagree)."""
     if source_type == "full-memory":
         return (
-            "No --onion/--host: on a full-memory image nothing in memory can be attributed to "
-            "Tor Browser, so the memory section reports observations only, not findings. The "
-            "report names the onion address mentioned most often; re-run with --onion set to it."
+            "No --onion/--host: on a full-memory image nothing in memory is counted as a "
+            "finding. Onion sites with activity in memory are listed as leads, not findings; "
+            "re-run with --onion set to the one under investigation to report it."
         )
     return "No --onion/--host: the memory section's targeted URLs will be empty."
 
@@ -160,6 +161,7 @@ def run_pipeline(
     refuse_root()
     total_steps = len(MODULES) + 1
     started_at = datetime.now(timezone.utc).isoformat()
+    report_progress("checking evidence hashes")
     integrity = verify_evidence(config.evidence_dir, evidence_inputs(module_kwargs))
     print(f"[*] evidence integrity: {integrity['status']} ({integrity['message']})")
     if integrity["status"] == STATUS_FAILED:
@@ -181,6 +183,7 @@ def run_pipeline(
     else:
         results = _run_modules(config, module_kwargs, progress_cb, total_steps)
 
+    report_progress("writing the report")
     findings = build_findings(config, results, integrity=integrity)
     findings["provenance"] = build_provenance(
         module_kwargs, results, config.evidence_dir, started_at
