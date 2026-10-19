@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QMarginsF, Qt, QUrl
+from PySide6.QtCore import QMarginsF, Qt, QUrl, Signal
 from PySide6.QtGui import QPageLayout, QPageSize
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui.history import CaseLeads, case_leads
 from gui.pdf_export import (
     OPEN_ALL_DETAILS_JS,
     RESTORE_DETAILS_JS,
@@ -56,6 +58,9 @@ class _ReportPage(QWebEnginePage):
 
 
 class ReportTab(QWidget):
+    # (case's CaseLeads, the onion picked): set it as the target in the Analyse form.
+    lead_rerun_requested = Signal(object, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._view = QWebEngineView(self)
@@ -102,8 +107,22 @@ class ReportTab(QWidget):
         self._pdf_status = QLabel("", self)
         self._pdf_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._pdf_status.setStyleSheet("color: #8b969c;")
+        # A no-target memory analysis lists onion sites as leads; this re-runs with one.
+        self._leads: CaseLeads | None = None
+        self._lead_picker = QComboBox(self)
+        self._lead_picker.setVisible(False)
+        self._lead_button = QPushButton("Analyse with a lead as target", self)
+        self._lead_button.setVisible(False)
+        self._lead_button.setToolTip(
+            "No target was given, so memory activity is listed as leads, not findings. Pick "
+            "the onion under investigation: the Analyse form is filled in with the same "
+            "evidence and that onion as the target, ready to run."
+        )
+        self._lead_button.clicked.connect(self._rerun_with_lead)
         toolbar = QHBoxLayout()
         toolbar.addWidget(self._pdf_status, 1)
+        toolbar.addWidget(self._lead_picker)
+        toolbar.addWidget(self._lead_button)
         toolbar.addWidget(self._exhibits_button)
         toolbar.addWidget(self._pdf_button)
 
@@ -119,7 +138,20 @@ class ReportTab(QWidget):
 
     def load_report(self, report_path: Path) -> None:
         self._report_html = Path(report_path).resolve()
+        self._set_leads(case_leads(self._report_html))
         self._show(self._report_html)
+
+    def _set_leads(self, leads: CaseLeads | None) -> None:
+        self._leads = leads
+        self._lead_picker.clear()
+        if leads:
+            self._lead_picker.addItems(leads.onions)
+        self._lead_picker.setVisible(bool(leads))
+        self._lead_button.setVisible(bool(leads))
+
+    def _rerun_with_lead(self) -> None:
+        if self._leads and self._lead_picker.currentText():
+            self.lead_rerun_requested.emit(self._leads, self._lead_picker.currentText())
 
     def _toggle_exhibit_list(self) -> None:
         if self._report_html is None:
@@ -201,6 +233,7 @@ class ReportTab(QWidget):
             and case_dir.resolve() in self._current_report_path.parents
         ):
             self._current_report_path = self._report_html = None
+            self._set_leads(None)
             self._exhibits_button.setVisible(False)
             self._pdf_button.setEnabled(False)
             self._pdf_status.setText("")

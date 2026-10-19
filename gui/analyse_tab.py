@@ -315,6 +315,16 @@ class AnalyseTab(QWidget):
         self._options.inputs.set_discovered(self._discovered, folder)
         self._refresh_summary()
 
+    def prepare_lead_rerun(self, leads, onion: str) -> None:
+        """Fill the form to analyse a case again with one of its memory leads as the target:
+        same evidence folder, a new case name (outputs are never overwritten), the onion set.
+        The examiner checks the form and presses Run."""
+        if leads.evidence_dir and Path(leads.evidence_dir).is_dir():
+            self._set_evidence_folder(leads.evidence_dir)
+        self._case_field.setText(f"{leads.case_name}-{onion[:8]}")
+        self._onion_field.setText(onion)
+        self._refresh_summary()
+
     def _refresh_summary(self) -> None:
         request = self._build_request()
         inputs = effective_inputs(request, self._discovered)

@@ -653,6 +653,19 @@ What follows describes the current state.
     the report opens the memory section with a callout naming the most-mentioned onion as a
     re-run command; `main.py` and the GUI warn up front (`main.no_target_warning()`). A
     full-memory image is now *always* host-anchored (username-only no longer turns it off).
+    **Leads (2026-10-19):** with no onion, host or username, the scan anchors to *any* valid v3
+    onion that is not one of Tor Browser's own (`analyzer.BUILTIN_ONIONS`: torproject.org's
+    services, DuckDuckGo, Cloudflare; each ~20x in RAM on the negative control) and
+    `_build_leads()` groups what anchored into `details["leads"]["sites"]` per onion (pages,
+    logins, forms, page titles, searches). Leads are never artifacts. A lead needs a path besides
+    `/` plus a second path or a login/form/title: Defender signature data names ransomware onions
+    with one address each (`/`, `/btRansom:Linux/Filecoder.V!MTB`). The checksum
+    (`module_b_disk.onion.is_v3_onion`) drops address fragments. Measured without a target: C3 ->
+    one lead, the planted site, 8 pages; C4 -> one lead, 43 pages, 2 logins (tessa.maricourt),
+    2 forms, 14 titles; same ~95 s scan. The report says "no target given · N onion sites with
+    activity · M leads" instead of "0 findings"; the GUI Report tab's "Analyse with a lead as
+    target" fills the Analyse form (`gui.history.case_leads`). The NC image is no longer on disk,
+    so NC has not been re-checked with leads.
     **Still open:** with a target given, downloads and cookies are still not anchored, so
     antivirus-signature paths (`c:\users\admin\downloads\…virus.exe`) and `session=`
     PowerShell text remain findings even in the negative control (19 + 5 there). Letter case

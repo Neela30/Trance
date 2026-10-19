@@ -289,7 +289,8 @@ def _limitations(findings: dict) -> list[str]:
     if memory.get("host_anchoring", {}).get("no_target"):
         notes.append(
             "The memory image was analysed without a target onion address or host, so nothing "
-            "in memory is attributed to Tor Browser; memory matches are observations only."
+            "in memory is counted as a finding; onion sites with activity are listed as leads "
+            "chosen by TRANCE, not confirmed by the examiner."
         )
     provenance = findings.get("provenance") or {}
     for item in provenance.get("evidence_items", []):

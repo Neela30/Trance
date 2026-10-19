@@ -31,6 +31,7 @@ class MainWindow(QMainWindow):
         self._analyse_tab.analysis_finished.connect(self._on_analysis_finished)
         self._history_tab.report_requested.connect(self._on_report_requested)
         self._history_tab.case_deleted.connect(self._on_case_deleted)
+        self._report_tab.lead_rerun_requested.connect(self._on_lead_rerun)
 
     def closeEvent(self, event) -> None:
         # Stop a running analysis and unmount any disk image before the window goes;
@@ -47,6 +48,10 @@ class MainWindow(QMainWindow):
     def _on_report_requested(self, report_path: Path) -> None:
         self._report_tab.load_report(report_path)
         self._tabs.setCurrentWidget(self._report_tab)
+
+    def _on_lead_rerun(self, leads, onion: str) -> None:
+        self._analyse_tab.prepare_lead_rerun(leads, onion)
+        self._tabs.setCurrentWidget(self._analyse_tab)
 
     def _on_case_deleted(self, case_dir: Path) -> None:
         self._report_tab.clear_if_showing(case_dir)

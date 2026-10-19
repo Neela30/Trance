@@ -86,9 +86,9 @@ def no_target_warning(source_type: str | None) -> str:
     GUI's form check, so the two never disagree)."""
     if source_type == "full-memory":
         return (
-            "No --onion/--host: on a full-memory image nothing in memory can be attributed to "
-            "Tor Browser, so the memory section reports observations only, not findings. The "
-            "report names the onion address mentioned most often; re-run with --onion set to it."
+            "No --onion/--host: on a full-memory image nothing in memory is counted as a "
+            "finding. Onion sites with activity in memory are listed as leads, not findings; "
+            "re-run with --onion set to the one under investigation to report it."
         )
     return "No --onion/--host: the memory section's targeted URLs will be empty."
 
