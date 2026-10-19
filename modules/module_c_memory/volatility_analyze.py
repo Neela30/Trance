@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.exceptions import AnalysisError
+from core.progress import report as report_progress
 
 # The five plugins this task wires up. windows.psscan and windows.netscan are pool-scan
 # based, so (unlike windows.pslist/windows.netstat) they can still find processes/
@@ -154,7 +155,10 @@ def analyze(
         raise AnalysisError(f"Image not found: {image_path}")
     vol_bin = _resolve_vol_binary(vol_path)
 
-    plugin_results = {plugin: _run_one(vol_bin, image_path, plugin) for plugin in plugins}
+    plugin_results = {}
+    for number, plugin in enumerate(plugins, start=1):
+        report_progress(f"memory: Volatility {plugin} ({number} of {len(plugins)})")
+        plugin_results[plugin] = _run_one(vol_bin, image_path, plugin)
     return {
         "vol_bin": vol_bin,
         "image": str(image_path),

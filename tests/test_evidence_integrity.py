@@ -202,3 +202,16 @@ def test_cli_exits_nonzero_on_tampered_evidence(tmp_path, capsys):
     )
     assert exit_code == 2
     assert "integrity check FAILED" in capsys.readouterr().err
+
+
+def test_hash_check_reports_its_progress(tmp_path, capsys):
+    from core.evidence_integrity import verify_evidence
+    from core.hashing import hash_file
+
+    image = tmp_path / "fullmem.raw"
+    image.write_bytes(b"\x00" * 300_000)
+    (tmp_path / "fullmem.raw.sha256").write_text(f"{hash_file(image)}  fullmem.raw\n")
+
+    assert verify_evidence(tmp_path, [])["status"] == "verified"
+    lines = [x for x in capsys.readouterr().err.splitlines() if "checking evidence hashes" in x]
+    assert lines and lines[-1].startswith("progress: checking evidence hashes 100%")

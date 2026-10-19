@@ -10,11 +10,22 @@ result. No Qt import here; gui.processes owns the Qt side."""
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 PROTOCOL_PREFIX = "@@TRANCE "
+
+# Where the progress bar stands for each long step (core.progress lines on stderr). The memory
+# scan is most of a run (~2 min of ~2.5 on an 8 GB image), so it gets most of the bar.
+BAR_HASH_CHECK = (4, 10)
+BAR_MEMORY_SCAN = (10, 80)
+BAR_VOLATILITY = (80, 88)
+BAR_WRITING = 92
+_HASH_RE = re.compile(r"checking evidence hashes(?: (\d+)%)?")
+_SCAN_RE = re.compile(r"memory scan (\d+)%")
+_VOL_RE = re.compile(r"Volatility \S+ \((\d+) of (\d+)\)")
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -52,6 +63,35 @@ def parse_line(line: str) -> tuple[str, dict | str]:
         except (ValueError, KeyError, AttributeError):
             pass
     return "log", line
+
+
+def parse_activity(line: str) -> tuple[str, int | None] | None:
+    """(text for under the bar, bar percent or None) for a progress line on stderr, or None
+    when the line is ordinary log output. Module B's raw carve redraws "scanned ..." lines."""
+    stripped = line.strip()
+    # The carve redraws its line with a carriage return and no newline, so a progress line
+    # written at that moment arrives glued to the end of it; the progress part wins.
+    if "progress: " in stripped:
+        text = stripped.rsplit("progress: ", 1)[1]
+    elif stripped.startswith("scanned "):
+        return "Disk: " + " ".join(stripped.split()), None
+    else:
+        return None
+    if m := _HASH_RE.match(text):
+        low, high = BAR_HASH_CHECK
+        bar = low + (high - low) * min(int(m.group(1) or 0), 100) // 100
+    elif text == "writing the report":
+        bar = BAR_WRITING
+    elif m := _SCAN_RE.match(text):
+        low, high = BAR_MEMORY_SCAN
+        bar = low + (high - low) * min(int(m.group(1)), 100) // 100
+    elif m := _VOL_RE.search(text):
+        low, high = BAR_VOLATILITY
+        bar = low + (high - low) * (int(m.group(1)) - 1) // max(int(m.group(2)), 1)
+    else:
+        bar = None
+    ongoing = text in ("checking evidence hashes", "writing the report")
+    return text[:1].upper() + text[1:] + "…" * ongoing, bar
 
 
 def summary_from(payload: dict) -> RunSummary:

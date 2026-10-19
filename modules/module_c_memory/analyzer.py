@@ -12,7 +12,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Iterator, Sequence
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl
 
 from core.exceptions import IntegrityError, ParsingError
 from core.hashing import hash_file
+from core.progress import report as report_progress
 from core.schema import Artifact
 from modules.module_b_disk.onion import is_v3_onion
 
@@ -952,14 +953,23 @@ def _run_segments(
     pool = ProcessPoolExecutor(max_workers=min(workers, len(segments) + 1))
     try:
         hash_future = pool.submit(hash_file, dump_path)
-        futures = [pool.submit(_scan_segment, dump_path, a, b, **scan_args) for a, b in segments]
+        futures = {
+            pool.submit(_scan_segment, dump_path, a, b, **scan_args): b - a for a, b in segments
+        }
         sha: str | None = None
-        parts: list[dict] = []
-        for future in futures:
-            parts.append(future.result())
+        scanned = 0
+        # Segments finish in any order; results are put back in offset order below.
+        for future in as_completed(futures):
+            future.result()  # a failed segment stops the run here
+            scanned += futures[future]
+            report_progress(
+                f"memory scan {100 * scanned // size}% "
+                f"({scanned / 1e9:.1f} of {size / 1e9:.1f} GB)"
+            )
             if sha is None and hash_future.done():
                 sha = hash_future.result()
                 _check_sidecar(dump_path, sha)
+        parts = [future.result() for future in futures]
         if sha is None:
             sha = hash_future.result()
     except BaseException:

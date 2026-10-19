@@ -799,8 +799,15 @@ python scripts/score_run.py score --ground-truth ground_truth.json --findings <c
 - `processes.py` — Qt wrappers: `AnalysisProcess` (QProcess, signals, terminate→kill cancel)
   and `MountSession`. Analyse tab order: mount → analyse with `disk_root=<mountpoint>` →
   unmount → show result; also unmounts on failure/cancel/window close.
-- Progress bar: 0–100 with a `QTimer` easing toward the last real checkpoint (25/50/75/100).
-  Honest limitation: there are only 4 real checkpoints; it's visual smoothing.
+- Progress bar: 0–100 with a `QTimer` easing toward the last reported position, never backwards.
+  Positions come from the 4 pipeline checkpoints (a finished registry/disk layer only nudges the
+  bar; all layers done = 90, report written = 100) and from `progress: ...` lines the long steps
+  print on stderr (`core/progress.py`): the integrity hash check (4-10%, per 2% of bytes, via
+  `hash_file(on_chunk=)`), the memory scan (10-80%, per finished segment) and Volatility
+  (80-88%, per plugin). `gui.analysis_runner.parse_activity()` maps a line to (text, bar);
+  Module B's carve redraws its `scanned ...` line with a bare `\r`, so a progress line can arrive
+  glued to it and the parser takes the last `progress:` part. Before 2026-10-20 the bar sat at
+  50% for the whole memory scan (registry and disk finish in seconds).
 - `report_tab.py` — `QWebEngineView` loading the existing `report.html` (paths must be
   resolved to absolute before `QUrl.fromLocalFile`). Locked down via `report_policy.py`
   (Qt-free): JavaScript off, `LocalContentCanAccess{Remote,File}Urls` off, downloads
